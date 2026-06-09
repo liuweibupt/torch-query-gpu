@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-query-gpu"
+version = "0.1.0"
+description = "TQP-style TPC-H query execution prototype from DuckDB Substrait plans to PyTorch tensors"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Wei Liu" }]
+dependencies = [
+  "duckdb>=1.0.0",
+  "torch>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+tpch-torch-gen-sf1 = "scripts.gen_sf1:main"
+tpch-torch-export-q1-substrait = "scripts.export_q1_substrait:main"
+tpch-torch-run-q1 = "scripts.run_q1:main"
+tpch-torch-validate-q1 = "scripts.validate_q1:main"
+
+[tool.setuptools]
+packages = ["tpch_torch", "tpch_torch.queries", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
