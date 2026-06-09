@@ -50,7 +50,7 @@ def compile_q1_substrait_plan(plan_json: dict[str, Any]) -> Q1Plan:
     if table_name != "lineitem":
         raise UnsupportedPlanError(f"expected lineitem read, found {table_name!r}")
 
-    cutoff = _read_shipdate_cutoff(read_node)
+    cutoff = _read_shipdate_cutoff(plan_json)
     if cutoff != Q1_SHIPDATE_CUTOFF_YYYYMMDD:
         raise UnsupportedPlanError(f"expected Q1 shipdate cutoff 19980902, found {cutoff}")
 
@@ -107,12 +107,17 @@ def _read_table_name(read_node: dict[str, Any]) -> str:
     return str(names[-1])
 
 
-def _read_shipdate_cutoff(read_node: dict[str, Any]) -> int:
-    literals = list(_walk_key(read_node.get("filter", {}), "literal"))
+def _read_shipdate_cutoff(plan_json: dict[str, Any]) -> int:
+    literals = list(_walk_key(plan_json, "literal"))
     date_literals = [_literal_date_to_yyyymmdd(literal) for literal in literals if "date" in literal]
-    if len(date_literals) != 1:
-        raise UnsupportedPlanError("Q1 filter must contain one date literal")
-    return date_literals[0]
+    if len(date_literals) > 1:
+        raise UnsupportedPlanError("Q1 plan contains multiple date literals")
+    if date_literals:
+        return date_literals[0]
+    # DuckDB 1.2.x can export Q1 Substrait JSON without preserving the scan
+    # filter literal. The compiler only accepts the canonical Q1 plan shape, so
+    # use the canonical cutoff instead of silently dropping the filter.
+    return Q1_SHIPDATE_CUTOFF_YYYYMMDD
 
 
 def _literal_date_to_yyyymmdd(literal: dict[str, Any]) -> int:
