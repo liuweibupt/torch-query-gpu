@@ -32,6 +32,36 @@ python -m pip install -e '.[dev]'
 timeout 60 python -m pytest -q
 ```
 
+
+## Generic direct SQL path
+
+The generic runner reads SQL directly, asks DuckDB to export a real Substrait
+plan, and dispatches the supported plan shape to PyTorch tensors:
+
+```bash
+tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --json
+tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda
+
+tpch-torch-run --db data/tpch_sf1.duckdb --sql-file path/to/query.sql --device cuda
+tpch-torch-run --db data/tpch_sf1.duckdb --sql "select ..." --device cuda
+```
+
+Pre-exported JSON is only a debugging/caching aid for the legacy Q1 command; the
+generic runner performs SQL -> DuckDB Substrait -> PyTorch in one command.
+
+### TPC-H support matrix
+
+Current DuckDB-exportable queries supported by the PyTorch path are:
+
+```text
+Q1, Q3, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15, Q18, Q19
+```
+
+DuckDB executes Q1-Q22, but DuckDB 1.2.x Substrait export currently fails for
+Q2, Q4, Q16, Q17, and Q20-Q22 with unsupported join forms such as `DELIM_JOIN`
+or `MARK` joins. Those remain explicit `DuckDBSubstraitError` failures rather
+than silent SQL rewrites or DuckDB-result fallbacks.
+
 ## SF1 target flow
 
 ```bash

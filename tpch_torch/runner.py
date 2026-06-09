@@ -112,7 +112,26 @@ def _execute_supported_query(
         from tpch_torch.queries.q06 import execute_q6
 
         return execute_q6(con, device=device)
-    raise UnsupportedPlanError(f"TPC-H Q{query_id} exported to Substrait but has no PyTorch executor yet")
+    executor_by_query = {
+        3: "q03",
+        5: "q05",
+        7: "q07",
+        8: "q08",
+        9: "q09",
+        10: "q10",
+        11: "q11",
+        12: "q12",
+        13: "q13",
+        14: "q14",
+        15: "q15",
+        18: "q18",
+        19: "q19",
+    }
+    module_name = executor_by_query.get(query_id)
+    if module_name is None:
+        raise UnsupportedPlanError(f"TPC-H Q{query_id} exported to Substrait but has no PyTorch executor yet")
+    module = __import__(f"tpch_torch.queries.{module_name}", fromlist=[f"execute_q{query_id}"])
+    return getattr(module, f"execute_q{query_id}")(con, device=device)
 
 
 def _validate_device(device: str) -> None:
