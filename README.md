@@ -91,3 +91,38 @@ validation commands fail with `DuckDBSubstraitError`. This is intentional: the
 project does not silently bypass the SQL -> Substrait stage. You can still run
 `tpch-torch-run-q1 --substrait-json path/to/q1.json` with a previously exported
 real Substrait plan.
+
+## Native DuckDB Substrait policy (B方案)
+
+For the remaining TPC-H gaps, this repository follows the native DuckDB
+Substrait path selected for B方案:
+
+```text
+original SQL / --query N
+  -> DuckDB get_substrait_json(original_sql)
+  -> Substrait plan analysis / dispatch
+  -> PyTorch tensor execution
+```
+
+The runner does **not** rewrite SQL to avoid DuckDB planner limitations, does
+not fabricate Substrait plans, and does not use DuckDB result rows as the
+PyTorch result path. If DuckDB cannot export the original SQL, the command fails
+with `DuckDBSubstraitError`.
+
+Probe the native export state explicitly:
+
+```bash
+tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries all --json
+tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries 2,4,16
+```
+
+As of DuckDB 1.2.x, original TPC-H Q2, Q4, Q16, Q17, Q20, Q21, and Q22 are
+native-export blocked (`DELIM_JOIN` or `MARK` join). If you build or obtain a
+newer native DuckDB Substrait extension, test it without changing SQL by setting:
+
+```bash
+export TQG_SUBSTRAIT_EXTENSION=/path/to/substrait.duckdb_extension
+```
+
+When this variable is set, the bridge loads that exact extension path. Missing
+or unloadable paths are hard errors.

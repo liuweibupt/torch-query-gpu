@@ -97,3 +97,14 @@ tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries all --json
 - No custom Substrait plan generator.
 - No vendored DuckDB C++ build inside this Python repository unless separately requested.
 - No performance optimization until correctness and native Substrait export are established.
+
+## Implementation status
+
+Implemented on branch `feat/operator-expansion-papers`:
+
+- `tpch_torch.capabilities.QueryExportStatus` for explicit native export status.
+- `probe_tpch_substrait_exports` for original-SQL TPC-H export probing.
+- `TQG_SUBSTRAIT_EXTENSION` hook for explicitly loading a local native DuckDB Substrait extension.
+- `tpch-torch-probe-substrait` CLI for visible B方案 capability checks.
+
+The implementation preserves the B方案 policy: no SQL rewrite, no fabricated Substrait, and no DuckDB-result fallback.
