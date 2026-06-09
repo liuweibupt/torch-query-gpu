@@ -50,3 +50,9 @@ tpch-torch-validate-q1 --db data/tpch_sf1.duckdb --device cuda
 
 Use `--device cpu` on machines without CUDA. If `--device cuda` is requested on a
 CPU-only machine, the runner raises an explicit error.
+
+If DuckDB cannot install/load the community `substrait` extension, export and
+validation commands fail with `DuckDBSubstraitError`. This is intentional: the
+project does not silently bypass the SQL -> Substrait stage. You can still run
+`tpch-torch-run-q1 --substrait-json path/to/q1.json` with a previously exported
+real Substrait plan.
