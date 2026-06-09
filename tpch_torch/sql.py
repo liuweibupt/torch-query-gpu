@@ -1,4 +1,8 @@
-"""Canonical SQL text for supported TPC-H queries."""
+"""Canonical SQL text and lookup helpers for supported TPC-H queries."""
+
+from __future__ import annotations
+
+import duckdb
 
 TPC_H_Q1_SQL = """
 select
@@ -17,3 +21,13 @@ where l_shipdate <= date '1998-09-02'
 group by l_returnflag, l_linestatus
 order by l_returnflag, l_linestatus
 """.strip()
+
+
+def get_tpch_query(con: duckdb.DuckDBPyConnection, query_id: int) -> str:
+    """Return TPC-H SQL text from DuckDB's tpch extension."""
+
+    con.execute("load tpch")
+    row = con.execute("select query from tpch_queries() where query_nr = ?", [query_id]).fetchone()
+    if row is None:
+        raise ValueError(f"unknown TPC-H query id: {query_id}")
+    return str(row[0])
