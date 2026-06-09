@@ -55,8 +55,11 @@ def compile_q1_substrait_plan(plan_json: dict[str, Any]) -> Q1Plan:
     if cutoff != Q1_SHIPDATE_CUTOFF_YYYYMMDD:
         raise UnsupportedPlanError(f"expected Q1 shipdate cutoff 19980902, found {cutoff}")
 
-    aggregate_input_columns = _read_aggregate_input_columns(aggregate_node, read_node, read_columns)
-    group_keys = _read_key_names(aggregate_node, aggregate_input_columns, "groupingExpressions")
+    group_keys = _read_key_names(
+        aggregate_node,
+        _read_read_output_columns(read_node, read_columns),
+        "groupingExpressions",
+    )
     if group_keys != Q1_GROUP_KEYS:
         raise UnsupportedPlanError(f"expected Q1 group keys {Q1_GROUP_KEYS}, found {group_keys}")
 
@@ -227,6 +230,6 @@ def _selection_field(selection_expr: dict[str, Any]) -> int:
 
 
 def _struct_item_field(struct_item: dict[str, Any]) -> int:
-    if not isinstance(struct_item, dict) or "field" not in struct_item:
+    if not isinstance(struct_item, dict):
         raise UnsupportedPlanError(f"read projection structItem missing field: {struct_item}")
-    return int(struct_item["field"])
+    return int(struct_item.get("field", 0))

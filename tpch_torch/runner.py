@@ -55,9 +55,9 @@ def load_sql(
 
 def run_sql(con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu") -> QueryResult:
     _validate_device(device)
-    export_substrait_json(con, sql)
+    plan_json = export_substrait_json(con, sql)
     query_id = identify_tpch_query(sql)
-    rows = _execute_supported_query(con, query_id, device)
+    rows = _execute_supported_query(con, query_id, plan_json, device)
     return QueryResult(query_id=query_id, rows=rows)
 
 
@@ -100,9 +100,11 @@ def identify_tpch_query(sql: str) -> int:
     raise UnsupportedPlanError("SQL text does not match a supported TPC-H query shape")
 
 
-def _execute_supported_query(con: duckdb.DuckDBPyConnection, query_id: int, device: str) -> list[dict[str, Any]]:
+def _execute_supported_query(
+    con: duckdb.DuckDBPyConnection, query_id: int, plan_json: dict[str, Any], device: str
+) -> list[dict[str, Any]]:
     if query_id == 1:
-        plan = compile_q1_substrait_plan(export_substrait_json(con, get_tpch_query(con, 1)))
+        plan = compile_q1_substrait_plan(plan_json)
         from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
 
         return execute_q1(fetch_lineitem_tensor_table(con, device=device), plan)
