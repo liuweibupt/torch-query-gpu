@@ -33,6 +33,7 @@ QUERY_MARKERS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (18, ("sum(l_quantity) > 300", "o_totalprice")),
     (19, ("Brand#12", "Brand#23", "Brand#34")),
 )
+SUPPORTED_EXECUTOR_QUERIES: frozenset[int] = frozenset(query_id for query_id, _ in QUERY_MARKERS)
 
 
 def load_sql(
@@ -98,6 +99,10 @@ def identify_tpch_query(sql: str) -> int:
         if all(_normalize_sql(marker) in normalized for marker in markers):
             return query_id
     raise UnsupportedPlanError("SQL text does not match a supported TPC-H query shape")
+
+
+def is_query_executor_supported(query_id: int) -> bool:
+    return query_id in SUPPORTED_EXECUTOR_QUERIES
 
 
 def _execute_supported_query(
