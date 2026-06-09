@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from numbers import Integral
 from typing import Any, Iterable, Mapping
 
 import torch
@@ -108,6 +109,6 @@ def _date_to_yyyymmdd(value: Any) -> int:
         return (value.year * 10_000) + (value.month * 100) + value.day
     if isinstance(value, str):
         return int(value.replace("-", ""))
-    if isinstance(value, int):
-        return value
+    if isinstance(value, Integral):
+        return int(value)
     raise TypeError(f"unsupported date value: {value!r}")
