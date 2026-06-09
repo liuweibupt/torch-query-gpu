@@ -26,6 +26,7 @@ tpch-torch-run-q1 = "scripts.run_q1:main"
 tpch-torch-run = "scripts.run_query:main"
 tpch-torch-validate-q1 = "scripts.validate_q1:main"
 tpch-torch-validate = "scripts.validate_query:main"
+tpch-torch-probe-substrait = "scripts.probe_substrait:main"
 
 [tool.setuptools]
 packages = ["tpch_torch", "tpch_torch.queries", "scripts"]

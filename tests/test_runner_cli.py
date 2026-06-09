@@ -26,3 +26,32 @@ def test_validate_parser_accepts_sql_file(tmp_path):
     args = validate_parser().parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--sql-file", str(sql_path)])
 
     assert args.sql_file == sql_path
+
+from scripts.probe_substrait import build_parser as probe_parser
+
+
+def test_probe_parser_accepts_all_queries_json(tmp_path):
+    db_path = tmp_path / "tpch.duckdb"
+
+    args = probe_parser().parse_args(["--db", str(db_path), "--queries", "all", "--json"])
+
+    assert args.db == db_path
+    assert args.queries == "all"
+    assert args.json is True
+
+
+def test_probe_parser_accepts_query_list(tmp_path):
+    db_path = tmp_path / "tpch.duckdb"
+
+    args = probe_parser().parse_args(["--db", str(db_path), "--queries", "2,4,16"])
+
+    assert args.db == db_path
+    assert args.queries == "2,4,16"
+    assert args.json is False
+
+from scripts.probe_substrait import parse_query_ids
+
+
+def test_parse_probe_query_ids_all_and_list():
+    assert parse_query_ids("all") == tuple(range(1, 23))
+    assert parse_query_ids("2,4,16") == (2, 4, 16)
