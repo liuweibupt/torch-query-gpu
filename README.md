@@ -51,6 +51,11 @@ tpch-torch-validate-q1 --db data/tpch_sf1.duckdb --device cuda
 Use `--device cpu` on machines without CUDA. If `--device cuda` is requested on a
 CPU-only machine, the runner raises an explicit error.
 
+Validation compares floating point aggregates with an absolute tolerance. The
+default tolerance is `1e-2`, which covers the small accumulation-order
+differences between DuckDB decimals and PyTorch tensor reductions at SF1. Use
+`--tolerance` to make the check stricter or looser.
+
 If DuckDB cannot install/load the community `substrait` extension, export and
 validation commands fail with `DuckDBSubstraitError`. This is intentional: the
 project does not silently bypass the SQL -> Substrait stage. You can still run

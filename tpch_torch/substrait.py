@@ -19,6 +19,7 @@ Q1_GROUP_KEYS = ("l_returnflag", "l_linestatus")
 Q1_ORDER_KEYS = ("l_returnflag", "l_linestatus")
 Q1_SHIPDATE_CUTOFF_YYYYMMDD = 19980902
 SUBSTRAIT_DATE_EPOCH = date(1970, 1, 1)
+PROJECT_EXPRESSION_PREFIX = "__project_expr_"
 
 
 class UnsupportedPlanError(ValueError):
@@ -43,8 +44,8 @@ def compile_q1_substrait_plan(plan_json: dict[str, Any]) -> Q1Plan:
     aggregate_node = _find_single_node(plan_json, "aggregate")
     sort_node = _find_single_node(plan_json, "sort")
 
-    columns = tuple(read_node.get("baseSchema", {}).get("names", ()))
-    _require_columns(columns)
+    read_columns = tuple(read_node.get("baseSchema", {}).get("names", ()))
+    _require_columns(read_columns)
 
     table_name = _read_table_name(read_node)
     if table_name != "lineitem":
@@ -54,11 +55,12 @@ def compile_q1_substrait_plan(plan_json: dict[str, Any]) -> Q1Plan:
     if cutoff != Q1_SHIPDATE_CUTOFF_YYYYMMDD:
         raise UnsupportedPlanError(f"expected Q1 shipdate cutoff 19980902, found {cutoff}")
 
-    group_keys = _read_key_names(aggregate_node, columns, "groupingExpressions")
+    aggregate_input_columns = _read_aggregate_input_columns(aggregate_node, read_node, read_columns)
+    group_keys = _read_key_names(aggregate_node, aggregate_input_columns, "groupingExpressions")
     if group_keys != Q1_GROUP_KEYS:
         raise UnsupportedPlanError(f"expected Q1 group keys {Q1_GROUP_KEYS}, found {group_keys}")
 
-    order_keys = _read_sort_key_names(sort_node, columns)
+    order_keys = _read_sort_key_names(sort_node, _read_root_output_columns(plan_json))
     if order_keys != Q1_ORDER_KEYS:
         raise UnsupportedPlanError(f"expected Q1 order keys {Q1_ORDER_KEYS}, found {order_keys}")
 
@@ -98,6 +100,63 @@ def _require_columns(columns: tuple[str, ...]) -> None:
     missing = [name for name in Q1_REQUIRED_COLUMNS if name not in columns]
     if missing:
         raise UnsupportedPlanError(f"lineitem read missing required columns: {missing}")
+
+
+def _read_aggregate_input_columns(
+    aggregate_node: dict[str, Any], read_node: dict[str, Any], read_columns: tuple[str, ...]
+) -> tuple[str, ...]:
+    read_output_columns = _read_read_output_columns(read_node, read_columns)
+    aggregate_input = aggregate_node.get("input", {})
+    if not isinstance(aggregate_input, dict):
+        raise UnsupportedPlanError("Q1 aggregate input is not an object")
+    project_node = aggregate_input.get("project")
+    if project_node is None:
+        return read_output_columns
+    if not isinstance(project_node, dict):
+        raise UnsupportedPlanError("Q1 aggregate input project is not an object")
+    return _read_project_output_columns(project_node, read_output_columns)
+
+
+def _read_read_output_columns(
+    read_node: dict[str, Any], read_columns: tuple[str, ...]
+) -> tuple[str, ...]:
+    projection = read_node.get("projection")
+    if projection is None:
+        return read_columns
+    if not isinstance(projection, dict):
+        raise UnsupportedPlanError("read projection is not an object")
+    struct_items = projection.get("select", {}).get("structItems", [])
+    if not struct_items:
+        return read_columns
+    return tuple(read_columns[_struct_item_field(item)] for item in struct_items)
+
+
+def _read_project_output_columns(
+    project_node: dict[str, Any], input_columns: tuple[str, ...]
+) -> tuple[str, ...]:
+    expressions = project_node.get("expressions", [])
+    if not expressions:
+        return input_columns
+    return tuple(
+        _read_project_expression_name(expression, input_columns, index)
+        for index, expression in enumerate(expressions)
+    )
+
+
+def _read_project_expression_name(
+    expression: dict[str, Any], input_columns: tuple[str, ...], index: int
+) -> str:
+    if "selection" in expression:
+        return input_columns[_selection_field(expression)]
+    return f"{PROJECT_EXPRESSION_PREFIX}{index}"
+
+
+def _read_root_output_columns(plan_json: dict[str, Any]) -> tuple[str, ...]:
+    root_node = _find_single_node(plan_json, "root")
+    names = tuple(root_node.get("names", ()))
+    if not names:
+        raise UnsupportedPlanError("Q1 root must contain output names to validate sort keys")
+    return names
 
 
 def _read_table_name(read_node: dict[str, Any]) -> str:
@@ -155,7 +214,19 @@ def _read_sort_key_names(sort_node: dict[str, Any], columns: tuple[str, ...]) ->
 
 
 def _selection_field(selection_expr: dict[str, Any]) -> int:
-    fields = list(_walk_key(selection_expr, "structField"))
-    if len(fields) != 1:
-        raise UnsupportedPlanError(f"expected one structField in selection, found {fields}")
-    return int(fields[0].get("field", 0))
+    selection = selection_expr.get("selection")
+    if not isinstance(selection, dict):
+        raise UnsupportedPlanError(f"expected selection expression, found {selection_expr}")
+    direct_reference = selection.get("directReference", {})
+    if not isinstance(direct_reference, dict):
+        raise UnsupportedPlanError(f"selection directReference is not an object: {selection_expr}")
+    struct_field = direct_reference.get("structField")
+    if not isinstance(struct_field, dict):
+        raise UnsupportedPlanError(f"selection does not contain structField: {selection_expr}")
+    return int(struct_field.get("field", 0))
+
+
+def _struct_item_field(struct_item: dict[str, Any]) -> int:
+    if not isinstance(struct_item, dict) or "field" not in struct_item:
+        raise UnsupportedPlanError(f"read projection structItem missing field: {struct_item}")
+    return int(struct_item["field"])

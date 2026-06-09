@@ -81,6 +81,163 @@ Q1_PLAN_JSON = {
 }
 
 
+DUCKDB_PROJECTED_Q1_PLAN_JSON = {
+    "relations": [
+        {
+            "root": {
+                "input": {
+                    "sort": {
+                        "input": {
+                            "project": {
+                                "input": {
+                                    "aggregate": {
+                                        "input": {
+                                            "project": {
+                                                "expressions": [
+                                                    {
+                                                        "selection": {
+                                                            "directReference": {
+                                                                "structField": {}
+                                                            }
+                                                        }
+                                                    },
+                                                    {
+                                                        "selection": {
+                                                            "directReference": {
+                                                                "structField": {"field": 1}
+                                                            }
+                                                        }
+                                                    },
+                                                    {
+                                                        "selection": {
+                                                            "directReference": {
+                                                                "structField": {"field": 2}
+                                                            }
+                                                        }
+                                                    },
+                                                ],
+                                                "input": {
+                                                    "read": {
+                                                        "baseSchema": {
+                                                            "names": [
+                                                                "l_orderkey",
+                                                                "l_partkey",
+                                                                "l_suppkey",
+                                                                "l_linenumber",
+                                                                "l_quantity",
+                                                                "l_extendedprice",
+                                                                "l_discount",
+                                                                "l_tax",
+                                                                "l_returnflag",
+                                                                "l_linestatus",
+                                                                "l_shipdate",
+                                                            ]
+                                                        },
+                                                        "filter": {
+                                                            "scalarFunction": {
+                                                                "arguments": [
+                                                                    {
+                                                                        "value": {
+                                                                            "selection": {
+                                                                                "directReference": {
+                                                                                    "structField": {
+                                                                                        "field": 10
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    {
+                                                                        "value": {
+                                                                            "literal": {"date": 10471}
+                                                                        }
+                                                                    },
+                                                                ]
+                                                            }
+                                                        },
+                                                        "namedTable": {"names": ["lineitem"]},
+                                                        "projection": {
+                                                            "select": {
+                                                                "structItems": [
+                                                                    {"field": 8},
+                                                                    {"field": 9},
+                                                                    {"field": 4},
+                                                                    {"field": 5},
+                                                                    {"field": 6},
+                                                                    {"field": 7},
+                                                                    {"field": 10},
+                                                                ]
+                                                            }
+                                                        },
+                                                    }
+                                                },
+                                            }
+                                        },
+                                        "groupings": [
+                                            {
+                                                "groupingExpressions": [
+                                                    {
+                                                        "selection": {
+                                                            "directReference": {
+                                                                "structField": {}
+                                                            }
+                                                        }
+                                                    },
+                                                    {
+                                                        "selection": {
+                                                            "directReference": {
+                                                                "structField": {"field": 1}
+                                                            }
+                                                        }
+                                                    },
+                                                ]
+                                            }
+                                        ],
+                                    }
+                                },
+                                "expressions": [
+                                    {
+                                        "selection": {
+                                            "directReference": {"structField": {}}
+                                        }
+                                    },
+                                    {
+                                        "selection": {
+                                            "directReference": {
+                                                "structField": {"field": 1}
+                                            }
+                                        }
+                                    },
+                                ],
+                            }
+                        },
+                        "sorts": [
+                            {
+                                "expr": {
+                                    "selection": {
+                                        "directReference": {"structField": {}}
+                                    }
+                                }
+                            },
+                            {
+                                "expr": {
+                                    "selection": {
+                                        "directReference": {
+                                            "structField": {"field": 1}
+                                        }
+                                    }
+                                }
+                            },
+                        ],
+                    }
+                },
+                "names": ["l_returnflag", "l_linestatus"],
+            }
+        }
+    ],
+}
+
+
 def test_tpch_q1_sql_has_required_semantics():
     normalized = " ".join(TPC_H_Q1_SQL.lower().split())
 
@@ -106,6 +263,15 @@ def test_compile_q1_substrait_plan_validates_required_nodes():
         "l_tax",
         "l_shipdate",
     )
+
+
+def test_compile_q1_substrait_plan_resolves_duckdb_read_projection_fields():
+    plan = compile_q1_substrait_plan(DUCKDB_PROJECTED_Q1_PLAN_JSON)
+
+    assert plan.table_name == "lineitem"
+    assert plan.shipdate_cutoff_yyyymmdd == 19980902
+    assert plan.group_keys == ("l_returnflag", "l_linestatus")
+    assert plan.order_keys == ("l_returnflag", "l_linestatus")
 
 
 def test_compile_q1_substrait_plan_rejects_missing_aggregate():

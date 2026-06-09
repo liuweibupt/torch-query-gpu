@@ -10,12 +10,19 @@ import torch
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.validate import validate_q1
 
+DEFAULT_Q1_TOLERANCE = 1e-2
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate PyTorch Q1 against DuckDB")
     parser.add_argument("--db", type=Path, required=True, help="Input DuckDB database path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
-    parser.add_argument("--tolerance", type=float, default=1e-6, help="Max absolute numeric error")
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_Q1_TOLERANCE,
+        help="Max absolute numeric error",
+    )
     return parser
 
 
