@@ -1,6 +1,6 @@
 import duckdb
 
-from tpch_torch.duckdb_bridge import create_lineitem_fixture
+from tpch_torch.duckdb_bridge import create_lineitem_fixture, generate_tpch
 from tpch_torch.runner import load_sql, run_sql, validate_sql
 from tpch_torch.sql import TPC_H_Q1_SQL
 
@@ -48,3 +48,22 @@ def test_load_sql_requires_exactly_one_source(tmp_path):
     sql_file = tmp_path / "q.sql"
     sql_file.write_text("select 1")
     assert load_sql(con, sql_file=sql_file) == "select 1"
+
+
+def test_validate_sql_compares_q6_with_duckdb_baseline():
+    con = duckdb.connect()
+    generate_tpch(con, scale_factor=0.01)
+    sql = """
+        select sum(l_extendedprice * l_discount) as revenue
+        from lineitem
+        where l_shipdate >= date '1994-01-01'
+          and l_shipdate < date '1995-01-01'
+          and l_discount between 0.05 and 0.07
+          and l_quantity < 24
+    """
+
+    result = validate_sql(con, sql, device="cpu")
+
+    assert result.query_id == 6
+    assert result.row_count == 1
+    assert result.max_abs_error < 1e-6
