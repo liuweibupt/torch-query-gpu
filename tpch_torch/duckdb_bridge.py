@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -117,6 +118,18 @@ def run_duckdb_q1(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
 
 
 def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:
+    extension_path = os.environ.get("TQG_SUBSTRAIT_EXTENSION")
+    if extension_path:
+        path = Path(extension_path)
+        if not path.exists():
+            raise DuckDBSubstraitError(f"TQG_SUBSTRAIT_EXTENSION does not exist: {path}")
+        try:
+            con.load_extension(str(path))
+        except duckdb.Error as exc:
+            raise DuckDBSubstraitError(
+                f"failed to load TQG_SUBSTRAIT_EXTENSION {path}: {exc}"
+            ) from exc
+        return
     try:
         con.install_extension("substrait", repository="community")
         con.load_extension("substrait")

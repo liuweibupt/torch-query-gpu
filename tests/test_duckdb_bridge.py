@@ -120,3 +120,41 @@ def test_export_substrait_json_uses_duckdb_extension_or_reports_unavailable():
     assert isinstance(plan_json, dict)
     assert "relations" in plan_json
     json.dumps(plan_json)
+
+
+def test_export_substrait_json_reports_missing_explicit_extension(monkeypatch, tmp_path):
+    missing_extension = tmp_path / "missing_substrait.duckdb_extension"
+    monkeypatch.setenv("TQG_SUBSTRAIT_EXTENSION", str(missing_extension))
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+
+    with pytest.raises(DuckDBSubstraitError) as exc_info:
+        export_substrait_json(con)
+
+    message = str(exc_info.value)
+    assert "TQG_SUBSTRAIT_EXTENSION" in message
+    assert str(missing_extension) in message
+
+
+def test_load_substrait_extension_uses_default_install_when_env_unset(monkeypatch):
+    from tpch_torch import duckdb_bridge
+
+    class RecordingConnection:
+        def __init__(self):
+            self.calls = []
+
+        def install_extension(self, name, repository=None):
+            self.calls.append(("install_extension", name, repository))
+
+        def load_extension(self, name):
+            self.calls.append(("load_extension", name))
+
+    monkeypatch.delenv("TQG_SUBSTRAIT_EXTENSION", raising=False)
+    con = RecordingConnection()
+
+    duckdb_bridge._load_substrait_extension(con)
+
+    assert con.calls == [
+        ("install_extension", "substrait", "community"),
+        ("load_extension", "substrait"),
+    ]
