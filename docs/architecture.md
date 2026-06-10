@@ -29,7 +29,8 @@ Frontend admission and backend execution are intentionally separate. The
 Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
 PyTorch backend executes all TPC-H Q1-Q22 templates plus an explicit generic SQL
 subset: single-table `SELECT`, simple `WHERE`, arithmetic projections,
-`COUNT(*)`, `SUM(col)`, simple `GROUP BY`, `ORDER BY`, and `LIMIT`. Unsupported
+`COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`, `AVG`, simple `GROUP BY`,
+`ORDER BY` with `ASC`/`DESC`, `IN`, `LIKE`, `AND`, `OR`, `NOT`, and `LIMIT`. Unsupported
 generic operators raise `UnsupportedPlanError`.
 
 ## Runtime entrypoints
@@ -293,11 +294,11 @@ Generic SQL subset supported by the PyTorch backend:
 
 ```text
 single-table SELECT
-WHERE with simple comparisons combined by AND
+WHERE with comparisons, IN, LIKE, AND, OR, and NOT
 column projection and column * constant projection
-COUNT(*) and SUM(column)
+COUNT(*), COUNT(column), SUM, MIN, MAX, and AVG
 simple GROUP BY
-ORDER BY output columns
+ORDER BY output columns with ASC/DESC
 LIMIT
 ```
 

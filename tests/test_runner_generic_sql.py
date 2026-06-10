@@ -49,3 +49,23 @@ def test_run_sql_reports_backend_unsupported_generic_join():
 
     with pytest.raises(UnsupportedPlanError, match="generic SQL is not executable by PyTorch backend"):
         run_sql(con, "select * from t join u on t.id = u.id", device="cpu")
+
+
+def test_validate_sql_accepts_generic_extended_batch2_query():
+    con = duckdb.connect()
+    con.execute("create table t(a integer, b double, c varchar)")
+    con.execute("insert into t values (1, 1.5, 'x'), (1, 2.5, 'y'), (2, 3.0, 'z')")
+    sql = """
+        select a, min(b) as lo, max(b) as hi, avg(b) as mean_b, count(c) as c_count
+        from t
+        where not a = 1 or c in ('x', 'z') and c like 'z%'
+        group by a
+        order by a desc
+    """
+
+    result = validate_sql(con, sql, device="cpu")
+
+    assert result.query_id is None
+    assert result.row_count == 1
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [{"a": 2, "lo": 3.0, "hi": 3.0, "mean_b": 3.0, "c_count": 1}]

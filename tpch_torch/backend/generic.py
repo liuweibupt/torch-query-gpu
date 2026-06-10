@@ -10,7 +10,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.generic_sql import GenericFilter, GenericProjection, GenericSQLPlan
+from tpch_torch.generic_sql import GenericFilter, GenericOrderBy, GenericProjection, GenericSQLPlan
 from tpch_torch.relational import decode
 from tpch_torch.storage import TensorTable
 from tpch_torch.errors import UnsupportedPlanError
@@ -97,16 +97,33 @@ def _first_table_column(con: duckdb.DuckDBPyConnection, table: str) -> str:
     return str(row[1])
 
 
-def _filter_mask(table: TensorTable, filters: tuple[GenericFilter, ...]) -> torch.Tensor:
+def _filter_mask(table: TensorTable, filters: GenericFilter | None) -> torch.Tensor:
     row_count = len(table)
     device = next(iter(table.columns.values())).device
-    mask = torch.ones(row_count, dtype=torch.bool, device=device)
-    for filter_ in filters:
-        mask &= _evaluate_filter(table, filter_)
-    return mask
+    if filters is None:
+        return torch.ones(row_count, dtype=torch.bool, device=device)
+    return _evaluate_filter(table, filters)
 
 
 def _evaluate_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor:
+    if filter_.kind == "and":
+        masks = tuple(_evaluate_filter(table, child) for child in filter_.children)
+        result = masks[0]
+        for mask in masks[1:]:
+            result = torch.logical_and(result, mask)
+        return result
+    if filter_.kind == "or":
+        masks = tuple(_evaluate_filter(table, child) for child in filter_.children)
+        result = masks[0]
+        for mask in masks[1:]:
+            result = torch.logical_or(result, mask)
+        return result
+    if filter_.kind == "not":
+        return torch.logical_not(_evaluate_filter(table, filter_.children[0]))
+    if filter_.kind == "in":
+        return _evaluate_in_filter(table, filter_)
+    if filter_.kind == "like":
+        return _evaluate_like_filter(table, filter_)
     values = table.columns[filter_.column]
     literal = _literal_tensor(table, filter_.column, filter_.value)
     if filter_.operator == "=":
@@ -122,6 +139,30 @@ def _evaluate_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor
     if filter_.operator == "<=":
         return values <= literal
     raise UnsupportedPlanError(f"generic SQL filter operator is not supported: {filter_.operator}")
+
+
+def _evaluate_in_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor:
+    values = table.columns[filter_.column]
+    mask = torch.zeros(values.shape, dtype=torch.bool, device=values.device)
+    for value in filter_.values:
+        mask = torch.logical_or(mask, values == _literal_tensor(table, filter_.column, value))
+    return mask
+
+
+def _evaluate_like_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor:
+    if not isinstance(filter_.value, str):
+        raise UnsupportedPlanError("generic SQL LIKE requires a string literal")
+    if filter_.column not in table.dictionaries:
+        raise UnsupportedPlanError("generic SQL LIKE is only supported for string columns")
+    pattern = filter_.value
+    vocabulary = table.dictionaries[filter_.column]
+    matching_ids = [
+        index for index, item in enumerate(vocabulary) if _matches_like_pattern(item, pattern)
+    ]
+    if not matching_ids:
+        return torch.zeros(table.columns[filter_.column].shape, dtype=torch.bool, device=table.columns[filter_.column].device)
+    accepted = torch.tensor(matching_ids, dtype=table.columns[filter_.column].dtype, device=table.columns[filter_.column].device)
+    return torch.isin(table.columns[filter_.column], accepted)
 
 
 def _literal_tensor(table: TensorTable, column: str, value: int | float | str) -> torch.Tensor:
@@ -199,16 +240,32 @@ def _evaluate_projection(table: TensorTable, projection: GenericProjection, inde
 def _evaluate_aggregate(table: TensorTable, projection: GenericProjection, mask: torch.Tensor) -> Any:
     if projection.kind == "count_star":
         return int(mask.sum().cpu().item())
+    if projection.kind == "count" and projection.column is not None:
+        return int(mask.sum().cpu().item())
     if projection.kind == "sum" and projection.column is not None:
         return float(table.columns[projection.column][mask].sum().cpu().item())
+    if projection.kind == "min" and projection.column is not None:
+        return float(table.columns[projection.column][mask].min().cpu().item())
+    if projection.kind == "max" and projection.column is not None:
+        return float(table.columns[projection.column][mask].max().cpu().item())
+    if projection.kind == "avg" and projection.column is not None:
+        return float(table.columns[projection.column][mask].mean().cpu().item())
     raise UnsupportedPlanError(f"generic SQL aggregate is not supported: {projection.kind}")
 
 
 def _evaluate_group_aggregate(table: TensorTable, projection: GenericProjection, indices: torch.Tensor) -> Any:
     if projection.kind == "count_star":
         return int(indices.numel())
+    if projection.kind == "count" and projection.column is not None:
+        return int(indices.numel())
     if projection.kind == "sum" and projection.column is not None:
         return float(table.columns[projection.column][indices].sum().cpu().item())
+    if projection.kind == "min" and projection.column is not None:
+        return float(table.columns[projection.column][indices].min().cpu().item())
+    if projection.kind == "max" and projection.column is not None:
+        return float(table.columns[projection.column][indices].max().cpu().item())
+    if projection.kind == "avg" and projection.column is not None:
+        return float(table.columns[projection.column][indices].mean().cpu().item())
     raise UnsupportedPlanError(f"generic SQL grouped projection is not supported: {projection.kind}")
 
 
@@ -222,13 +279,16 @@ def _decode_cell(table: TensorTable, column: str, index: int) -> Any:
 
 
 def _is_scalar_aggregate(projections: tuple[GenericProjection, ...]) -> bool:
-    return all(projection.kind in {"count_star", "sum"} for projection in projections)
+    return all(projection.kind in {"count_star", "count", "sum", "min", "max", "avg"} for projection in projections)
 
 
-def _sort_rows(rows: list[dict[str, Any]], order_by: tuple[str, ...]) -> list[dict[str, Any]]:
+def _sort_rows(rows: list[dict[str, Any]], order_by: tuple[GenericOrderBy, ...]) -> list[dict[str, Any]]:
     if not order_by:
         return rows
-    return sorted(rows, key=lambda row: tuple(row[column] for column in order_by))
+    sorted_rows = rows
+    for item in reversed(order_by):
+        sorted_rows = sorted(sorted_rows, key=lambda row: row[item.column], reverse=item.descending)
+    return sorted_rows
 
 
 def _date_to_yyyymmdd(value: Any) -> int:
@@ -241,3 +301,15 @@ def _date_to_yyyymmdd(value: Any) -> int:
     if isinstance(value, Integral):
         return int(value)
     raise TypeError(f"unsupported date value: {value!r}")
+
+
+def _matches_like_pattern(value: str, pattern: str) -> bool:
+    if pattern == "%":
+        return True
+    if pattern.startswith("%") and pattern.endswith("%"):
+        return pattern[1:-1] in value
+    if pattern.startswith("%"):
+        return value.endswith(pattern[1:])
+    if pattern.endswith("%"):
+        return value.startswith(pattern[:-1])
+    return value == pattern

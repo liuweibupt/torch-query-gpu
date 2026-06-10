@@ -51,3 +51,38 @@ def test_generic_backend_executes_string_filter_and_projection():
     )
 
     assert rows == [{"c": "y"}]
+
+
+def test_generic_backend_executes_extended_scalar_aggregates():
+    sql = "select min(b) as lo, max(b) as hi, avg(b) as mean_b, count(c) as c_count from t"
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [{"lo": 1.5, "hi": 3.0, "mean_b": 7.0 / 3.0, "c_count": 3}]
+
+
+def test_generic_backend_executes_extended_grouped_aggregates():
+    sql = "select a, min(b) as lo, max(b) as hi, avg(b) as mean_b, count(c) as c_count from t group by a order by a"
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [
+        {"a": 1, "lo": 1.5, "hi": 2.5, "mean_b": 2.0, "c_count": 2},
+        {"a": 2, "lo": 3.0, "hi": 3.0, "mean_b": 3.0, "c_count": 1},
+    ]
+
+
+def test_generic_backend_executes_in_like_or_not_filters():
+    sql = "select c from t where not a = 1 or c in ('x', 'z') and c like 'z%' order by c"
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [{"c": "z"}]
+
+
+def test_generic_backend_executes_descending_order_by_with_limit():
+    sql = "select a, b from t order by b desc limit 2"
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [{"a": 2, "b": 3.0}, {"a": 1, "b": 2.5}]

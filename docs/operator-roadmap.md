@@ -69,10 +69,10 @@ until a readable full paper/appendix is available.
 
 - [x] Columnar tensor table representation for plain columns.
 - [x] Bitmap-style filter masks for current TPC-H executors.
-- [ ] Generic expression tree IR instead of query-template Python expressions.
-- [ ] Generic selection operator supporting bitmap and index output forms.
+- [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
+- [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
 - [ ] Generic projection operator with expression-tree lowering.
-- [ ] Generic sort operator with stable ordering and multi-key ordering.
+- [x] First Batch 2 step: generic stable multi-key `ORDER BY` with `ASC`/`DESC`.
 - [ ] Generic sort-based equi-join using sort, histograms, prefix sums,
       `bucketize`, quotient/remainder output-index generation.
 - [ ] Generic hash equi-join using hash buckets, scatter, probe, collision
@@ -299,12 +299,16 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [x] RLE mask container and first primitives: `plain_to_rle`, `rle_to_index`,
       `range_intersect`, `range_union`, `complement_rle`.
 
-### Batch 2: generic SQL expression and aggregate expansion
+### Batch 2: generic SQL expression and aggregate expansion — in progress
 
-- [ ] Expression tree IR for arithmetic/comparison/logical/date/string operators.
-- [ ] Generic `MIN`, `MAX`, `AVG`, `COUNT(col)`, and basic `HAVING`.
-- [ ] Generic `IN`, `LIKE`, `CASE`, OR, and NOT.
-- [ ] Multi-key order-by/top-k and DESC/ASC handling.
+- [x] Boolean filter expression tree for comparison/`IN`/`LIKE` with `AND`/`OR`/`NOT`.
+- [ ] Full arithmetic/date/string expression tree beyond filters.
+- [x] Generic `MIN`, `MAX`, `AVG`, and `COUNT(col)`.
+- [ ] Basic `HAVING`.
+- [x] Generic `IN`, `LIKE`, `OR`, and `NOT`.
+- [ ] Generic `CASE`.
+- [x] Multi-key order-by and DESC/ASC handling.
+- [ ] Tensor top-k integration for `ORDER BY ... LIMIT`.
 
 ### Batch 3: generic joins and subquery lowering
 
