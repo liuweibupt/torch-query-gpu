@@ -47,6 +47,10 @@ def test_parse_validate_query_ids_list():
     assert parse_validate_query_ids("1,3,5,6") == (1, 3, 5, 6)
 
 
+def test_parse_validate_query_ids_all():
+    assert parse_validate_query_ids("all") == tuple(range(1, 23))
+
+
 def test_validate_parser_rejects_query_and_queries_together(tmp_path):
     parser = validate_parser()
 

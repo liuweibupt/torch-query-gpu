@@ -13,6 +13,9 @@ from tpch_torch.runner import PlanSource, load_sql, validate_sql_with_plan_sourc
 from tpch_torch.sql import get_tpch_query
 
 DEFAULT_SQL_TOLERANCE = 1e-2
+FIRST_TPCH_QUERY_ID = 1
+LAST_TPCH_QUERY_ID = 22
+ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
 QueryValidator = Callable[[object, str, str, PlanSource], SQLValidationResult]
 
@@ -47,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_query_ids(raw: str) -> tuple[int, ...]:
+    if raw == "all":
+        return ALL_TPCH_QUERY_IDS
     query_ids = tuple(int(item) for item in raw.split(",") if item)
     if not query_ids:
         raise ValueError("at least one query id is required")
