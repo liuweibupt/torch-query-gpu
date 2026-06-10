@@ -29,3 +29,19 @@ def test_pytorch_backend_rejects_unknown_query_id():
 
     with pytest.raises(UnsupportedPlanError, match="TPC-H Q99"):
         PyTorchBackend().execute(duckdb.connect(), plan, device="cpu")
+
+
+def test_pytorch_backend_executes_generic_tqp_plan():
+    from tpch_torch.generic_sql import parse_generic_sql
+
+    con = duckdb.connect()
+    con.execute("create table t(a integer)")
+    con.execute("insert into t values (1), (2)")
+    plan = TQPPlan(
+        query_id=None,
+        source_sql="select count(*) as n from t",
+        frontend="sirius",
+        generic_plan=parse_generic_sql("select count(*) as n from t"),
+    )
+
+    assert PyTorchBackend().execute(con, plan, device="cpu") == [{"n": 2}]

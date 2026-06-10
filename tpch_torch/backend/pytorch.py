@@ -6,6 +6,7 @@ from typing import Any
 
 import duckdb
 
+from tpch_torch.backend.generic import execute_generic_sql_plan
 from tpch_torch.ir import TQPPlan
 from tpch_torch.queries.q01 import execute_q1
 from tpch_torch.substrait import UnsupportedPlanError, compile_q1_substrait_plan
@@ -22,6 +23,10 @@ class PyTorchBackend:
     """Execute internal TQP plans with existing PyTorch tensor query kernels."""
 
     def execute(self, con: duckdb.DuckDBPyConnection, plan: TQPPlan, device: str = "cpu") -> list[dict[str, Any]]:
+        if plan.query_id is None:
+            if plan.generic_plan is None:
+                raise UnsupportedPlanError("generic SQL plan is missing executable operator plan")
+            return execute_generic_sql_plan(con, plan.generic_plan, device=device)
         if plan.query_id == 1:
             q1_plan = _compile_q1_plan(plan.plan_json)
             from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
