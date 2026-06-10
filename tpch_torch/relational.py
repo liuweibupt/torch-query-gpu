@@ -76,7 +76,7 @@ DATE_COLUMNS_EXTENDED = DATE_COLUMNS | frozenset({"o_orderdate"})
 class QueryResult:
     """Rows produced by a supported PyTorch query executor."""
 
-    query_id: int
+    query_id: int | None
     rows: list[dict[str, Any]]
 
 
@@ -84,7 +84,7 @@ class QueryResult:
 class SQLValidationResult:
     """Summary of a DuckDB-vs-PyTorch SQL comparison."""
 
-    query_id: int
+    query_id: int | None
     row_count: int
     max_abs_error: float
     duckdb_rows: list[dict[str, Any]]

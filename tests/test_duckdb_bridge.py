@@ -1,3 +1,4 @@
+import inspect
 import json
 
 import duckdb
@@ -9,31 +10,9 @@ from tpch_torch.duckdb_bridge import (
     create_lineitem_fixture,
     export_substrait_json,
     fetch_lineitem_tensor_table,
-    run_duckdb_q1,
 )
-from tpch_torch.substrait import Q1Plan
-from tpch_torch.validate import validate_q1
-
-
-
-
-def q1_fixture_plan() -> Q1Plan:
-    return Q1Plan(
-        table_name="lineitem",
-        shipdate_cutoff_yyyymmdd=19980902,
-        required_columns=(
-            "l_returnflag",
-            "l_linestatus",
-            "l_quantity",
-            "l_extendedprice",
-            "l_discount",
-            "l_tax",
-            "l_shipdate",
-        ),
-        group_keys=("l_returnflag", "l_linestatus"),
-        order_keys=("l_returnflag", "l_linestatus"),
-    )
-
+from tpch_torch.relational import run_duckdb_sql
+from tpch_torch.sql import TPC_H_Q1_SQL
 
 FIXTURE_ROWS = [
     ("N", "O", 10.0, 100.0, 0.05, 0.10, "1998-09-02"),
@@ -54,11 +33,11 @@ def test_fetch_lineitem_tensor_table_reads_duckdb_fixture():
     assert table.decode_value("l_returnflag", 0) == "A"
 
 
-def test_run_duckdb_q1_returns_baseline_rows():
+def test_run_duckdb_sql_returns_q1_baseline_rows():
     con = duckdb.connect()
     create_lineitem_fixture(con, FIXTURE_ROWS)
 
-    rows = run_duckdb_q1(con)
+    rows = run_duckdb_sql(con, TPC_H_Q1_SQL)
 
     assert rows == [
         {
@@ -88,16 +67,6 @@ def test_run_duckdb_q1_returns_baseline_rows():
     ]
 
 
-def test_validate_q1_matches_duckdb_baseline():
-    con = duckdb.connect()
-    create_lineitem_fixture(con, FIXTURE_ROWS)
-
-    result = validate_q1(con, device="cpu", plan=q1_fixture_plan())
-
-    assert result.row_count == 2
-    assert result.max_abs_error < 1e-9
-
-
 def test_connect_database_opens_path(tmp_path):
     db_path = tmp_path / "fixture.duckdb"
     con = connect_database(db_path)
@@ -108,15 +77,59 @@ def test_connect_database_opens_path(tmp_path):
     assert reopened.execute("select count(*) from marker").fetchone()[0] == 0
 
 
+def test_export_substrait_json_requires_explicit_sql_argument():
+    parameter = inspect.signature(export_substrait_json).parameters["sql"]
+
+    assert parameter.default is inspect.Signature.empty
+
+
 def test_export_substrait_json_uses_duckdb_extension_or_reports_unavailable():
     con = duckdb.connect()
     create_lineitem_fixture(con, FIXTURE_ROWS)
 
     try:
-        plan_json = export_substrait_json(con)
+        plan_json = export_substrait_json(con, TPC_H_Q1_SQL)
     except DuckDBSubstraitError as exc:
         pytest.skip(f"DuckDB Substrait extension unavailable: {exc}")
 
     assert isinstance(plan_json, dict)
     assert "relations" in plan_json
     json.dumps(plan_json)
+
+
+def test_export_substrait_json_reports_missing_explicit_extension(monkeypatch, tmp_path):
+    missing_extension = tmp_path / "missing_substrait.duckdb_extension"
+    monkeypatch.setenv("TQG_SUBSTRAIT_EXTENSION", str(missing_extension))
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+
+    with pytest.raises(DuckDBSubstraitError) as exc_info:
+        export_substrait_json(con, TPC_H_Q1_SQL)
+
+    message = str(exc_info.value)
+    assert "TQG_SUBSTRAIT_EXTENSION" in message
+    assert str(missing_extension) in message
+
+
+def test_load_substrait_extension_uses_default_install_when_env_unset(monkeypatch):
+    from tpch_torch import duckdb_bridge
+
+    class RecordingConnection:
+        def __init__(self):
+            self.calls = []
+
+        def install_extension(self, name, repository=None):
+            self.calls.append(("install_extension", name, repository))
+
+        def load_extension(self, name):
+            self.calls.append(("load_extension", name))
+
+    monkeypatch.delenv("TQG_SUBSTRAIT_EXTENSION", raising=False)
+    con = RecordingConnection()
+
+    duckdb_bridge._load_substrait_extension(con)
+
+    assert con.calls == [
+        ("install_extension", "substrait", "community"),
+        ("load_extension", "substrait"),
+    ]

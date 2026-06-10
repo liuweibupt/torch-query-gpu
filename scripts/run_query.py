@@ -1,4 +1,4 @@
-"""Run supported TPC-H SQL through DuckDB Substrait and PyTorch."""
+"""Run supported TPC-H SQL through a TQP frontend and PyTorch backend."""
 
 from __future__ import annotations
 
@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--sql", help="Inline SQL text")
     source.add_argument("--sql-file", type=Path, help="SQL file path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
+    parser.add_argument(
+        "--frontend",
+        choices=("sirius", "substrait"),
+        default="sirius",
+        help="TQP frontend used before PyTorch execution",
+    )
     parser.add_argument("--json", action="store_true", help="Print result rows as JSON")
     return parser
 
@@ -27,7 +33,12 @@ def main() -> None:
     con = connect_database(args.db)
     try:
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
-        result, elapsed_ms = timed_run_sql(con, sql, device=args.device)
+        result, elapsed_ms = timed_run_sql(
+            con,
+            sql,
+            device=args.device,
+            frontend=args.frontend,
+        )
     finally:
         con.close()
     if args.json:
@@ -35,7 +46,8 @@ def main() -> None:
     else:
         for row in result.rows:
             print(row)
-    print(f"q{result.query_id:02d}_pytorch_ms={elapsed_ms:.3f}")
+    label = "generic" if result.query_id is None else f"q{result.query_id:02d}"
+    print(f"{label}_pytorch_ms={elapsed_ms:.3f}")
 
 
 if __name__ == "__main__":

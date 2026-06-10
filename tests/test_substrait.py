@@ -1,7 +1,8 @@
 import pytest
 
 from tpch_torch.sql import TPC_H_Q1_SQL
-from tpch_torch.substrait import UnsupportedPlanError, compile_q1_substrait_plan
+from tpch_torch.errors import UnsupportedPlanError
+from tpch_torch.substrait import compile_q1_substrait_plan
 
 
 Q1_PLAN_JSON = {

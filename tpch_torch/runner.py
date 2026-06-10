@@ -1,38 +1,18 @@
-"""Direct SQL -> DuckDB Substrait -> PyTorch execution dispatch."""
+"""SQL -> TQP frontend -> PyTorch backend execution dispatch."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 import duckdb
 import torch
 
-from tpch_torch.duckdb_bridge import export_substrait_json
-from tpch_torch.queries.q01 import execute_q1
+from tpch_torch.backend import PyTorchBackend
+from tpch_torch.frontend import compile_sirius_plan, compile_substrait_plan
+from tpch_torch.ir import FrontendName, TQPPlan
 from tpch_torch.relational import QueryResult, SQLValidationResult, compare_rows, run_duckdb_sql
 from tpch_torch.sql import get_tpch_query
-from tpch_torch.substrait import UnsupportedPlanError, compile_q1_substrait_plan
-
-QUERY_MARKERS: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (1, ("l_returnflag", "sum_qty", "count_order")),
-    (3, ("c_mktsegment", "BUILDING", "o_shippriority")),
-    (5, ("r_name = 'ASIA'", "n_name", "revenue")),
-    (6, ("l_discount BETWEEN 0.05", "l_quantity < 24")),
-    (7, ("supp_nation", "cust_nation", "FRANCE", "GERMANY")),
-    (8, ("mkt_share", "BRAZIL", "ECONOMY ANODIZED STEEL")),
-    (9, ("sum_profit", "%green%", "ps_supplycost")),
-    (10, ("l_returnflag = 'R'", "c_acctbal", "LIMIT 20")),
-    (11, ("ps_supplycost * ps_availqty", "GERMANY", "0.0001000000")),
-    (12, ("l_shipmode IN ('MAIL', 'SHIP')", "high_line_count")),
-    (13, ("special%requests", "custdist")),
-    (14, ("promo_revenue", "PROMO%")),
-    (15, ("WITH revenue AS", "total_revenue", "max(total_revenue)")),
-    (18, ("sum(l_quantity) > 300", "o_totalprice")),
-    (19, ("Brand#12", "Brand#23", "Brand#34")),
-)
 
 
 def load_sql(
@@ -54,17 +34,34 @@ def load_sql(
 
 
 def run_sql(con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu") -> QueryResult:
+    return run_sql_with_frontend(con, sql, device=device, frontend="sirius")
+
+
+def run_sql_with_frontend(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    device: str = "cpu",
+    frontend: FrontendName = "sirius",
+) -> QueryResult:
     _validate_device(device)
-    plan_json = export_substrait_json(con, sql)
-    query_id = identify_tpch_query(sql)
-    rows = _execute_supported_query(con, query_id, plan_json, device)
-    return QueryResult(query_id=query_id, rows=rows)
+    plan = compile_tqp_plan(con, sql, frontend)
+    rows = PyTorchBackend().execute(con, plan, device=device)
+    return QueryResult(query_id=plan.query_id, rows=rows)
 
 
 def validate_sql(
     con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu"
 ) -> SQLValidationResult:
-    result = run_sql(con, sql, device=device)
+    return validate_sql_with_frontend(con, sql, device=device, frontend="sirius")
+
+
+def validate_sql_with_frontend(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    device: str = "cpu",
+    frontend: FrontendName = "sirius",
+) -> SQLValidationResult:
+    result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
     duckdb_rows = run_duckdb_sql(con, sql)
     max_abs_error = compare_rows(duckdb_rows, result.rows)
     return SQLValidationResult(
@@ -77,67 +74,36 @@ def validate_sql(
 
 
 def timed_run_sql(
-    con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu"
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    device: str = "cpu",
+    frontend: FrontendName = "sirius",
 ) -> tuple[QueryResult, float]:
     if device == "cuda":
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        result = run_sql(con, sql, device=device)
+        result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
         end.record()
         torch.cuda.synchronize()
         return result, float(start.elapsed_time(end))
     start_time = perf_counter()
-    result = run_sql(con, sql, device=device)
+    result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
     return result, (perf_counter() - start_time) * 1000.0
 
 
-def identify_tpch_query(sql: str) -> int:
-    normalized = _normalize_sql(sql)
-    for query_id, markers in QUERY_MARKERS:
-        if all(_normalize_sql(marker) in normalized for marker in markers):
-            return query_id
-    raise UnsupportedPlanError("SQL text does not match a supported TPC-H query shape")
-
-
-def _execute_supported_query(
-    con: duckdb.DuckDBPyConnection, query_id: int, plan_json: dict[str, Any], device: str
-) -> list[dict[str, Any]]:
-    if query_id == 1:
-        plan = compile_q1_substrait_plan(plan_json)
-        from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
-
-        return execute_q1(fetch_lineitem_tensor_table(con, device=device), plan)
-    if query_id == 6:
-        from tpch_torch.queries.q06 import execute_q6
-
-        return execute_q6(con, device=device)
-    executor_by_query = {
-        3: "q03",
-        5: "q05",
-        7: "q07",
-        8: "q08",
-        9: "q09",
-        10: "q10",
-        11: "q11",
-        12: "q12",
-        13: "q13",
-        14: "q14",
-        15: "q15",
-        18: "q18",
-        19: "q19",
-    }
-    module_name = executor_by_query.get(query_id)
-    if module_name is None:
-        raise UnsupportedPlanError(f"TPC-H Q{query_id} exported to Substrait but has no PyTorch executor yet")
-    module = __import__(f"tpch_torch.queries.{module_name}", fromlist=[f"execute_q{query_id}"])
-    return getattr(module, f"execute_q{query_id}")(con, device=device)
+def compile_tqp_plan(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    frontend: FrontendName = "sirius",
+) -> TQPPlan:
+    if frontend == "sirius":
+        return compile_sirius_plan(con, sql)
+    if frontend == "substrait":
+        return compile_substrait_plan(con, sql)
+    raise ValueError(f"unknown frontend: {frontend}")
 
 
 def _validate_device(device: str) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda requested, but torch.cuda.is_available() is false")
-
-
-def _normalize_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql.strip()).upper()
