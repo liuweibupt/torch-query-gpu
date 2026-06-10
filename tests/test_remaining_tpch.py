@@ -16,7 +16,7 @@ def tpch_con_remaining():
         con.close()
 
 
-@pytest.mark.parametrize("query_id", (4, 17))
+@pytest.mark.parametrize("query_id", (4, 16, 17, 22))
 def test_remaining_tpch_query_validates_with_duckdb_logical_plan(tpch_con_remaining, query_id):
     sql = get_tpch_query(tpch_con_remaining, query_id)
 
