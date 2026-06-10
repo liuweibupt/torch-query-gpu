@@ -3,7 +3,7 @@ import pytest
 
 from tpch_torch.backend.generic import execute_generic_sql_plan
 from tpch_torch.generic_sql import parse_generic_sql
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 
 def _make_table():

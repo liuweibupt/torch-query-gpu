@@ -13,7 +13,7 @@ import torch
 from tpch_torch.generic_sql import GenericFilter, GenericProjection, GenericSQLPlan
 from tpch_torch.relational import decode
 from tpch_torch.storage import TensorTable
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 
 def execute_generic_sql_plan(

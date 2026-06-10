@@ -10,7 +10,7 @@ from typing import Callable
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.ir import FrontendName
 from tpch_torch.relational import SQLValidationResult
-from tpch_torch.runner import PlanSource, load_sql, validate_sql_with_frontend
+from tpch_torch.runner import load_sql, validate_sql_with_frontend
 from tpch_torch.sql import get_tpch_query
 
 DEFAULT_SQL_TOLERANCE = 1e-2
@@ -41,15 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
     parser.add_argument(
         "--frontend",
-        choices=("sirius", "substrait", "auto"),
+        choices=("sirius", "substrait"),
         default="sirius",
         help="TQP frontend used before PyTorch execution",
-    )
-    parser.add_argument(
-        "--plan-source",
-        choices=("substrait", "duckdb-logical", "auto"),
-        default=None,
-        help="Legacy alias for --frontend: duckdb-logical maps to sirius",
     )
     parser.add_argument("--keep-going", action="store_true", help="Continue batch validation after a query fails")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
@@ -125,7 +119,6 @@ def _validate_one_query(
 
 def main() -> None:
     args = build_parser().parse_args()
-    frontend = resolve_frontend(args.frontend, args.plan_source)
     con = connect_database(args.db)
     try:
         if args.queries is not None:
@@ -135,7 +128,7 @@ def main() -> None:
                 device=args.device,
                 tolerance=args.tolerance,
                 keep_going=args.keep_going,
-                frontend=frontend,
+                frontend=args.frontend,
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
@@ -145,7 +138,7 @@ def main() -> None:
             con,
             sql,
             device=args.device,
-            frontend=frontend,
+            frontend=args.frontend,
         )
     finally:
         con.close()
@@ -158,23 +151,6 @@ def main() -> None:
         f"validated query={result.query_id} rows={result.row_count} "
         f"max_abs_error={result.max_abs_error:.6g}"
     )
-
-
-def resolve_frontend(frontend: FrontendName, plan_source: PlanSource | None) -> FrontendName:
-    if plan_source is None:
-        return frontend
-    legacy_frontend = _frontend_from_plan_source(plan_source)
-    if frontend != "sirius" and frontend != legacy_frontend:
-        raise ValueError(f"conflicting --frontend {frontend} and --plan-source {plan_source}")
-    return legacy_frontend
-
-
-def _frontend_from_plan_source(plan_source: PlanSource) -> FrontendName:
-    if plan_source == "duckdb-logical":
-        return "sirius"
-    if plan_source in {"substrait", "auto"}:
-        return plan_source
-    raise ValueError(f"unknown plan_source: {plan_source}")
 
 
 def _print_batch_records(records: list[BatchValidationRecord]) -> None:

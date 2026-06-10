@@ -4,7 +4,7 @@ import pytest
 from tpch_torch.duckdb_bridge import create_lineitem_fixture
 from tpch_torch.ir import TQPPlan
 from tpch_torch.sql import TPC_H_Q1_SQL
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.backend import PyTorchBackend
 
 

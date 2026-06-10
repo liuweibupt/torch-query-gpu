@@ -8,7 +8,7 @@ from typing import Sequence
 import duckdb
 
 from tpch_torch.duckdb_bridge import DuckDBSubstraitError, export_substrait_json
-from tpch_torch.runner import is_query_executor_supported
+from tpch_torch.query_catalog import is_query_executor_supported
 from tpch_torch.sql import get_tpch_query
 
 

@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 import duckdb
 
-from tpch_torch.sql import TPC_H_Q1_SQL
 from tpch_torch.storage import TensorTable, table_from_columnar
 
 LINEITEM_COLUMNS = (
@@ -86,9 +85,7 @@ def generate_tpch(con: duckdb.DuckDBPyConnection, scale_factor: float = 1.0) -> 
         raise DuckDBTPCHError(f"failed to generate TPC-H data: {exc}") from exc
 
 
-def export_substrait_json(
-    con: duckdb.DuckDBPyConnection, sql: str = TPC_H_Q1_SQL
-) -> dict[str, Any]:
+def export_substrait_json(con: duckdb.DuckDBPyConnection, sql: str) -> dict[str, Any]:
     """Export a real Substrait JSON plan using DuckDB's Substrait extension."""
 
     _load_substrait_extension(con)
@@ -107,14 +104,6 @@ def fetch_lineitem_tensor_table(
 
     columnar = con.execute(LINEITEM_SELECT_FOR_TORCH).fetchnumpy()
     return table_from_columnar(columnar, device=device)
-
-
-def run_duckdb_q1(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
-    """Run canonical Q1 in DuckDB and return normalized Python rows."""
-
-    result = con.execute(TPC_H_Q1_SQL)
-    column_names = [description[0] for description in result.description]
-    return [_normalize_result_row(column_names, row) for row in result.fetchall()]
 
 
 def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:
@@ -138,15 +127,3 @@ def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:
             "DuckDB Substrait extension is unavailable; expected "
             "INSTALL substrait FROM community; LOAD substrait to work"
         ) from exc
-
-
-def _normalize_result_row(column_names: Sequence[str], row: Sequence[Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for column_name, value in zip(column_names, row):
-        if column_name == "count_order":
-            normalized[column_name] = int(value)
-        elif column_name in {"l_returnflag", "l_linestatus"}:
-            normalized[column_name] = str(value)
-        else:
-            normalized[column_name] = float(value)
-    return normalized

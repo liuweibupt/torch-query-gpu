@@ -8,7 +8,7 @@ from tpch_torch.generic_sql import parse_generic_sql
 from tpch_torch.ir import DuckDBPlanMetadata, TQPPlan
 from tpch_torch.planner import export_duckdb_logical_plan
 from tpch_torch.query_catalog import identify_tpch_query
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 
 def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:

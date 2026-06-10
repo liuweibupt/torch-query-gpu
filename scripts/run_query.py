@@ -6,7 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-from scripts.validate_query import resolve_frontend
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.runner import load_sql, timed_run_sql
 
@@ -21,15 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
     parser.add_argument(
         "--frontend",
-        choices=("sirius", "substrait", "auto"),
+        choices=("sirius", "substrait"),
         default="sirius",
         help="TQP frontend used before PyTorch execution",
-    )
-    parser.add_argument(
-        "--plan-source",
-        choices=("substrait", "duckdb-logical", "auto"),
-        default=None,
-        help="Legacy alias for --frontend: duckdb-logical maps to sirius",
     )
     parser.add_argument("--json", action="store_true", help="Print result rows as JSON")
     return parser
@@ -37,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    frontend = resolve_frontend(args.frontend, args.plan_source)
     con = connect_database(args.db)
     try:
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
@@ -45,7 +37,7 @@ def main() -> None:
             con,
             sql,
             device=args.device,
-            frontend=frontend,
+            frontend=args.frontend,
         )
     finally:
         con.close()

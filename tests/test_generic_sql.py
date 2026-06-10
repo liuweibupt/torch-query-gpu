@@ -1,7 +1,7 @@
 import pytest
 
 from tpch_torch.generic_sql import parse_generic_sql
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 
 def test_parse_count_star_query():

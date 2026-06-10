@@ -45,7 +45,7 @@ def test_run_sql_reports_backend_unsupported_generic_join():
     con.execute("create table u(id integer)")
 
     import pytest
-    from tpch_torch.substrait import UnsupportedPlanError
+    from tpch_torch.errors import UnsupportedPlanError
 
     with pytest.raises(UnsupportedPlanError, match="generic SQL is not executable by PyTorch backend"):
         run_sql(con, "select * from t join u on t.id = u.id", device="cpu")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FrontendName = Literal["sirius", "substrait", "auto"]
+FrontendName = Literal["sirius", "substrait"]
 
 
 @dataclass(frozen=True)

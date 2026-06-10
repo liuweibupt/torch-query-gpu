@@ -1,4 +1,4 @@
-"""TQP-style TPC-H execution prototype using DuckDB Substrait and PyTorch."""
+"""TQP-style TPC-H execution prototype using DuckDB-planned SQL and PyTorch."""
 
 __all__ = ["__version__"]
 

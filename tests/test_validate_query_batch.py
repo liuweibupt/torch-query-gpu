@@ -55,7 +55,7 @@ def test_validate_queries_keep_going_records_failures():
     def validator(con, sql, device, frontend):
         query_id = int(sql.rsplit("q", 1)[1])
         if query_id == 3:
-            raise RuntimeError("substrait export failed")
+            raise RuntimeError("backend unsupported")
         return _result(query_id)
 
     results = validate_queries(
@@ -70,7 +70,7 @@ def test_validate_queries_keep_going_records_failures():
 
     assert [result.query_id for result in results] == [1, 3, 6]
     assert results[1].ok is False
-    assert "substrait export failed" in results[1].message
+    assert "backend unsupported" in results[1].message
 
 
 def test_validate_queries_without_keep_going_raises_first_failure():
@@ -78,9 +78,9 @@ def test_validate_queries_without_keep_going_raises_first_failure():
         return f"select -- q{query_id}"
 
     def validator(con, sql, device, frontend):
-        raise RuntimeError("substrait export failed")
+        raise RuntimeError("backend unsupported")
 
-    with pytest.raises(RuntimeError, match="substrait export failed"):
+    with pytest.raises(RuntimeError, match="backend unsupported"):
         validate_queries(
             FakeConnection(),
             (3,),

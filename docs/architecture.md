@@ -1,21 +1,24 @@
-# Current Architecture: Sirius-like Frontend -> TQP IR -> PyTorch Backend
+# Current Architecture: DuckDB Frontend -> TQP IR -> PyTorch Backend
 
 This repository is a correctness-first TQP-style prototype for analytical query
-execution on PyTorch tensors. The default path no longer depends on DuckDB's
-Substrait exporter. Substrait is preserved as a strict experimental frontend.
+execution on PyTorch tensors. The default path uses DuckDB for SQL admission and
+planning metadata, then executes with PyTorch operators on CPU or CUDA.
+
+Substrait is preserved as an explicit strict experimental frontend. There is no
+automatic fallback between frontends.
 
 ## End-to-end flow
 
 ```text
-TPC-H SQL / --query N
+SQL text / --query N
   -> runner.load_sql()
   -> Sirius-like DuckDB frontend
        DuckDB parses, binds, plans, and optimizes the original SQL via EXPLAIN
   -> TQPPlan
-       internal frontend/backend boundary object
+       immutable frontend/backend boundary object
   -> PyTorchBackend
        dispatches to TPC-H tensor executors q01.py ... q22.py
-       or the generic SQL subset executor
+       or to the generic SQL subset executor
   -> optional DuckDB validation baseline
 ```
 
@@ -25,9 +28,9 @@ It is not used as a fallback result for the PyTorch path.
 Frontend admission and backend execution are intentionally separate. The
 Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
 PyTorch backend executes all TPC-H Q1-Q22 templates plus an explicit generic SQL
-subset: single-table `SELECT`, `WHERE`, arithmetic projections, `COUNT(*)`,
-`SUM(col)`, simple `GROUP BY`, `ORDER BY`, and `LIMIT`. Unsupported generic
-operators raise `UnsupportedPlanError`.
+subset: single-table `SELECT`, simple `WHERE`, arithmetic projections,
+`COUNT(*)`, `SUM(col)`, simple `GROUP BY`, `ORDER BY`, and `LIMIT`. Unsupported
+generic operators raise `UnsupportedPlanError`.
 
 ## Runtime entrypoints
 
@@ -57,23 +60,20 @@ tpch-torch-validate \
   --frontend substrait
 ```
 
-Legacy compatibility aliases remain available:
+Supported frontends:
 
-```text
---plan-source duckdb-logical  ->  --frontend sirius
---plan-source substrait       ->  --frontend substrait
---plan-source auto            ->  --frontend auto
-```
+- `sirius`: default DuckDB parser/planner admission path.
+- `substrait`: strict native DuckDB Substrait export path.
 
 ## Module map
 
 | Layer | Files | Responsibility |
 | --- | --- | --- |
-| CLI | `scripts/run_query.py`, `scripts/validate_query.py` | Parse command-line arguments and select frontend/device/query source. |
+| CLI | `scripts/run_query.py`, `scripts/validate_query.py` | Parse command-line arguments and pass explicit frontend/device/query source. |
 | Runner | `tpch_torch/runner.py` | Thin orchestration: load SQL, compile frontend plan, call backend, validate output. |
-| Frontend | `tpch_torch/frontend/*.py` | Compile original SQL into `TQPPlan`. |
+| Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | Compile original SQL into `TQPPlan`. |
 | IR | `tpch_torch/ir/plan.py` | Immutable internal plan object passed from frontend to backend. |
-| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/generic.py` | Execute `TQPPlan` with PyTorch tensor kernels. |
+| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/generic.py` | Execute `TQPPlan` with PyTorch tensor operators. |
 | Query catalog | `tpch_torch/query_catalog.py` | Identify supported TPC-H query shapes from original SQL text. |
 | DuckDB planner admission | `tpch_torch/planner.py` | Ask DuckDB to parse/plan original SQL via `EXPLAIN`. |
 | Tensor kernels | `tpch_torch/queries/q01.py` ... `q22.py` | Correctness-first PyTorch implementations of TPC-H query templates. |
@@ -110,8 +110,6 @@ def compile_tqp_plan(
         return compile_sirius_plan(con, sql)
     if frontend == "substrait":
         return compile_substrait_plan(con, sql)
-    if frontend == "auto":
-        return compile_auto_plan(con, sql)
     raise ValueError(f"unknown frontend: {frontend}")
 ```
 
@@ -132,7 +130,7 @@ small: the repository first guarantees all TPC-H queries can run through a clean
 frontend/backend boundary, then can evolve `TQPPlan` into a richer operator graph.
 
 ```python
-FrontendName = Literal["sirius", "substrait", "auto"]
+FrontendName = Literal["sirius", "substrait"]
 
 
 @dataclass(frozen=True)
@@ -157,7 +155,7 @@ Important fields:
 
 - `query_id`: selected TPC-H executor template, or `None` for generic SQL.
 - `source_sql`: the unchanged original SQL.
-- `frontend`: `sirius`, `substrait`, or `auto`.
+- `frontend`: `sirius` or `substrait`.
 - `duckdb_metadata`: textual DuckDB plans captured by the Sirius-like frontend.
 - `plan_json`: real DuckDB Substrait JSON when the strict Substrait frontend is
   selected.
@@ -174,15 +172,23 @@ captures DuckDB's logical, optimized logical, and physical plan text through
 ```python
 def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
     duckdb_plan = export_duckdb_logical_plan(con, sql)
+    generic_plan = None
+    generic_error = None
+    try:
+        query_id = identify_tpch_query(sql)
+    except UnsupportedPlanError:
+        query_id = None
+        try:
+            generic_plan = parse_generic_sql(sql)
+        except UnsupportedPlanError as exc:
+            generic_error = str(exc)
     return TQPPlan(
         query_id=query_id,
         source_sql=sql,
         frontend="sirius",
-        duckdb_metadata=DuckDBPlanMetadata(
-            logical_plan=duckdb_plan.logical_plan,
-            logical_opt=duckdb_plan.logical_opt,
-            physical_plan=duckdb_plan.physical_plan,
-        ),
+        duckdb_metadata=DuckDBPlanMetadata(...),
+        generic_plan=generic_plan,
+        generic_error=generic_error,
     )
 ```
 
@@ -210,12 +216,13 @@ extension.
 ## Strict Substrait frontend
 
 The strict Substrait frontend remains available for experiments and for checking
-DuckDB Substrait exporter coverage. It does not synthesize plans.
+DuckDB Substrait exporter coverage. It does not synthesize plans and does not
+fallback to another frontend.
 
 ```python
 def compile_substrait_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
     return TQPPlan(
-        query_id=query_id,
+        query_id=identify_tpch_query(sql),
         source_sql=sql,
         frontend="substrait",
         plan_json=export_substrait_json(con, sql),
@@ -225,33 +232,24 @@ def compile_substrait_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
 If DuckDB cannot export the original SQL, this path raises
 `DuckDBSubstraitError`.
 
-The `auto` frontend exists for compatibility:
-
-```python
-def compile_auto_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
-    try:
-        return compile_substrait_plan(con, sql)
-    except DuckDBSubstraitError:
-        return compile_sirius_plan(con, sql)
-```
-
 ## PyTorch backend
 
 The backend receives a `TQPPlan`; it does not parse SQL or call DuckDB's
-planner. It dispatches to the existing tensor kernels.
+planner. It dispatches to tensor kernels or to the generic SQL subset executor.
 
 ```python
 class PyTorchBackend:
     def execute(self, con, plan: TQPPlan, device: str = "cpu") -> list[dict[str, Any]]:
+        if plan.query_id is None:
+            if plan.generic_plan is None:
+                detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
+                raise UnsupportedPlanError(f"generic SQL is not executable by PyTorch backend: {detail}")
+            return execute_generic_sql_plan(con, plan.generic_plan, device=device)
         if plan.query_id == 1:
             q1_plan = _compile_q1_plan(plan.plan_json)
             from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
 
             return execute_q1(fetch_lineitem_tensor_table(con, device=device), q1_plan)
-        if plan.query_id == 6:
-            from tpch_torch.queries.q06 import execute_q6
-
-            return execute_q6(con, device=device)
         module_name = _EXECUTOR_BY_QUERY.get(plan.query_id)
         if module_name is None:
             raise UnsupportedPlanError(...)
@@ -259,18 +257,18 @@ class PyTorchBackend:
         return getattr(module, f"execute_q{plan.query_id}")(con, device=device)
 ```
 
-The special Q1 branch is kept because the original Q1 implementation has a
-small plan compiler for the legacy Substrait JSON shape. For the Sirius-like
-frontend, Q1 uses a canonical internal Q1 plan.
+The Q1 branch can consume real Substrait JSON when `frontend="substrait"`; for
+`frontend="sirius"`, it uses a canonical internal Q1 plan.
 
 ## Query identification and generic SQL
 
 TPC-H templates still use query-id dispatch. `tpch_torch/query_catalog.py`
 identifies those queries by checking stable SQL markers from DuckDB's TPC-H
-query text. Non-TPC-H SQL is admitted with `query_id=None`. If the SQL falls in the current
-generic backend subset, it is parsed into `GenericSQLPlan`; otherwise the plan
-keeps `generic_plan=None` and records `generic_error` so backend failure is
-explicit and attributable to unsupported execution, not frontend admission.
+query text. Non-TPC-H SQL is admitted with `query_id=None`. If the SQL falls in
+the current generic backend subset, it is parsed into `GenericSQLPlan`;
+otherwise the plan keeps `generic_plan=None` and records `generic_error` so
+backend failure is explicit and attributable to unsupported execution, not
+frontend admission.
 
 ```python
 def identify_tpch_query(sql: str) -> int:
@@ -281,27 +279,12 @@ def identify_tpch_query(sql: str) -> int:
     raise UnsupportedPlanError("SQL text does not match a supported TPC-H query shape")
 ```
 
-This is intentionally a correctness-first bridge. The current generic plan is
-already a small operator subset, and the planned next architectural step is to
-replace more template dispatch with a richer operator graph inside `TQPPlan`:
+This is intentionally a correctness-first bridge. The current generic plan is a
+small operator subset, and the planned next architectural step is to replace more
+template dispatch with a richer operator graph inside `TQPPlan`:
 
 ```text
 Scan -> Filter -> Join -> Aggregate -> Sort -> Limit
-```
-
-## CLI frontend resolution
-
-`--frontend` is the new user-facing option. `--plan-source` is a legacy alias.
-Conflicting options are rejected instead of silently choosing one.
-
-```python
-def resolve_frontend(frontend: FrontendName, plan_source: PlanSource | None) -> FrontendName:
-    if plan_source is None:
-        return frontend
-    legacy_frontend = _frontend_from_plan_source(plan_source)
-    if frontend != "sirius" and frontend != legacy_frontend:
-        raise ValueError(f"conflicting --frontend {frontend} and --plan-source {plan_source}")
-    return legacy_frontend
 ```
 
 ## Current SQL support

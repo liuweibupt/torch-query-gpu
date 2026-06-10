@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 QUERY_MARKERS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, ("l_returnflag", "sum_qty", "count_order")),

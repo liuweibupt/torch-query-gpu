@@ -2,7 +2,7 @@ import duckdb
 import pytest
 
 from tpch_torch.duckdb_bridge import generate_tpch
-from tpch_torch.runner import validate_sql_with_plan_source
+from tpch_torch.runner import validate_sql_with_frontend
 from tpch_torch.sql import get_tpch_query
 
 
@@ -17,14 +17,14 @@ def tpch_con_remaining():
 
 
 @pytest.mark.parametrize("query_id", (2, 4, 16, 17, 20, 21, 22))
-def test_remaining_tpch_query_validates_with_duckdb_logical_plan(tpch_con_remaining, query_id):
+def test_remaining_tpch_query_validates_with_sirius_frontend(tpch_con_remaining, query_id):
     sql = get_tpch_query(tpch_con_remaining, query_id)
 
-    result = validate_sql_with_plan_source(
+    result = validate_sql_with_frontend(
         tpch_con_remaining,
         sql,
         device="cpu",
-        plan_source="duckdb-logical",
+        frontend="sirius",
     )
 
     assert result.query_id == query_id

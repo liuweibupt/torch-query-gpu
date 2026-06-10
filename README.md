@@ -1,21 +1,22 @@
 # torch-query-gpu
 
-A minimal TQP-style prototype for analytical query execution on PyTorch tensors.
-The default execution path is now a clean TQP/Sirius-style compiler stack:
+A correctness-first TQP-style prototype for analytical query execution on PyTorch
+tensors. The default execution path is a clean DuckDB-planned frontend and a
+PyTorch backend:
 
 ```text
 SQL / --query N
   -> Sirius-like DuckDB frontend
        DuckDB parses, binds, plans, and optimizes the original SQL
   -> TQP IR
-       internal plan object shared by frontends and backends
+       immutable frontend/backend boundary object
   -> PyTorch backend
-       correctness-first tensor operators on CPU or CUDA
+       tensor operators on CPU or CUDA
   -> optional DuckDB baseline validation
 ```
 
-Substrait is no longer the default execution path. It remains available as an
-experimental strict frontend for queries DuckDB's Substrait exporter can emit:
+Substrait is not the default execution path. It remains available only as an
+explicit strict frontend for SQL that DuckDB's native Substrait exporter can emit:
 
 ```text
 SQL / --query N
@@ -24,16 +25,17 @@ SQL / --query N
   -> PyTorch backend
 ```
 
-The project does **not** rewrite SQL to avoid planner limitations, does **not**
-fabricate Substrait JSON, and does **not** use DuckDB result rows as PyTorch
-output. DuckDB rows are used only as the validation baseline.
+There is no automatic frontend fallback. The project does **not** rewrite SQL to
+avoid planner limitations, does **not** fabricate Substrait JSON, and does
+**not** use DuckDB result rows as PyTorch output. DuckDB rows are used only as a
+validation baseline.
 
 The Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
 PyTorch backend currently executes all TPC-H Q1-Q22 templates plus an explicit
-generic SQL subset: single-table `SELECT`, `WHERE`, arithmetic projection,
+generic SQL subset: single-table `SELECT`, simple `WHERE`, arithmetic projection,
 `COUNT(*)`, `SUM(col)`, simple `GROUP BY`, `ORDER BY`, and `LIMIT`. SQL outside
-that backend subset is still admitted by the frontend but fails at backend
-execution with explicit `UnsupportedPlanError`.
+that backend subset is admitted by the frontend but fails at backend execution
+with explicit `UnsupportedPlanError`.
 
 For a module-by-module implementation guide with key code snippets, see
 [`docs/architecture.md`](docs/architecture.md).
@@ -62,14 +64,14 @@ tpch-torch-gen-sf1 --db data/tpch_sf1.duckdb --sf 1
 
 ## End-to-end SQL commands
 
-The generic commands read SQL directly from `--query`, `--sql`, or
-`--sql-file`. They do not require manually exported JSON.
+The generic commands read SQL directly from `--query`, `--sql`, or `--sql-file`.
+They do not require manually exported JSON.
 
 Default Sirius-like frontend for TPC-H templates:
 
 ```bash
-tpch-torch-run --db data/tpch_sf1.duckdb --query 21 --device cuda --frontend sirius
-tpch-torch-validate --db data/tpch_sf1.duckdb --query 21 --device cuda --frontend sirius
+tpch-torch-run --db data/tpch_sf1.duckdb --query 21 --device cuda
+tpch-torch-validate --db data/tpch_sf1.duckdb --query 21 --device cuda
 ```
 
 Default Sirius-like frontend for a generic SQL subset:
@@ -78,8 +80,7 @@ Default Sirius-like frontend for a generic SQL subset:
 tpch-torch-validate \
   --db data/tpch_sf1.duckdb \
   --sql "select count(*) as n from lineitem" \
-  --device cuda \
-  --frontend sirius
+  --device cuda
 ```
 
 All TPC-H queries through the default clean path:
@@ -100,13 +101,10 @@ tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend subs
 tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend substrait
 ```
 
-Compatibility aliases remain available:
+Supported frontends are explicit:
 
-```text
---plan-source duckdb-logical  ->  --frontend sirius
---plan-source substrait       ->  --frontend substrait
---plan-source auto            ->  --frontend auto
-```
+- `sirius`: default DuckDB parser/planner admission path.
+- `substrait`: strict DuckDB native Substrait export path.
 
 Use `--device cpu` on machines without CUDA. If `--device cuda` is requested on a
 CPU-only machine, the runner raises an explicit error.
@@ -141,29 +139,28 @@ Frontends compile original SQL into `TQPPlan`:
 
 - `sirius`: DuckDB Parser/Planner/Optimizer admission via `EXPLAIN`; this is the
   default and covers Q1-Q22.
-- `substrait`: DuckDB's real `get_substrait_json()` export; this remains a strict
-  experimental frontend.
-- `auto`: tries strict Substrait first and falls back to the Sirius-like frontend
-  only when DuckDB's Substrait exporter raises `DuckDBSubstraitError`.
+- `substrait`: DuckDB's real `get_substrait_json()` export; this is a strict
+  experimental frontend and has no fallback.
 
 ### TQP IR
 
 `TQPPlan` is the internal plan object between frontend and backend. It records
 the source SQL, optional TPC-H query id, frontend, DuckDB plan metadata, optional
 real Substrait JSON, and optional generic operator plan. TPC-H templates use
-`query_id`; non-TPC-H SQL uses `query_id=None` plus `generic_plan`.
+`query_id`; non-TPC-H SQL uses `query_id=None` plus `generic_plan` when the SQL
+falls inside the current generic executor subset.
 
 ### PyTorch backend
 
-`PyTorchBackend` executes `TQPPlan` with existing correctness-first tensor
-operators in `tpch_torch/queries/q01.py` through `q22.py` for TPC-H templates,
-and with `tpch_torch/backend/generic.py` for the supported generic SQL subset.
-This keeps backend execution separate from SQL admission.
+`PyTorchBackend` executes `TQPPlan` with correctness-first tensor operators in
+`tpch_torch/queries/q01.py` through `q22.py` for TPC-H templates, and with
+`tpch_torch/backend/generic.py` for the supported generic SQL subset. This keeps
+backend execution separate from SQL admission.
 
 ## Native DuckDB Substrait policy (B方案)
 
-For strict Substrait experiments, this repository still follows the native
-DuckDB Substrait path selected for B方案:
+For strict Substrait experiments, this repository follows the native DuckDB
+Substrait path selected for B方案:
 
 ```text
 original SQL / --query N
@@ -184,8 +181,7 @@ tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries 2,4,16
 
 As of DuckDB 1.2.x, original TPC-H Q2, Q4, Q16, Q17, Q20, Q21, and Q22 are
 native-export blocked (`DELIM_JOIN` or `MARK` join). The default Sirius-like
-frontend exists specifically so the clean TQP path is not blocked by that
-exporter limitation.
+frontend exists so the clean TQP path is not blocked by that exporter limitation.
 
 If you build or obtain a newer native DuckDB Substrait extension, test it without
 changing SQL by setting:
@@ -196,23 +192,3 @@ export TQG_SUBSTRAIT_EXTENSION=/path/to/substrait.duckdb_extension
 
 When this variable is set, the bridge loads that exact extension path. Missing
 or unloadable paths are hard errors.
-
-## Legacy Q1 commands
-
-The original Q1-only commands remain available for focused Substrait compiler
-experiments:
-
-```bash
-# Export DuckDB's real Substrait JSON plan for Q1.
-tpch-torch-export-q1-substrait --db data/tpch_sf1.duckdb --out data/q1_substrait.json
-
-# Run Q1 through the legacy Substrait -> PyTorch path.
-tpch-torch-run-q1 --db data/tpch_sf1.duckdb --device cuda
-
-# Validate PyTorch output against DuckDB.
-tpch-torch-validate-q1 --db data/tpch_sf1.duckdb --device cuda
-```
-
-Pre-exported JSON is only a debugging/caching aid for these legacy Q1 commands;
-the generic runner performs SQL -> TQP frontend -> TQP IR -> PyTorch backend in
-one command.

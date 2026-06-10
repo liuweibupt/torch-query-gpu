@@ -34,21 +34,27 @@ def test_validate_parser_accepts_batch_queries_with_frontend(tmp_path):
     db_path = tmp_path / "tpch.duckdb"
 
     args = validate_parser().parse_args(
-        ["--db", str(db_path), "--queries", "1,3,5,6", "--keep-going", "--frontend", "auto"]
+        ["--db", str(db_path), "--queries", "1,3,5,6", "--keep-going", "--frontend", "substrait"]
     )
 
     assert args.db == db_path
     assert args.queries == "1,3,5,6"
     assert args.keep_going is True
-    assert args.frontend == "auto"
+    assert args.frontend == "substrait"
 
 
-def test_validate_parser_accepts_legacy_plan_source(tmp_path):
-    args = validate_parser().parse_args(
-        ["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--plan-source", "duckdb-logical"]
-    )
+def test_validate_parser_rejects_auto_frontend(tmp_path):
+    parser = validate_parser()
 
-    assert args.plan_source == "duckdb-logical"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--frontend", "auto"])
+
+
+def test_validate_parser_rejects_removed_plan_source(tmp_path):
+    parser = validate_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--plan-source", "duckdb-logical"])
 
 
 def test_run_parser_accepts_frontend(tmp_path):
@@ -57,6 +63,20 @@ def test_run_parser_accepts_frontend(tmp_path):
     )
 
     assert args.frontend == "sirius"
+
+
+def test_run_parser_rejects_auto_frontend(tmp_path):
+    parser = run_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--frontend", "auto"])
+
+
+def test_run_parser_rejects_removed_plan_source(tmp_path):
+    parser = run_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--plan-source", "duckdb-logical"])
 
 
 def test_parse_validate_query_ids_list():

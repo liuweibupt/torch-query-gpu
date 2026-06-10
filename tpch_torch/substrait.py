@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+from tpch_torch.errors import UnsupportedPlanError
+
 Q1_REQUIRED_COLUMNS = (
     "l_returnflag",
     "l_linestatus",
@@ -20,10 +22,6 @@ Q1_ORDER_KEYS = ("l_returnflag", "l_linestatus")
 Q1_SHIPDATE_CUTOFF_YYYYMMDD = 19980902
 SUBSTRAIT_DATE_EPOCH = date(1970, 1, 1)
 PROJECT_EXPRESSION_PREFIX = "__project_expr_"
-
-
-class UnsupportedPlanError(ValueError):
-    """Raised when a Substrait plan is outside this prototype's Q1 subset."""
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from tpch_torch.substrait import UnsupportedPlanError
+from tpch_torch.errors import UnsupportedPlanError
 
 ProjectionKind = Literal["column", "count_star", "sum", "mul_const"]
 FilterOperator = Literal["=", "!=", "<>", ">", ">=", "<", "<="]

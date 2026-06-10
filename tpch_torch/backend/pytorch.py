@@ -9,7 +9,8 @@ import duckdb
 from tpch_torch.backend.generic import execute_generic_sql_plan
 from tpch_torch.ir import TQPPlan
 from tpch_torch.queries.q01 import execute_q1
-from tpch_torch.substrait import UnsupportedPlanError, compile_q1_substrait_plan
+from tpch_torch.errors import UnsupportedPlanError
+from tpch_torch.substrait import compile_q1_substrait_plan
 from tpch_torch.substrait import (
     Q1_GROUP_KEYS,
     Q1_ORDER_KEYS,

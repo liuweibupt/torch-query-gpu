@@ -2,10 +2,10 @@ import duckdb
 import pytest
 
 from tpch_torch.duckdb_bridge import generate_tpch
-from tpch_torch.runner import validate_sql, validate_sql_with_frontend, validate_sql_with_plan_source
+from tpch_torch.runner import validate_sql, validate_sql_with_frontend
 from tpch_torch.sql import get_tpch_query
 
-SUPPORTED_DUCKDB_EXPORTABLE_QUERIES = (1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19)
+STRICT_SUBSTRAIT_EXPORTABLE_QUERIES = (1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19)
 ALL_TPCH_QUERIES = tuple(range(1, 23))
 
 
@@ -19,8 +19,8 @@ def tpch_con():
         con.close()
 
 
-@pytest.mark.parametrize("query_id", SUPPORTED_DUCKDB_EXPORTABLE_QUERIES)
-def test_duckdb_exportable_tpch_query_validates_through_pytorch(tpch_con, query_id):
+@pytest.mark.parametrize("query_id", STRICT_SUBSTRAIT_EXPORTABLE_QUERIES)
+def test_strict_substrait_exportable_tpch_query_validates_through_default_frontend(tpch_con, query_id):
     sql = get_tpch_query(tpch_con, query_id)
 
     result = validate_sql(tpch_con, sql, device="cpu")
