@@ -6,6 +6,16 @@ from collections.abc import Sequence
 
 import torch
 
+_INTEGER_DTYPES = frozenset(
+    {
+        torch.int8,
+        torch.uint8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+)
+
 
 def composite_group_ids(key_columns: Sequence[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     """Return per-row inverse group ids and unique composite key rows."""
@@ -32,3 +42,145 @@ def grouped_count(group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
     result = torch.zeros(group_count, dtype=torch.int64, device=group_ids.device)
     result.index_add_(0, group_ids, ones)
     return result
+
+
+def logical_and_all(masks: Sequence[torch.Tensor]) -> torch.Tensor:
+    """Return the element-wise conjunction of boolean masks."""
+
+    checked_masks = _validate_masks(masks)
+    result = checked_masks[0].clone()
+    for mask in checked_masks[1:]:
+        result = torch.logical_and(result, mask)
+    return result
+
+
+def logical_or_all(masks: Sequence[torch.Tensor]) -> torch.Tensor:
+    """Return the element-wise disjunction of boolean masks."""
+
+    checked_masks = _validate_masks(masks)
+    result = checked_masks[0].clone()
+    for mask in checked_masks[1:]:
+        result = torch.logical_or(result, mask)
+    return result
+
+
+def gather_by_mask(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Select rows from the first dimension using a boolean mask."""
+
+    if mask.dtype is not torch.bool:
+        raise TypeError("mask must be a boolean tensor")
+    if mask.ndim != 1:
+        raise ValueError("mask must be a 1-D tensor")
+    if values.ndim == 0 or values.shape[0] != mask.numel():
+        raise ValueError("mask length must match values first dimension")
+    return values[mask]
+
+
+def grouped_min(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    """Compute the minimum value per group id."""
+
+    _validate_grouped_reduction_inputs(values, group_ids, group_count)
+    _require_non_empty_groups(group_ids, group_count)
+    result = torch.full(
+        (group_count,),
+        _max_value(values.dtype),
+        dtype=values.dtype,
+        device=values.device,
+    )
+    return result.scatter_reduce(0, group_ids, values, reduce="amin", include_self=True)
+
+
+def grouped_max(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    """Compute the maximum value per group id."""
+
+    _validate_grouped_reduction_inputs(values, group_ids, group_count)
+    _require_non_empty_groups(group_ids, group_count)
+    result = torch.full(
+        (group_count,),
+        _min_value(values.dtype),
+        dtype=values.dtype,
+        device=values.device,
+    )
+    return result.scatter_reduce(0, group_ids, values, reduce="amax", include_self=True)
+
+
+def grouped_mean(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    """Compute the arithmetic mean per group id."""
+
+    _validate_grouped_reduction_inputs(values, group_ids, group_count)
+    _require_non_empty_groups(group_ids, group_count)
+    mean_values = values if torch.is_floating_point(values) else values.to(dtype=torch.float64)
+    sums = grouped_sum(mean_values, group_ids, group_count)
+    counts = grouped_count(group_ids, group_count).to(dtype=sums.dtype)
+    return sums / counts
+
+
+def topk_indices(values: torch.Tensor, k: int, descending: bool = True) -> torch.Tensor:
+    """Return row indices for the top or bottom `k` values in sorted value order."""
+
+    if values.ndim != 1:
+        raise ValueError("topk_indices expects a 1-D tensor")
+    if k < 0:
+        raise ValueError("k must be non-negative")
+    if k > values.numel():
+        raise ValueError("k cannot exceed the number of values")
+    if k == 0:
+        return torch.empty(0, dtype=torch.int64, device=values.device)
+    return torch.topk(values, k, largest=descending, sorted=True).indices.to(dtype=torch.int64)
+
+
+def _validate_masks(masks: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+    checked_masks = tuple(masks)
+    if not checked_masks:
+        raise ValueError("at least one mask is required")
+    first = checked_masks[0]
+    for mask in checked_masks:
+        if mask.dtype is not torch.bool:
+            raise TypeError("all masks must be boolean tensors")
+        if mask.shape != first.shape:
+            raise ValueError("all masks must have the same shape")
+        if mask.device != first.device:
+            raise ValueError("all masks must be on the same device")
+    return checked_masks
+
+
+def _validate_grouped_reduction_inputs(
+    values: torch.Tensor, group_ids: torch.Tensor, group_count: int
+) -> None:
+    if values.ndim != 1 or group_ids.ndim != 1:
+        raise ValueError("values and group_ids must be 1-D tensors")
+    if values.numel() != group_ids.numel():
+        raise ValueError("values and group_ids must have the same length")
+    if values.device != group_ids.device:
+        raise ValueError("values and group_ids must be on the same device")
+    if group_ids.dtype not in _INTEGER_DTYPES:
+        raise TypeError("group_ids must use an integer dtype")
+    if not isinstance(group_count, int) or group_count < 0:
+        raise ValueError("group_count must be a non-negative integer")
+    if values.dtype not in _INTEGER_DTYPES and not torch.is_floating_point(values):
+        raise TypeError("values must use an integer or floating-point dtype")
+    if group_ids.numel() == 0:
+        return
+    if bool(torch.any(group_ids < 0).cpu().item()) or bool(torch.any(group_ids >= group_count).cpu().item()):
+        raise ValueError("group_ids contain values out of range")
+
+
+def _require_non_empty_groups(group_ids: torch.Tensor, group_count: int) -> None:
+    counts = grouped_count(group_ids, group_count)
+    missing = torch.nonzero(counts == 0).flatten()
+    if missing.numel() == 0:
+        return
+    missing_groups = missing.cpu().tolist()
+    raise ValueError(f"grouped reduction received empty group(s): {missing_groups}")
+
+
+def _max_value(dtype: torch.dtype) -> float | int:
+    if dtype in _INTEGER_DTYPES:
+        return torch.iinfo(dtype).max
+    return float("inf")
+
+
+def _min_value(dtype: torch.dtype) -> float | int:
+    if dtype in _INTEGER_DTYPES:
+        return torch.iinfo(dtype).min
+    return float("-inf")

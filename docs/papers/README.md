@@ -13,6 +13,7 @@ PDFs are recorded explicitly rather than replaced with fake files.
 | TQEx | TQEx: Tensor-based Query Engine Enhanced by Bridging the Gap | Proc. ACM Manag. Data, Dec. 2025 | DOI: <https://doi.org/10.1145/3769835>; ACM PDF listed by metadata: <https://dl.acm.org/doi/pdf/10.1145/3769835> | — | Not downloaded: ACM endpoint returned HTTP 403/Cloudflare in this environment and OpenAlex marks the work closed OA. |
 | TQP++ | TQP++: Bridging ML Compilers and Analytical Query Processing on GPUs | VLDB 2026 Industrial Track, Aug. 2026 | Microsoft Research page: <https://www.microsoft.com/en-us/research/publication/tqp-bridging-ml-compilers-and-analytical-query-processing-on-gpus/?lang=fr-ca>; preprint link: <https://cmt3.research.microsoft.com/api/VLDBInd2026/Files/522> | — | Not downloaded: public MSR page is reachable, but the preprint endpoint returned HTTP 403 in this environment. |
 | CoddSpeed | CoddSpeed: Hardware Accelerated Query Processing in Microsoft Fabric | SIGMOD 2026 Industrial Track, May 2026 | Microsoft Research page: <https://www.microsoft.com/en-us/research/publication/coddspeed-hardware-accelerated-query-processing-in-microsoft-fabric/>; DOI: <https://doi.org/10.1145/3788853.3803077> | — | Not downloaded: no public PDF link was reachable from the MSR page; ACM PDF endpoint was HTTP 403/Cloudflare. |
+| Compressed GPU SQL | GPU Acceleration of SQL Analytics on Compressed Data | arXiv v2, Sept. 2025 | arXiv PDF: <https://arxiv.org/pdf/2506.10092> | `gpu-acceleration-sql-analytics-compressed-data.pdf` | Downloaded from arXiv on 2026-06-10. |
 
 ## Bibliographic metadata
 
@@ -57,3 +58,16 @@ PDFs are recorded explicitly rather than replaced with fake files.
   hardware-accelerated analytics effort, including a GPU execution engine
   derived from TQP and data movement over NVLink and InfiniBand. These notes
   come from the public abstract, not an unavailable full paper.
+
+### GPU Acceleration of SQL Analytics on Compressed Data
+
+- Authors from the arXiv PDF: Zezhou Huang, Krystian Sakowski, Hans
+  Lehnert, Wei Cui, Carlo Curino, Matteo Interlandi, Marius Dumitru,
+  Rathijit Sen.
+- arXiv: <https://arxiv.org/abs/2506.10092>; PDF:
+  <https://arxiv.org/pdf/2506.10092>.
+- Notes from the downloaded PDF: the paper extends TQP-style PyTorch
+  tensor execution to lightweight-compressed data. It covers RLE, Index,
+  Plain+Index, RLE+Index, bit-width reduction, dictionary encoding,
+  encoded logical operations, alignment, group-by aggregation, joins, and
+  appendix optimization rules.

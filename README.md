@@ -40,6 +40,9 @@ with explicit `UnsupportedPlanError`.
 For a module-by-module implementation guide with key code snippets, see
 [`docs/architecture.md`](docs/architecture.md).
 
+For the paper-derived operator and optimization backlog, see
+[`docs/operator-roadmap.md`](docs/operator-roadmap.md).
+
 ## Setup
 
 ```bash

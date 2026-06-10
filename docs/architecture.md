@@ -314,6 +314,13 @@ and HAVING, fails explicitly.
 The strict Substrait failures are explicit exporter limitations, not PyTorch
 backend fallbacks.
 
+## Operator roadmap
+
+The paper-derived operator and optimization backlog is tracked in
+[`docs/operator-roadmap.md`](operator-roadmap.md). It separates verified full-text
+items from abstract-derived TQEx/TQP++/CoddSpeed items and identifies the current
+implementation batches.
+
 ## Verification commands
 
 Use these commands after architecture changes:
