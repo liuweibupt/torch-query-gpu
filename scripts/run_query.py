@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--sql", help="Inline SQL text")
     source.add_argument("--sql-file", type=Path, help="SQL file path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
+    parser.add_argument(
+        "--plan-source",
+        choices=("substrait", "duckdb-logical", "auto"),
+        default="substrait",
+        help="Plan admission path before PyTorch execution",
+    )
     parser.add_argument("--json", action="store_true", help="Print result rows as JSON")
     return parser
 
@@ -27,7 +33,12 @@ def main() -> None:
     con = connect_database(args.db)
     try:
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
-        result, elapsed_ms = timed_run_sql(con, sql, device=args.device)
+        result, elapsed_ms = timed_run_sql(
+            con,
+            sql,
+            device=args.device,
+            plan_source=args.plan_source,
+        )
     finally:
         con.close()
     if args.json:

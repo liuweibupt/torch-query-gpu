@@ -34,12 +34,13 @@ def test_validate_parser_accepts_batch_queries(tmp_path):
     db_path = tmp_path / "tpch.duckdb"
 
     args = validate_parser().parse_args(
-        ["--db", str(db_path), "--queries", "1,3,5,6", "--keep-going"]
+        ["--db", str(db_path), "--queries", "1,3,5,6", "--keep-going", "--plan-source", "auto"]
     )
 
     assert args.db == db_path
     assert args.queries == "1,3,5,6"
     assert args.keep_going is True
+    assert args.plan_source == "auto"
 
 
 def test_parse_validate_query_ids_list():

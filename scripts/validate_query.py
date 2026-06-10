@@ -9,12 +9,12 @@ from typing import Callable
 
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.relational import SQLValidationResult
-from tpch_torch.runner import load_sql, validate_sql
+from tpch_torch.runner import PlanSource, load_sql, validate_sql_with_plan_source
 from tpch_torch.sql import get_tpch_query
 
 DEFAULT_SQL_TOLERANCE = 1e-2
 QueryLoader = Callable[[object, int], str]
-QueryValidator = Callable[[object, str, str], SQLValidationResult]
+QueryValidator = Callable[[object, str, str, PlanSource], SQLValidationResult]
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--sql", help="Inline SQL text")
     source.add_argument("--sql-file", type=Path, help="SQL file path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
+    parser.add_argument(
+        "--plan-source",
+        choices=("substrait", "duckdb-logical", "auto"),
+        default="substrait",
+        help="Plan admission path before PyTorch execution",
+    )
     parser.add_argument("--keep-going", action="store_true", help="Continue batch validation after a query fails")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
     return parser
@@ -54,8 +60,9 @@ def validate_queries(
     device: str,
     tolerance: float,
     keep_going: bool,
+    plan_source: PlanSource = "substrait",
     load_query: QueryLoader = get_tpch_query,
-    validator: QueryValidator = validate_sql,
+    validator: QueryValidator = validate_sql_with_plan_source,
 ) -> list[BatchValidationRecord]:
     records: list[BatchValidationRecord] = []
     for query_id in query_ids:
@@ -65,6 +72,7 @@ def validate_queries(
                 query_id,
                 device=device,
                 tolerance=tolerance,
+                plan_source=plan_source,
                 load_query=load_query,
                 validator=validator,
             )
@@ -83,11 +91,12 @@ def _validate_one_query(
     *,
     device: str,
     tolerance: float,
+    plan_source: PlanSource,
     load_query: QueryLoader,
     validator: QueryValidator,
 ) -> BatchValidationRecord:
     sql = load_query(con, query_id)
-    result = validator(con, sql, device)
+    result = validator(con, sql, device, plan_source)
     if result.max_abs_error > tolerance:
         raise AssertionError(
             f"Q{result.query_id} validation failed: "
@@ -113,12 +122,18 @@ def main() -> None:
                 device=args.device,
                 tolerance=args.tolerance,
                 keep_going=args.keep_going,
+                plan_source=args.plan_source,
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
             return
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
-        result = validate_sql(con, sql, device=args.device)
+        result = validate_sql_with_plan_source(
+            con,
+            sql,
+            device=args.device,
+            plan_source=args.plan_source,
+        )
     finally:
         con.close()
     if result.max_abs_error > args.tolerance:

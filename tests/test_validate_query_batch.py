@@ -25,8 +25,8 @@ def test_validate_queries_loads_original_sql_and_validates_each_query():
         assert isinstance(con, FakeConnection)
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device):
-        calls.append((sql, device))
+    def validator(con, sql, device, plan_source):
+        calls.append((sql, device, plan_source))
         return _result(int(sql.rsplit("q", 1)[1]))
 
     results = validate_queries(
@@ -41,14 +41,18 @@ def test_validate_queries_loads_original_sql_and_validates_each_query():
 
     assert [result.query_id for result in results] == [1, 3, 6]
     assert [result.ok for result in results] == [True, True, True]
-    assert calls == [("select -- q1", "cuda"), ("select -- q3", "cuda"), ("select -- q6", "cuda")]
+    assert calls == [
+        ("select -- q1", "cuda", "substrait"),
+        ("select -- q3", "cuda", "substrait"),
+        ("select -- q6", "cuda", "substrait"),
+    ]
 
 
 def test_validate_queries_keep_going_records_failures():
     def load_query(con, query_id):
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device):
+    def validator(con, sql, device, plan_source):
         query_id = int(sql.rsplit("q", 1)[1])
         if query_id == 3:
             raise RuntimeError("substrait export failed")
@@ -73,7 +77,7 @@ def test_validate_queries_without_keep_going_raises_first_failure():
     def load_query(con, query_id):
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device):
+    def validator(con, sql, device, plan_source):
         raise RuntimeError("substrait export failed")
 
     with pytest.raises(RuntimeError, match="substrait export failed"):
@@ -105,8 +109,8 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
         assert path == tmp_path / "tpch.duckdb"
         return con
 
-    def validate_batch(connection, query_ids, *, device, tolerance, keep_going):
-        calls.append((connection, query_ids, device, tolerance, keep_going))
+    def validate_batch(connection, query_ids, *, device, tolerance, keep_going, plan_source):
+        calls.append((connection, query_ids, device, tolerance, keep_going, plan_source))
         return [
             validate_query.BatchValidationRecord(
                 query_id=1,
@@ -142,7 +146,7 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
 
     validate_query.main()
 
-    assert calls == [(con, (1, 3), "cuda", 1e-2, True)]
+    assert calls == [(con, (1, 3), "cuda", 1e-2, True, "substrait")]
     assert con.closed is True
     assert capsys.readouterr().out.splitlines() == [
         "validated query=1 rows=4 max_abs_error=0",

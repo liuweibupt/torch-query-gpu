@@ -1,7 +1,8 @@
 import duckdb
 
 from tpch_torch.duckdb_bridge import create_lineitem_fixture, generate_tpch
-from tpch_torch.runner import load_sql, run_sql, validate_sql
+from tpch_torch.duckdb_bridge import DuckDBSubstraitError
+from tpch_torch.runner import load_sql, run_sql, run_sql_with_plan_source, validate_sql, validate_sql_with_plan_source
 from tpch_torch.sql import TPC_H_Q1_SQL
 
 
@@ -67,3 +68,55 @@ def test_validate_sql_compares_q6_with_duckdb_baseline():
     assert result.query_id == 6
     assert result.row_count == 1
     assert result.max_abs_error < 1e-6
+
+
+def test_run_sql_with_duckdb_logical_plan_source_skips_substrait_export(monkeypatch):
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    calls = []
+
+    def export_plan(connection, sql):
+        calls.append(("substrait", sql))
+        raise AssertionError("substrait export should not be called")
+
+    def export_logical(connection, sql):
+        calls.append(("logical", sql))
+
+    monkeypatch.setattr("tpch_torch.runner.export_substrait_json", export_plan)
+    monkeypatch.setattr("tpch_torch.runner.export_duckdb_logical_plan", export_logical)
+
+    result = run_sql_with_plan_source(con, TPC_H_Q1_SQL, device="cpu", plan_source="duckdb-logical")
+
+    assert result.query_id == 1
+    assert calls == [("logical", TPC_H_Q1_SQL)]
+
+
+def test_run_sql_with_auto_plan_source_uses_logical_after_substrait_export_failure(monkeypatch):
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    calls = []
+
+    def export_plan(connection, sql):
+        calls.append(("substrait", sql))
+        raise DuckDBSubstraitError("DELIM_JOIN")
+
+    def export_logical(connection, sql):
+        calls.append(("logical", sql))
+
+    monkeypatch.setattr("tpch_torch.runner.export_substrait_json", export_plan)
+    monkeypatch.setattr("tpch_torch.runner.export_duckdb_logical_plan", export_logical)
+
+    result = run_sql_with_plan_source(con, TPC_H_Q1_SQL, device="cpu", plan_source="auto")
+
+    assert result.query_id == 1
+    assert calls == [("substrait", TPC_H_Q1_SQL), ("logical", TPC_H_Q1_SQL)]
+
+
+def test_validate_sql_with_plan_source_compares_with_duckdb_baseline():
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+
+    result = validate_sql_with_plan_source(con, TPC_H_Q1_SQL, device="cpu", plan_source="duckdb-logical")
+
+    assert result.query_id == 1
+    assert result.max_abs_error < 1e-9
