@@ -2,7 +2,15 @@ import duckdb
 
 from tpch_torch.duckdb_bridge import create_lineitem_fixture, generate_tpch
 from tpch_torch.duckdb_bridge import DuckDBSubstraitError
-from tpch_torch.runner import load_sql, run_sql, run_sql_with_plan_source, validate_sql, validate_sql_with_plan_source
+from tpch_torch.runner import (
+    identify_tpch_query,
+    load_sql,
+    run_sql,
+    run_sql_with_plan_source,
+    validate_sql,
+    validate_sql_with_plan_source,
+)
+from tpch_torch.sql import get_tpch_query
 from tpch_torch.sql import TPC_H_Q1_SQL
 
 
@@ -120,3 +128,10 @@ def test_validate_sql_with_plan_source_compares_with_duckdb_baseline():
 
     assert result.query_id == 1
     assert result.max_abs_error < 1e-9
+
+
+def test_identifies_substrait_blocked_tpch_queries():
+    con = duckdb.connect()
+
+    for query_id in (2, 4, 16, 17, 20, 21, 22):
+        assert identify_tpch_query(get_tpch_query(con, query_id)) == query_id
