@@ -2,6 +2,7 @@ from pathlib import Path
 
 from scripts.run_query import build_parser as run_parser
 from scripts.validate_query import build_parser as validate_parser
+from scripts.validate_query import parse_query_ids as parse_validate_query_ids
 
 
 def test_run_parser_accepts_query_number(tmp_path):
@@ -26,6 +27,22 @@ def test_validate_parser_accepts_sql_file(tmp_path):
     args = validate_parser().parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--sql-file", str(sql_path)])
 
     assert args.sql_file == sql_path
+
+
+def test_validate_parser_accepts_batch_queries(tmp_path):
+    db_path = tmp_path / "tpch.duckdb"
+
+    args = validate_parser().parse_args(
+        ["--db", str(db_path), "--queries", "1,3,5,6", "--keep-going"]
+    )
+
+    assert args.db == db_path
+    assert args.queries == "1,3,5,6"
+    assert args.keep_going is True
+
+
+def test_parse_validate_query_ids_list():
+    assert parse_validate_query_ids("1,3,5,6") == (1, 3, 5, 6)
 
 from scripts.probe_substrait import build_parser as probe_parser
 

@@ -16,11 +16,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, required=True, help="Input DuckDB database path")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--query", type=int, help="TPC-H query number")
+    source.add_argument("--queries", help="TPC-H query ids as comma-separated numbers")
     source.add_argument("--sql", help="Inline SQL text")
     source.add_argument("--sql-file", type=Path, help="SQL file path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
+    parser.add_argument("--keep-going", action="store_true", help="Continue batch validation after a query fails")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
     return parser
+
+
+def parse_query_ids(raw: str) -> tuple[int, ...]:
+    query_ids = tuple(int(item) for item in raw.split(",") if item)
+    if not query_ids:
+        raise ValueError("at least one query id is required")
+    return query_ids
 
 
 def main() -> None:
