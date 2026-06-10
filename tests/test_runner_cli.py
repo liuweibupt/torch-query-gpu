@@ -110,3 +110,37 @@ from scripts.probe_substrait import parse_query_ids
 def test_parse_probe_query_ids_all_and_list():
     assert parse_query_ids("all") == tuple(range(1, 23))
     assert parse_query_ids("2,4,16") == (2, 4, 16)
+
+
+def test_run_query_main_prints_generic_query_label(monkeypatch, tmp_path, capsys):
+    from scripts import run_query
+    from tpch_torch.relational import QueryResult
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    def connect_database(path):
+        return FakeConnection()
+
+    def timed_run_sql(con, sql, *, device, frontend):
+        assert sql == "select count(*) as n from t"
+        assert frontend == "sirius"
+        return QueryResult(query_id=None, rows=[{"n": 2}]), 1.25
+
+    monkeypatch.setattr(run_query, "connect_database", connect_database)
+    monkeypatch.setattr(run_query, "timed_run_sql", timed_run_sql)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tpch-torch-run",
+            "--db",
+            str(tmp_path / "generic.duckdb"),
+            "--sql",
+            "select count(*) as n from t",
+        ],
+    )
+
+    run_query.main()
+
+    assert capsys.readouterr().out.splitlines() == ["{'n': 2}", "generic_pytorch_ms=1.250"]

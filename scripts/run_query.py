@@ -54,7 +54,8 @@ def main() -> None:
     else:
         for row in result.rows:
             print(row)
-    print(f"q{result.query_id:02d}_pytorch_ms={elapsed_ms:.3f}")
+    label = "generic" if result.query_id is None else f"q{result.query_id:02d}"
+    print(f"{label}_pytorch_ms={elapsed_ms:.3f}")
 
 
 if __name__ == "__main__":
