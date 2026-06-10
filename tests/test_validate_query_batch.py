@@ -86,3 +86,65 @@ def test_validate_queries_without_keep_going_raises_first_failure():
             load_query=load_query,
             validator=validator,
         )
+
+
+def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
+    from scripts import validate_query
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    con = FakeConnection()
+    calls = []
+
+    def connect_database(path):
+        assert path == tmp_path / "tpch.duckdb"
+        return con
+
+    def validate_batch(connection, query_ids, *, device, tolerance, keep_going):
+        calls.append((connection, query_ids, device, tolerance, keep_going))
+        return [
+            validate_query.BatchValidationRecord(
+                query_id=1,
+                ok=True,
+                message="validated",
+                row_count=4,
+                max_abs_error=0.0,
+            ),
+            validate_query.BatchValidationRecord(
+                query_id=3,
+                ok=True,
+                message="validated",
+                row_count=10,
+                max_abs_error=0.001,
+            ),
+        ]
+
+    monkeypatch.setattr(validate_query, "connect_database", connect_database)
+    monkeypatch.setattr(validate_query, "validate_queries", validate_batch)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tpch-torch-validate",
+            "--db",
+            str(tmp_path / "tpch.duckdb"),
+            "--queries",
+            "1,3",
+            "--device",
+            "cuda",
+            "--keep-going",
+        ],
+    )
+
+    validate_query.main()
+
+    assert calls == [(con, (1, 3), "cuda", 1e-2, True)]
+    assert con.closed is True
+    assert capsys.readouterr().out.splitlines() == [
+        "validated query=1 rows=4 max_abs_error=0",
+        "validated query=3 rows=10 max_abs_error=0.001",
+    ]

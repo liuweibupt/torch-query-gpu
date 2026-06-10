@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from scripts.run_query import build_parser as run_parser
 from scripts.validate_query import build_parser as validate_parser
@@ -43,6 +44,22 @@ def test_validate_parser_accepts_batch_queries(tmp_path):
 
 def test_parse_validate_query_ids_list():
     assert parse_validate_query_ids("1,3,5,6") == (1, 3, 5, 6)
+
+
+def test_validate_parser_rejects_query_and_queries_together(tmp_path):
+    parser = validate_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--db",
+                str(tmp_path / "tpch.duckdb"),
+                "--query",
+                "1",
+                "--queries",
+                "1,3",
+            ]
+        )
 
 from scripts.probe_substrait import build_parser as probe_parser
 

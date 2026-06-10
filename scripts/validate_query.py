@@ -60,7 +60,14 @@ def validate_queries(
     records: list[BatchValidationRecord] = []
     for query_id in query_ids:
         try:
-            record = _validate_one_query(con, query_id, device, tolerance, load_query, validator)
+            record = _validate_one_query(
+                con,
+                query_id,
+                device=device,
+                tolerance=tolerance,
+                load_query=load_query,
+                validator=validator,
+            )
         except Exception as exc:
             if not keep_going:
                 raise
@@ -73,6 +80,7 @@ def validate_queries(
 def _validate_one_query(
     con: object,
     query_id: int,
+    *,
     device: str,
     tolerance: float,
     load_query: QueryLoader,
@@ -98,6 +106,17 @@ def main() -> None:
     args = build_parser().parse_args()
     con = connect_database(args.db)
     try:
+        if args.queries is not None:
+            records = validate_queries(
+                con,
+                parse_query_ids(args.queries),
+                device=args.device,
+                tolerance=args.tolerance,
+                keep_going=args.keep_going,
+            )
+            _print_batch_records(records)
+            _raise_on_batch_failures(records)
+            return
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
         result = validate_sql(con, sql, device=args.device)
     finally:
@@ -111,6 +130,24 @@ def main() -> None:
         f"validated query={result.query_id} rows={result.row_count} "
         f"max_abs_error={result.max_abs_error:.6g}"
     )
+
+
+def _print_batch_records(records: list[BatchValidationRecord]) -> None:
+    for record in records:
+        if record.ok:
+            print(
+                f"validated query={record.query_id} rows={record.row_count} "
+                f"max_abs_error={record.max_abs_error:.6g}"
+            )
+            continue
+        print(f"failed query={record.query_id} {record.message}")
+
+
+def _raise_on_batch_failures(records: list[BatchValidationRecord]) -> None:
+    failed_query_ids = [record.query_id for record in records if not record.ok]
+    if failed_query_ids:
+        formatted = ",".join(str(query_id) for query_id in failed_query_ids)
+        raise AssertionError(f"batch validation failed: Q{formatted}")
 
 
 if __name__ == "__main__":
