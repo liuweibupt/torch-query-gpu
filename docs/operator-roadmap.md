@@ -116,8 +116,8 @@ until a readable full paper/appendix is available.
 - [x] Dictionary-encoded string columns: current repository baseline.
 - [ ] RLE columns represented by value, inclusive start, and inclusive end
       tensors sorted by start/end, with non-overlapping ranges.
-- [ ] Index columns represented by value and explicit position tensors sorted by
-      position.
+- [x] First compressed primitive step: Index mask positions represented by sorted
+      unique position tensors.
 - [ ] Plain + Index composite encoding for outlier separation and bit-width
       reduction.
 - [ ] RLE + Index composite encoding for columns with both continuous runs and
@@ -133,16 +133,16 @@ until a readable full paper/appendix is available.
 - [x] First batch: `plain_to_rle` for boolean masks.
 - [x] First batch: `rle_to_index` for RLE mask expansion to explicit positions.
 - [x] First batch: `range_intersect` for RLE/RLE interval intersection.
-- [ ] `idx_in_rle` for index positions contained in RLE ranges.
-- [ ] `rle_contain_idx` for choosing RLE ranges that contain index positions.
-- [ ] `idx_in_idx` for index/index intersection.
+- [x] `idx_in_rle` for index positions contained in RLE ranges.
+- [x] `rle_contain_idx` for choosing RLE ranges that contain index positions.
+- [x] `idx_in_idx` for index/index intersection.
 - [x] First batch: `range_union` for RLE/RLE union.
-- [ ] `merge_sorted_idx` for index/index union.
+- [x] `merge_sorted_idx` for index/index union.
 - [ ] `compact_rle` to remove gaps between RLE runs after filtering.
 - [ ] `compact_rle_index` for RLE+Index compaction.
 - [x] First batch: `complement_rle` from Appendix A.1.
-- [ ] `complement_index` from Appendix A.1.
-- [ ] `rle_to_plain`.
+- [x] `complement_index` from Appendix A.1.
+- [x] `rle_to_plain`.
 - [ ] `plain_to_rle_index` for Plain → RLE+Index.
 - [ ] `plain_to_plain_index` for Plain → Plain+Index.
 - [ ] `range_arange` helper used to generate positions/runs in range algorithms
@@ -154,16 +154,16 @@ until a readable full paper/appendix is available.
 - [ ] AND for RLE/RLE: `range_intersect`.
 - [ ] AND for RLE/Plain: choose RLE→Index or RLE→Plain conversion before direct
       application, with explicit cost model.
-- [ ] AND for RLE/Index: choose `idx_in_rle` or `rle_contain_idx` by relative
-      input sizes.
-- [ ] AND for Index/Index: `idx_in_idx`.
+- [x] Primitive support for RLE/Index AND via `idx_in_rle` and `rle_contain_idx`;
+      cost-based selection remains pending.
+- [x] AND for Index/Index: `idx_in_idx`.
 - [ ] OR for RLE/RLE: `range_union`.
-- [ ] OR for Index/Index: `merge_sorted_idx`.
+- [x] OR for Index/Index: `merge_sorted_idx`.
 - [ ] OR for mixed RLE/Plain and RLE/Index: conversion or bucketized inclusion as
       indicated by the encoded-mask design tables.
 - [ ] NOT Plain: tensor complement.
 - [ ] NOT RLE: `complement_rle`.
-- [ ] NOT Index: `complement_index`, returning RLE because complements of sparse
+- [x] NOT Index: `complement_index`, returning RLE because complements of sparse
       masks are usually continuous.
 - [ ] Composite mask rewrites with De Morgan expansions for RLE+Index and
       Plain+Index instead of bespoke special-case kernels.
@@ -320,7 +320,8 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 ### Batch 4: compressed storage and mask execution
 
 - [ ] Encoding metadata and RLE/Index column storage.
-- [ ] Encoded logical mask operations and alignment.
+- [x] First encoded logical mask primitives for RLE/Index/Index combinations.
+- [ ] Full encoded logical mask dispatch and alignment.
 - [ ] Encoded selection and predicate pushdown.
 
 ### Batch 5: compressed aggregate and join execution

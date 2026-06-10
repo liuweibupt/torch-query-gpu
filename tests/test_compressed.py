@@ -102,3 +102,72 @@ def test_compressed_helpers_reject_invalid_inputs():
         plain_to_rle(torch.tensor([1, 0]))
     with pytest.raises(ValueError, match="row_count"):
         complement_rle(RLERanges.empty(device=torch.device("cpu")), row_count=-1)
+
+
+def test_idx_in_rle_returns_index_positions_inside_ranges():
+    from tpch_torch.compressed import idx_in_rle
+
+    positions = torch.tensor([2, 4, 7, 9], dtype=torch.int64)
+    ranges = RLERanges(starts=torch.tensor([0, 6]), ends=torch.tensor([2, 7]))
+
+    assert idx_in_rle(positions, ranges).tolist() == [2, 7]
+
+
+def test_rle_contain_idx_returns_ranges_that_contain_positions():
+    from tpch_torch.compressed import rle_contain_idx
+
+    positions = torch.tensor([2, 4, 7], dtype=torch.int64)
+    ranges = RLERanges(starts=torch.tensor([0, 6, 10]), ends=torch.tensor([2, 7, 12]))
+
+    result = rle_contain_idx(positions, ranges)
+
+    assert result.starts.tolist() == [0, 6]
+    assert result.ends.tolist() == [2, 7]
+
+
+def test_idx_in_idx_intersects_sorted_index_positions():
+    from tpch_torch.compressed import idx_in_idx
+
+    left = torch.tensor([1, 2, 4, 7], dtype=torch.int64)
+    right = torch.tensor([2, 3, 7, 9], dtype=torch.int64)
+
+    assert idx_in_idx(left, right).tolist() == [2, 7]
+
+
+def test_merge_sorted_idx_unions_sorted_index_positions():
+    from tpch_torch.compressed import merge_sorted_idx
+
+    left = torch.tensor([1, 2, 7], dtype=torch.int64)
+    right = torch.tensor([2, 3, 7, 9], dtype=torch.int64)
+
+    assert merge_sorted_idx(left, right).tolist() == [1, 2, 3, 7, 9]
+
+
+def test_complement_index_returns_rle_ranges():
+    from tpch_torch.compressed import complement_index
+
+    positions = torch.tensor([1, 3, 4], dtype=torch.int64)
+
+    result = complement_index(positions, row_count=6)
+
+    assert result.starts.tolist() == [0, 2, 5]
+    assert result.ends.tolist() == [0, 2, 5]
+
+
+def test_rle_to_plain_materializes_boolean_mask():
+    from tpch_torch.compressed import rle_to_plain
+
+    ranges = RLERanges(starts=torch.tensor([1, 4]), ends=torch.tensor([2, 4]))
+
+    assert rle_to_plain(ranges, row_count=6).tolist() == [False, True, True, False, True, False]
+
+
+def test_index_helpers_reject_unsorted_or_out_of_bounds_inputs():
+    from tpch_torch.compressed import complement_index, idx_in_idx, rle_to_plain
+
+    with pytest.raises(ValueError, match="sorted"):
+        idx_in_idx(torch.tensor([2, 1]), torch.tensor([1, 2]))
+    with pytest.raises(ValueError, match="row_count"):
+        complement_index(torch.tensor([3]), row_count=3)
+    with pytest.raises(ValueError, match="row_count"):
+        rle_to_plain(RLERanges(starts=torch.tensor([0]), ends=torch.tensor([2])), row_count=2)

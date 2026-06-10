@@ -129,7 +129,8 @@ Current implementation status:
 - [x] Batch 1 paper primitives: grouped min/max/mean, mask helpers, top-k, and first RLE mask primitives.
 - [x] Batch 2 generic SQL basics: `MIN`, `MAX`, `AVG`, `COUNT(col)`, boolean filters (`AND`/`OR`/`NOT`), `IN`, `LIKE`, and `ORDER BY ASC/DESC`.
 - [ ] Generic joins and subquery lowering.
-- [ ] Compressed storage metadata and encoded mask execution.
+- [x] First compressed mask primitives: RLE/Index intersection, Index/Index intersection/union, `complement_index`, and `rle_to_plain`.
+- [ ] Compressed storage metadata and full encoded mask execution.
 - [ ] Compressed aggregation/join execution and compression-aware optimizer rules.
 - [ ] Compiler/fusion/scheduling experiments.
 

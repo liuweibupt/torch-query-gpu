@@ -92,6 +92,19 @@ def rle_to_index(ranges: RLERanges) -> torch.Tensor:
 
 
 
+def rle_to_plain(ranges: RLERanges, row_count: int) -> torch.Tensor:
+    """Materialize inclusive RLE mask ranges as a plain boolean mask."""
+
+    _validate_row_count(row_count)
+    if ranges.starts.numel() and bool(torch.any(ranges.ends >= row_count).cpu().item()):
+        raise ValueError("RLE ranges cannot extend past row_count")
+    mask = torch.zeros(row_count, dtype=torch.bool, device=ranges.device)
+    if ranges.starts.numel() == 0:
+        return mask
+    mask[rle_to_index(ranges)] = True
+    return mask
+
+
 def range_intersect(left: RLERanges, right: RLERanges) -> RLERanges:
     """Return pairwise overlaps between two sorted inclusive RLE range sets."""
 
@@ -143,8 +156,7 @@ def range_union(left: RLERanges, right: RLERanges) -> RLERanges:
 def complement_rle(ranges: RLERanges, row_count: int) -> RLERanges:
     """Return ranges not selected by `ranges` inside `[0, row_count)`."""
 
-    if not isinstance(row_count, int) or row_count < 0:
-        raise ValueError("row_count must be a non-negative integer")
+    _validate_row_count(row_count)
     if ranges.starts.numel() == 0:
         if row_count == 0:
             return RLERanges.empty(ranges.device)
@@ -171,6 +183,74 @@ def complement_rle(ranges: RLERanges, row_count: int) -> RLERanges:
         starts=torch.tensor(complement_starts, dtype=torch.int64, device=ranges.device),
         ends=torch.tensor(complement_ends, dtype=torch.int64, device=ranges.device),
     )
+
+
+def idx_in_rle(positions: torch.Tensor, ranges: RLERanges) -> torch.Tensor:
+    """Return sorted index positions contained within any RLE range."""
+
+    _validate_index_positions(positions, name="positions")
+    if positions.numel() == 0 or ranges.starts.numel() == 0:
+        return torch.empty(0, dtype=torch.int64, device=positions.device)
+    _validate_compatible_index_and_ranges(positions, ranges)
+    bins = torch.searchsorted(ranges.starts, positions, right=True) - 1
+    valid_bins = bins >= 0
+    safe_bins = torch.clamp(bins, min=0)
+    selected = valid_bins & (positions <= ranges.ends[safe_bins])
+    return positions[selected]
+
+
+def rle_contain_idx(positions: torch.Tensor, ranges: RLERanges) -> RLERanges:
+    """Return ranges that contain at least one index position."""
+
+    _validate_index_positions(positions, name="positions")
+    if positions.numel() == 0 or ranges.starts.numel() == 0:
+        return RLERanges.empty(ranges.device)
+    _validate_compatible_index_and_ranges(positions, ranges)
+    bins_start = torch.searchsorted(positions, ranges.starts, right=False)
+    bins_end = torch.searchsorted(positions, ranges.ends, right=True)
+    selected = bins_end > bins_start
+    return RLERanges(starts=ranges.starts[selected], ends=ranges.ends[selected])
+
+
+def idx_in_idx(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Return sorted positions present in both sorted index tensors."""
+
+    _validate_index_positions(left, name="left")
+    _validate_index_positions(right, name="right")
+    _validate_compatible_indices(left, right)
+    if left.numel() == 0 or right.numel() == 0:
+        return torch.empty(0, dtype=torch.int64, device=left.device)
+    positions = torch.searchsorted(right, left)
+    in_bounds = positions < right.numel()
+    safe_positions = torch.clamp(positions, max=max(int(right.numel()) - 1, 0))
+    matched = in_bounds & (right[safe_positions] == left)
+    return left[matched]
+
+
+def merge_sorted_idx(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Return the sorted union of two sorted index tensors."""
+
+    _validate_index_positions(left, name="left")
+    _validate_index_positions(right, name="right")
+    _validate_compatible_indices(left, right)
+    if left.numel() == 0:
+        return right
+    if right.numel() == 0:
+        return left
+    return torch.unique(torch.cat((left, right)), sorted=True)
+
+
+def complement_index(positions: torch.Tensor, row_count: int) -> RLERanges:
+    """Return the complement of sorted index positions as RLE ranges."""
+
+    _validate_row_count(row_count)
+    _validate_index_positions(positions, name="positions")
+    if positions.numel() and bool(torch.any(positions >= row_count).cpu().item()):
+        raise ValueError("index positions cannot extend past row_count")
+    selected = torch.zeros(row_count, dtype=torch.bool, device=positions.device)
+    if positions.numel():
+        selected[positions] = True
+    return plain_to_rle(torch.logical_not(selected))
 
 
 
@@ -217,3 +297,33 @@ def _range_arange(starts: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         + torch.arange(total_size, dtype=torch.int64, device=starts.device)
         - torch.repeat_interleave(offsets, lengths)
     )
+
+
+def _validate_row_count(row_count: int) -> None:
+    if not isinstance(row_count, int) or row_count < 0:
+        raise ValueError("row_count must be a non-negative integer")
+
+
+def _validate_index_positions(positions: torch.Tensor, name: str) -> None:
+    if positions.ndim != 1:
+        raise ValueError(f"{name} index positions must be a 1-D tensor")
+    if positions.dtype not in _INTEGER_DTYPES:
+        raise TypeError(f"{name} index positions must use an integer dtype")
+    if positions.numel() == 0:
+        return
+    if bool(torch.any(positions < 0).cpu().item()):
+        raise ValueError(f"{name} index positions must be non-negative")
+    if positions.numel() == 1:
+        return
+    if bool(torch.any(positions[1:] <= positions[:-1]).cpu().item()):
+        raise ValueError(f"{name} index positions must be sorted and unique")
+
+
+def _validate_compatible_indices(left: torch.Tensor, right: torch.Tensor) -> None:
+    if left.device != right.device:
+        raise ValueError("index position tensors must be on the same device")
+
+
+def _validate_compatible_index_and_ranges(positions: torch.Tensor, ranges: RLERanges) -> None:
+    if positions.device != ranges.device:
+        raise ValueError("index positions and RLE ranges must be on the same device")
