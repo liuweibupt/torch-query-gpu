@@ -1,4 +1,4 @@
-"""Validate supported SQL through DuckDB Substrait and PyTorch."""
+"""Validate supported SQL through a TQP frontend and PyTorch backend."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Callable
 
 from tpch_torch.duckdb_bridge import connect_database
+from tpch_torch.ir import FrontendName
 from tpch_torch.relational import SQLValidationResult
-from tpch_torch.runner import PlanSource, load_sql, validate_sql_with_plan_source
+from tpch_torch.runner import PlanSource, load_sql, validate_sql_with_frontend
 from tpch_torch.sql import get_tpch_query
 
 DEFAULT_SQL_TOLERANCE = 1e-2
@@ -17,7 +18,7 @@ FIRST_TPCH_QUERY_ID = 1
 LAST_TPCH_QUERY_ID = 22
 ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
-QueryValidator = Callable[[object, str, str, PlanSource], SQLValidationResult]
+QueryValidator = Callable[[object, str, str, FrontendName], SQLValidationResult]
 
 
 @dataclass(frozen=True)
@@ -34,15 +35,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, required=True, help="Input DuckDB database path")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--query", type=int, help="TPC-H query number")
-    source.add_argument("--queries", help="TPC-H query ids as comma-separated numbers")
+    source.add_argument("--queries", help="TPC-H query ids as comma-separated numbers or 'all'")
     source.add_argument("--sql", help="Inline SQL text")
     source.add_argument("--sql-file", type=Path, help="SQL file path")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="Execution device")
     parser.add_argument(
+        "--frontend",
+        choices=("sirius", "substrait", "auto"),
+        default="sirius",
+        help="TQP frontend used before PyTorch execution",
+    )
+    parser.add_argument(
         "--plan-source",
         choices=("substrait", "duckdb-logical", "auto"),
-        default="substrait",
-        help="Plan admission path before PyTorch execution",
+        default=None,
+        help="Legacy alias for --frontend: duckdb-logical maps to sirius",
     )
     parser.add_argument("--keep-going", action="store_true", help="Continue batch validation after a query fails")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
@@ -65,9 +72,9 @@ def validate_queries(
     device: str,
     tolerance: float,
     keep_going: bool,
-    plan_source: PlanSource = "substrait",
+    frontend: FrontendName = "sirius",
     load_query: QueryLoader = get_tpch_query,
-    validator: QueryValidator = validate_sql_with_plan_source,
+    validator: QueryValidator = validate_sql_with_frontend,
 ) -> list[BatchValidationRecord]:
     records: list[BatchValidationRecord] = []
     for query_id in query_ids:
@@ -77,7 +84,7 @@ def validate_queries(
                 query_id,
                 device=device,
                 tolerance=tolerance,
-                plan_source=plan_source,
+                frontend=frontend,
                 load_query=load_query,
                 validator=validator,
             )
@@ -96,12 +103,12 @@ def _validate_one_query(
     *,
     device: str,
     tolerance: float,
-    plan_source: PlanSource,
+    frontend: FrontendName,
     load_query: QueryLoader,
     validator: QueryValidator,
 ) -> BatchValidationRecord:
     sql = load_query(con, query_id)
-    result = validator(con, sql, device, plan_source)
+    result = validator(con, sql, device, frontend)
     if result.max_abs_error > tolerance:
         raise AssertionError(
             f"Q{result.query_id} validation failed: "
@@ -118,6 +125,7 @@ def _validate_one_query(
 
 def main() -> None:
     args = build_parser().parse_args()
+    frontend = resolve_frontend(args.frontend, args.plan_source)
     con = connect_database(args.db)
     try:
         if args.queries is not None:
@@ -127,17 +135,17 @@ def main() -> None:
                 device=args.device,
                 tolerance=args.tolerance,
                 keep_going=args.keep_going,
-                plan_source=args.plan_source,
+                frontend=frontend,
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
             return
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
-        result = validate_sql_with_plan_source(
+        result = validate_sql_with_frontend(
             con,
             sql,
             device=args.device,
-            plan_source=args.plan_source,
+            frontend=frontend,
         )
     finally:
         con.close()
@@ -150,6 +158,23 @@ def main() -> None:
         f"validated query={result.query_id} rows={result.row_count} "
         f"max_abs_error={result.max_abs_error:.6g}"
     )
+
+
+def resolve_frontend(frontend: FrontendName, plan_source: PlanSource | None) -> FrontendName:
+    if plan_source is None:
+        return frontend
+    legacy_frontend = _frontend_from_plan_source(plan_source)
+    if frontend != "sirius" and frontend != legacy_frontend:
+        raise ValueError(f"conflicting --frontend {frontend} and --plan-source {plan_source}")
+    return legacy_frontend
+
+
+def _frontend_from_plan_source(plan_source: PlanSource) -> FrontendName:
+    if plan_source == "duckdb-logical":
+        return "sirius"
+    if plan_source in {"substrait", "auto"}:
+        return plan_source
+    raise ValueError(f"unknown plan_source: {plan_source}")
 
 
 def _print_batch_records(records: list[BatchValidationRecord]) -> None:
