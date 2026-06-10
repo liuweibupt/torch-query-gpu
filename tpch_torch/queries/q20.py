@@ -26,9 +26,19 @@ def execute_q20(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dic
     line_composite = composite_key(line_keys[:, 0], line_keys[:, 1], multiplier)
     ps_composite = composite_key(partsupp.columns["ps_partkey"], partsupp.columns["ps_suppkey"], multiplier)
     shipped_quantity = lookup_values(line_composite, quantity_sum, ps_composite, missing_value=0.0)
+    has_shipment = (
+        lookup_values(
+            line_composite,
+            torch.ones(quantity_sum.shape, dtype=torch.int64, device=quantity_sum.device),
+            ps_composite,
+            missing_value=0,
+        )
+        == 1
+    )
     forest_partkeys = part.columns["p_partkey"][string_startswith(part, "p_name", "forest")]
     qualifying_suppkeys = torch.unique(partsupp.columns["ps_suppkey"][
         torch.isin(partsupp.columns["ps_partkey"], forest_partkeys)
+        & has_shipment
         & (partsupp.columns["ps_availqty"] > 0.5 * shipped_quantity)
     ])
     canada_key = nation.columns["n_nationkey"][string_eq(nation, "n_name", "CANADA")][0]
