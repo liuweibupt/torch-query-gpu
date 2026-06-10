@@ -28,6 +28,9 @@ The project does **not** rewrite SQL to avoid planner limitations, does **not**
 fabricate Substrait JSON, and does **not** use DuckDB result rows as PyTorch
 output. DuckDB rows are used only as the validation baseline.
 
+For a module-by-module implementation guide with key code snippets, see
+[`docs/architecture.md`](docs/architecture.md).
+
 ## Setup
 
 ```bash
