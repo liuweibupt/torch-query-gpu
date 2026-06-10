@@ -33,6 +33,25 @@ def test_fetch_lineitem_tensor_table_reads_duckdb_fixture():
     assert table.decode_value("l_returnflag", 0) == "A"
 
 
+def test_fetch_lineitem_tensor_table_uses_preencoded_string_columns(monkeypatch):
+    from tpch_torch import duckdb_bridge
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+
+    def fail_generic_encoder(*args, **kwargs):
+        raise AssertionError("Q1 lineitem fetch should not build object string tensors")
+
+    monkeypatch.setattr(duckdb_bridge, "table_from_columnar", fail_generic_encoder, raising=False)
+
+    table = fetch_lineitem_tensor_table(con, device="cpu")
+
+    assert table.dictionaries["l_returnflag"] == ("A", "N", "R")
+    assert table.dictionaries["l_linestatus"] == ("F", "O")
+    assert table.columns["l_returnflag"].tolist() == [1, 1, 0, 1]
+    assert table.columns["l_linestatus"].tolist() == [1, 1, 0, 1]
+
+
 def test_run_duckdb_sql_returns_q1_baseline_rows():
     con = duckdb.connect()
     create_lineitem_fixture(con, FIXTURE_ROWS)

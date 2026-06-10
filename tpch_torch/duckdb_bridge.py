@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import duckdb
+import torch
 
-from tpch_torch.storage import TensorTable, table_from_columnar
+from tpch_torch.storage import TensorTable
 
 LINEITEM_COLUMNS = (
     "l_returnflag",
@@ -22,8 +23,17 @@ LINEITEM_COLUMNS = (
 )
 LINEITEM_SELECT_FOR_TORCH = """
 select
-    l_returnflag,
-    l_linestatus,
+    case l_returnflag
+        when 'A' then 0
+        when 'N' then 1
+        when 'R' then 2
+        else error('unexpected l_returnflag value: ' || l_returnflag)
+    end::bigint as l_returnflag,
+    case l_linestatus
+        when 'F' then 0
+        when 'O' then 1
+        else error('unexpected l_linestatus value: ' || l_linestatus)
+    end::bigint as l_linestatus,
     l_quantity::double as l_quantity,
     l_extendedprice::double as l_extendedprice,
     l_discount::double as l_discount,
@@ -31,6 +41,10 @@ select
     strftime(l_shipdate, '%Y%m%d')::integer as l_shipdate
 from lineitem
 """.strip()
+LINEITEM_DICTIONARIES = {
+    "l_returnflag": ("A", "N", "R"),
+    "l_linestatus": ("F", "O"),
+}
 
 
 class DuckDBSubstraitError(RuntimeError):
@@ -103,7 +117,28 @@ def fetch_lineitem_tensor_table(
     """Fetch Q1 lineitem columns into a columnar `TensorTable`."""
 
     columnar = con.execute(LINEITEM_SELECT_FOR_TORCH).fetchnumpy()
-    return table_from_columnar(columnar, device=device)
+    return _lineitem_table_from_preencoded_columnar(columnar, device=device)
+
+
+def _lineitem_table_from_preencoded_columnar(
+    columnar: dict[str, Any], device: str | torch.device
+) -> TensorTable:
+    columns = {
+        "l_returnflag": torch.as_tensor(
+            columnar["l_returnflag"], dtype=torch.int64, device=device
+        ),
+        "l_linestatus": torch.as_tensor(
+            columnar["l_linestatus"], dtype=torch.int64, device=device
+        ),
+        "l_quantity": torch.as_tensor(columnar["l_quantity"], dtype=torch.float64, device=device),
+        "l_extendedprice": torch.as_tensor(
+            columnar["l_extendedprice"], dtype=torch.float64, device=device
+        ),
+        "l_discount": torch.as_tensor(columnar["l_discount"], dtype=torch.float64, device=device),
+        "l_tax": torch.as_tensor(columnar["l_tax"], dtype=torch.float64, device=device),
+        "l_shipdate": torch.as_tensor(columnar["l_shipdate"], dtype=torch.int32, device=device),
+    }
+    return TensorTable(columns=columns, dictionaries=LINEITEM_DICTIONARIES)
 
 
 def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:

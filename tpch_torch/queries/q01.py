@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from tpch_torch.operators import composite_group_ids, grouped_count, grouped_sum
 from tpch_torch.storage import TensorTable
 from tpch_torch.substrait import Q1Plan
 
@@ -28,21 +28,54 @@ def execute_q1(table: TensorTable, plan: Q1Plan) -> list[dict[str, Any]]:
     """Execute the validated TPC-H Q1 plan against a columnar tensor table."""
 
     table.require_columns(plan.required_columns)
-    filtered = _filter_q1(table, plan.shipdate_cutoff_yyyymmdd)
-    if filtered["l_shipdate"].numel() == 0:
+    filtered = _filter_q1(table, plan)
+    if _filtered_row_count(filtered) == 0:
         return []
 
-    group_ids, unique_keys = composite_group_ids(
-        [filtered["l_returnflag"], filtered["l_linestatus"]]
-    )
-    group_count = int(unique_keys.shape[0])
-    aggregates = _aggregate_q1(filtered, group_ids, group_count)
+    grouping = _build_low_cardinality_grouping(table, filtered)
+    aggregates = _aggregate_q1(filtered, grouping.group_ids, grouping.total_group_count)
+    non_empty_group_ids, aggregates = _compact_groups(aggregates)
+    unique_keys = _decode_group_ids(non_empty_group_ids, grouping.status_count)
     return _format_rows(table, unique_keys, aggregates)
 
 
-def _filter_q1(table: TensorTable, shipdate_cutoff_yyyymmdd: int) -> dict[str, torch.Tensor]:
-    mask = table.columns["l_shipdate"] <= shipdate_cutoff_yyyymmdd
-    return {name: tensor[mask] for name, tensor in table.columns.items()}
+@dataclass(frozen=True)
+class _Q1Grouping:
+    group_ids: torch.Tensor
+    status_count: int
+    total_group_count: int
+
+
+def _filter_q1(table: TensorTable, plan: Q1Plan) -> dict[str, torch.Tensor]:
+    mask = table.columns["l_shipdate"] <= plan.shipdate_cutoff_yyyymmdd
+    selected_rows = torch.nonzero(mask).flatten()
+    return {
+        name: table.columns[name].index_select(0, selected_rows)
+        for name in plan.required_columns
+        if name != "l_shipdate"
+    }
+
+
+def _filtered_row_count(columns: dict[str, torch.Tensor]) -> int:
+    first_column = next(iter(columns.values()), None)
+    if first_column is None:
+        return 0
+    return int(first_column.numel())
+
+
+def _build_low_cardinality_grouping(
+    table: TensorTable, columns: dict[str, torch.Tensor]
+) -> _Q1Grouping:
+    status_count = len(table.dictionaries["l_linestatus"])
+    flag_count = len(table.dictionaries["l_returnflag"])
+    group_ids = (columns["l_returnflag"].to(dtype=torch.int64) * status_count) + columns[
+        "l_linestatus"
+    ].to(dtype=torch.int64)
+    return _Q1Grouping(
+        group_ids=group_ids,
+        status_count=status_count,
+        total_group_count=flag_count * status_count,
+    )
 
 
 def _aggregate_q1(
@@ -55,23 +88,38 @@ def _aggregate_q1(
 
     discounted_price = extendedprice * (1.0 - discount)
     charge = discounted_price * (1.0 + tax)
-    count_order = grouped_count(group_ids, group_count)
+    count_order = torch.bincount(group_ids, minlength=group_count)
     count_as_float = count_order.to(dtype=quantity.dtype)
 
-    sum_qty = grouped_sum(quantity, group_ids, group_count)
-    sum_base_price = grouped_sum(extendedprice, group_ids, group_count)
-    sum_discount = grouped_sum(discount, group_ids, group_count)
+    sum_qty = torch.bincount(group_ids, weights=quantity, minlength=group_count)
+    sum_base_price = torch.bincount(group_ids, weights=extendedprice, minlength=group_count)
+    sum_discount = torch.bincount(group_ids, weights=discount, minlength=group_count)
 
     return {
         "sum_qty": sum_qty,
         "sum_base_price": sum_base_price,
-        "sum_disc_price": grouped_sum(discounted_price, group_ids, group_count),
-        "sum_charge": grouped_sum(charge, group_ids, group_count),
+        "sum_disc_price": torch.bincount(
+            group_ids, weights=discounted_price, minlength=group_count
+        ),
+        "sum_charge": torch.bincount(group_ids, weights=charge, minlength=group_count),
         "avg_qty": sum_qty / count_as_float,
         "avg_price": sum_base_price / count_as_float,
         "avg_disc": sum_discount / count_as_float,
         "count_order": count_order,
     }
+
+
+def _compact_groups(
+    aggregates: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    count_order = aggregates["count_order"]
+    non_empty_group_ids = torch.nonzero(count_order > 0).flatten()
+    compacted = {name: tensor[non_empty_group_ids] for name, tensor in aggregates.items()}
+    return non_empty_group_ids, compacted
+
+
+def _decode_group_ids(group_ids: torch.Tensor, status_count: int) -> torch.Tensor:
+    return torch.stack((group_ids // status_count, group_ids % status_count), dim=1)
 
 
 def _format_rows(

@@ -1,5 +1,6 @@
 import pytest
 
+import tpch_torch.queries.q01 as q01_module
 from tpch_torch.queries.q01 import execute_q1
 from tpch_torch.storage import TensorTable, table_from_rows
 from tpch_torch.substrait import Q1Plan
@@ -117,6 +118,136 @@ def test_execute_q1_matches_expected_aggregates(q1_plan):
             "count_order": 2,
         },
     ]
+
+
+def test_execute_q1_does_not_use_general_unique_grouping(q1_plan, monkeypatch):
+    table = table_from_rows(
+        [
+            {
+                "l_returnflag": "N",
+                "l_linestatus": "O",
+                "l_quantity": 10.0,
+                "l_extendedprice": 100.0,
+                "l_discount": 0.05,
+                "l_tax": 0.10,
+                "l_shipdate": "1998-09-02",
+            },
+            {
+                "l_returnflag": "N",
+                "l_linestatus": "O",
+                "l_quantity": 20.0,
+                "l_extendedprice": 200.0,
+                "l_discount": 0.10,
+                "l_tax": 0.20,
+                "l_shipdate": "1998-09-02",
+            },
+            {
+                "l_returnflag": "A",
+                "l_linestatus": "F",
+                "l_quantity": 5.0,
+                "l_extendedprice": 50.0,
+                "l_discount": 0.0,
+                "l_tax": 0.08,
+                "l_shipdate": "1998-01-01",
+            },
+        ],
+        device="cpu",
+    )
+
+    def fail_unique_grouping(*args, **kwargs):
+        raise AssertionError("Q1 should avoid general unique grouping for dictionary keys")
+
+    monkeypatch.setattr(q01_module, "composite_group_ids", fail_unique_grouping, raising=False)
+
+    rows = execute_q1(table, q1_plan)
+
+    assert [
+        (row["l_returnflag"], row["l_linestatus"], row["count_order"]) for row in rows
+    ] == [
+        ("A", "F", 1),
+        ("N", "O", 2),
+    ]
+
+
+def test_execute_q1_returns_empty_rows_without_filtering_shipdate(q1_plan):
+    table = table_from_rows(
+        [
+            {
+                "l_returnflag": "N",
+                "l_linestatus": "O",
+                "l_quantity": 10.0,
+                "l_extendedprice": 100.0,
+                "l_discount": 0.05,
+                "l_tax": 0.10,
+                "l_shipdate": "1998-09-03",
+            }
+        ],
+        device="cpu",
+    )
+
+    rows = execute_q1(table, q1_plan)
+
+    assert rows == []
+
+
+def test_q1_filter_does_not_materialize_shipdate_payload(q1_plan):
+    table = table_from_rows(
+        [
+            {
+                "l_returnflag": "N",
+                "l_linestatus": "O",
+                "l_quantity": 10.0,
+                "l_extendedprice": 100.0,
+                "l_discount": 0.05,
+                "l_tax": 0.10,
+                "l_shipdate": "1998-09-02",
+            }
+        ],
+        device="cpu",
+    )
+
+    filtered = q01_module._filter_q1(table, q1_plan)
+
+    assert "l_shipdate" not in filtered
+
+
+def test_q1_filter_computes_selected_row_index_once(q1_plan, monkeypatch):
+    table = table_from_rows(
+        [
+            {
+                "l_returnflag": "N",
+                "l_linestatus": "O",
+                "l_quantity": 10.0,
+                "l_extendedprice": 100.0,
+                "l_discount": 0.05,
+                "l_tax": 0.10,
+                "l_shipdate": "1998-09-02",
+            },
+            {
+                "l_returnflag": "R",
+                "l_linestatus": "F",
+                "l_quantity": 5.0,
+                "l_extendedprice": 50.0,
+                "l_discount": 0.0,
+                "l_tax": 0.08,
+                "l_shipdate": "1998-09-03",
+            },
+        ],
+        device="cpu",
+    )
+    calls = []
+    original_nonzero = q01_module.torch.nonzero
+
+    def recording_nonzero(*args, **kwargs):
+        calls.append(args[0])
+        return original_nonzero(*args, **kwargs)
+
+    monkeypatch.setattr(q01_module.torch, "nonzero", recording_nonzero)
+
+    filtered = q01_module._filter_q1(table, q1_plan)
+
+    assert len(calls) == 1
+    assert filtered["l_quantity"].tolist() == [10.0]
 
 
 def test_execute_q1_rejects_missing_required_column(q1_plan):
