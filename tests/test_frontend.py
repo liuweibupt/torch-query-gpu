@@ -90,3 +90,17 @@ def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch
     assert plan.frontend == "sirius"
     assert plan.source_sql == "select count(*) as n from lineitem"
     assert calls == ["select count(*) as n from lineitem"]
+
+
+def test_sirius_frontend_admits_non_executable_generic_sql(monkeypatch):
+    def export_logical(con, sql):
+        return DummyLogicalPlan()
+
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
+
+    con = duckdb.connect()
+    plan = compile_sirius_plan(con, "select * from t join u on t.id = u.id")
+
+    assert plan.query_id is None
+    assert plan.generic_plan is None
+    assert "joins are not supported" in plan.generic_error

@@ -27,3 +27,4 @@ class TQPPlan:
     duckdb_metadata: DuckDBPlanMetadata | None = None
     plan_json: dict[str, Any] | None = None
     generic_plan: Any | None = None
+    generic_error: str | None = None

@@ -28,6 +28,13 @@ The project does **not** rewrite SQL to avoid planner limitations, does **not**
 fabricate Substrait JSON, and does **not** use DuckDB result rows as PyTorch
 output. DuckDB rows are used only as the validation baseline.
 
+The Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
+PyTorch backend currently executes all TPC-H Q1-Q22 templates plus an explicit
+generic SQL subset: single-table `SELECT`, `WHERE`, arithmetic projection,
+`COUNT(*)`, `SUM(col)`, simple `GROUP BY`, `ORDER BY`, and `LIMIT`. SQL outside
+that backend subset is still admitted by the frontend but fails at backend
+execution with explicit `UnsupportedPlanError`.
+
 For a module-by-module implementation guide with key code snippets, see
 [`docs/architecture.md`](docs/architecture.md).
 
@@ -58,11 +65,21 @@ tpch-torch-gen-sf1 --db data/tpch_sf1.duckdb --sf 1
 The generic commands read SQL directly from `--query`, `--sql`, or
 `--sql-file`. They do not require manually exported JSON.
 
-Default Sirius-like frontend:
+Default Sirius-like frontend for TPC-H templates:
 
 ```bash
 tpch-torch-run --db data/tpch_sf1.duckdb --query 21 --device cuda --frontend sirius
 tpch-torch-validate --db data/tpch_sf1.duckdb --query 21 --device cuda --frontend sirius
+```
+
+Default Sirius-like frontend for a generic SQL subset:
+
+```bash
+tpch-torch-validate \
+  --db data/tpch_sf1.duckdb \
+  --sql "select count(*) as n from lineitem" \
+  --device cuda \
+  --frontend sirius
 ```
 
 All TPC-H queries through the default clean path:
@@ -131,16 +148,17 @@ Frontends compile original SQL into `TQPPlan`:
 
 ### TQP IR
 
-`TQPPlan` is the internal plan object between frontend and backend. The first IR
-version records the source SQL, query id, frontend, DuckDB plan metadata, and
-optional real Substrait JSON. It is intentionally small so the project can keep
-TPC-H correctness while evolving toward an operator graph IR.
+`TQPPlan` is the internal plan object between frontend and backend. It records
+the source SQL, optional TPC-H query id, frontend, DuckDB plan metadata, optional
+real Substrait JSON, and optional generic operator plan. TPC-H templates use
+`query_id`; non-TPC-H SQL uses `query_id=None` plus `generic_plan`.
 
 ### PyTorch backend
 
 `PyTorchBackend` executes `TQPPlan` with existing correctness-first tensor
-operators in `tpch_torch/queries/q01.py` through `q22.py`. This keeps backend
-execution separate from SQL admission.
+operators in `tpch_torch/queries/q01.py` through `q22.py` for TPC-H templates,
+and with `tpch_torch/backend/generic.py` for the supported generic SQL subset.
+This keeps backend execution separate from SQL admission.
 
 ## Native DuckDB Substrait policy (B方案)
 

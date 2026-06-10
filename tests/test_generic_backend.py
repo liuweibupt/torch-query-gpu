@@ -41,3 +41,13 @@ def test_generic_backend_rejects_missing_source_column():
 
     with pytest.raises(UnsupportedPlanError, match="missing column"):
         execute_generic_sql_plan(con, plan, device="cpu")
+
+
+def test_generic_backend_executes_string_filter_and_projection():
+    rows = execute_generic_sql_plan(
+        _make_table(),
+        parse_generic_sql("select c from t where c = 'y'"),
+        device="cpu",
+    )
+
+    assert rows == [{"c": "y"}]

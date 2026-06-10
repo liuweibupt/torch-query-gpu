@@ -37,3 +37,15 @@ def test_run_sql_accepts_generic_projection_filter_query():
 
     assert result.query_id is None
     assert result.rows == [{"a": 1, "twice": 5.0}, {"a": 2, "twice": 6.0}]
+
+
+def test_run_sql_reports_backend_unsupported_generic_join():
+    con = duckdb.connect()
+    con.execute("create table t(id integer)")
+    con.execute("create table u(id integer)")
+
+    import pytest
+    from tpch_torch.substrait import UnsupportedPlanError
+
+    with pytest.raises(UnsupportedPlanError, match="generic SQL is not executable by PyTorch backend"):
+        run_sql(con, "select * from t join u on t.id = u.id", device="cpu")

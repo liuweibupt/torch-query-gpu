@@ -25,7 +25,8 @@ class PyTorchBackend:
     def execute(self, con: duckdb.DuckDBPyConnection, plan: TQPPlan, device: str = "cpu") -> list[dict[str, Any]]:
         if plan.query_id is None:
             if plan.generic_plan is None:
-                raise UnsupportedPlanError("generic SQL plan is missing executable operator plan")
+                detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
+                raise UnsupportedPlanError(f"generic SQL is not executable by PyTorch backend: {detail}")
             return execute_generic_sql_plan(con, plan.generic_plan, device=device)
         if plan.query_id == 1:
             q1_plan = _compile_q1_plan(plan.plan_json)

@@ -16,11 +16,15 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
 
     duckdb_plan = export_duckdb_logical_plan(con, sql)
     generic_plan = None
+    generic_error = None
     try:
         query_id = identify_tpch_query(sql)
     except UnsupportedPlanError:
         query_id = None
-        generic_plan = parse_generic_sql(sql)
+        try:
+            generic_plan = parse_generic_sql(sql)
+        except UnsupportedPlanError as exc:
+            generic_error = str(exc)
     return TQPPlan(
         query_id=query_id,
         source_sql=sql,
@@ -31,4 +35,5 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
             physical_plan=duckdb_plan.physical_plan,
         ),
         generic_plan=generic_plan,
+        generic_error=generic_error,
     )

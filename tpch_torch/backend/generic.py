@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
+from numbers import Integral
 from typing import Any
 
 import duckdb
 import torch
 
 from tpch_torch.generic_sql import GenericFilter, GenericProjection, GenericSQLPlan
-from tpch_torch.relational import decode, fetch_tensor_table
+from tpch_torch.relational import decode
 from tpch_torch.storage import TensorTable
 from tpch_torch.substrait import UnsupportedPlanError
 
@@ -32,9 +35,52 @@ def execute_generic_sql_plan(
 
 def _fetch_required_table(con: duckdb.DuckDBPyConnection, plan: GenericSQLPlan, device: str) -> TensorTable:
     _ensure_columns_exist(con, plan.table, plan.required_columns)
-    if not plan.required_columns:
-        return fetch_tensor_table(con, plan.table, [_first_table_column(con, plan.table)], device)
-    return fetch_tensor_table(con, plan.table, plan.required_columns, device)
+    columns = plan.required_columns or (_first_table_column(con, plan.table),)
+    return _fetch_generic_tensor_table(con, plan.table, columns, device)
+
+
+def _fetch_generic_tensor_table(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    columns: tuple[str, ...],
+    device: str,
+) -> TensorTable:
+    select_list = ", ".join(columns)
+    rows = con.execute(f"select {select_list} from {table}").fetchall()
+    by_column = {column: [row[index] for row in rows] for index, column in enumerate(columns)}
+    encoded_columns: dict[str, torch.Tensor] = {}
+    dictionaries: dict[str, tuple[str, ...]] = {}
+    for column, values in by_column.items():
+        tensor, vocabulary = _encode_generic_column(values, device)
+        encoded_columns[column] = tensor
+        if vocabulary is not None:
+            dictionaries[column] = vocabulary
+    return TensorTable(columns=encoded_columns, dictionaries=dictionaries)
+
+
+def _encode_generic_column(values: list[Any], device: str) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+    if _is_string_column(values):
+        vocabulary = tuple(sorted({str(value) for value in values}))
+        ids = {value: index for index, value in enumerate(vocabulary)}
+        return torch.tensor([ids[str(value)] for value in values], dtype=torch.int64, device=device), vocabulary
+    if _is_date_column(values):
+        return torch.tensor([_date_to_yyyymmdd(value) for value in values], dtype=torch.int32, device=device), None
+    if _is_int_column(values):
+        return torch.tensor([int(value) for value in values], dtype=torch.int64, device=device), None
+    normalized = [float(value) if isinstance(value, Decimal) else value for value in values]
+    return torch.tensor(normalized, dtype=torch.float64, device=device), None
+
+
+def _is_string_column(values: list[Any]) -> bool:
+    return any(isinstance(value, str) for value in values if value is not None)
+
+
+def _is_date_column(values: list[Any]) -> bool:
+    return any(isinstance(value, (date, datetime)) for value in values if value is not None)
+
+
+def _is_int_column(values: list[Any]) -> bool:
+    return all(isinstance(value, Integral) for value in values if value is not None)
 
 
 def _ensure_columns_exist(con: duckdb.DuckDBPyConnection, table: str, columns: tuple[str, ...]) -> None:
@@ -183,3 +229,15 @@ def _sort_rows(rows: list[dict[str, Any]], order_by: tuple[str, ...]) -> list[di
     if not order_by:
         return rows
     return sorted(rows, key=lambda row: tuple(row[column] for column in order_by))
+
+
+def _date_to_yyyymmdd(value: Any) -> int:
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return (value.year * 10_000) + (value.month * 100) + value.day
+    if isinstance(value, str):
+        return int(value.replace("-", ""))
+    if isinstance(value, Integral):
+        return int(value)
+    raise TypeError(f"unsupported date value: {value!r}")
