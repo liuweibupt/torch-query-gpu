@@ -6,7 +6,7 @@ import duckdb
 
 from tpch_torch.ir import DuckDBPlanMetadata, TQPPlan
 from tpch_torch.planner import export_duckdb_logical_plan
-from tpch_torch.runner import identify_tpch_query
+from tpch_torch.query_catalog import identify_tpch_query
 
 
 def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:

@@ -6,7 +6,7 @@ import duckdb
 
 from tpch_torch.duckdb_bridge import export_substrait_json
 from tpch_torch.ir import TQPPlan
-from tpch_torch.runner import identify_tpch_query
+from tpch_torch.query_catalog import identify_tpch_query
 
 
 def compile_substrait_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:

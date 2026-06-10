@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import duckdb
 
 from tpch_torch.duckdb_bridge import create_lineitem_fixture, generate_tpch
@@ -12,6 +14,13 @@ from tpch_torch.runner import (
 )
 from tpch_torch.sql import get_tpch_query
 from tpch_torch.sql import TPC_H_Q1_SQL
+
+
+@dataclass(frozen=True)
+class DummyLogicalPlan:
+    logical_plan: str = "logical"
+    logical_opt: str = "optimized"
+    physical_plan: str = "physical"
 
 
 FIXTURE_ROWS = [
@@ -89,9 +98,10 @@ def test_run_sql_with_duckdb_logical_plan_source_skips_substrait_export(monkeypa
 
     def export_logical(connection, sql):
         calls.append(("logical", sql))
+        return DummyLogicalPlan()
 
-    monkeypatch.setattr("tpch_torch.runner.export_substrait_json", export_plan)
-    monkeypatch.setattr("tpch_torch.runner.export_duckdb_logical_plan", export_logical)
+    monkeypatch.setattr("tpch_torch.frontend.substrait.export_substrait_json", export_plan)
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
 
     result = run_sql_with_plan_source(con, TPC_H_Q1_SQL, device="cpu", plan_source="duckdb-logical")
 
@@ -110,9 +120,10 @@ def test_run_sql_with_auto_plan_source_uses_logical_after_substrait_export_failu
 
     def export_logical(connection, sql):
         calls.append(("logical", sql))
+        return DummyLogicalPlan()
 
-    monkeypatch.setattr("tpch_torch.runner.export_substrait_json", export_plan)
-    monkeypatch.setattr("tpch_torch.runner.export_duckdb_logical_plan", export_logical)
+    monkeypatch.setattr("tpch_torch.frontend.substrait.export_substrait_json", export_plan)
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
 
     result = run_sql_with_plan_source(con, TPC_H_Q1_SQL, device="cpu", plan_source="auto")
 
