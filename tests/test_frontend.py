@@ -72,3 +72,21 @@ def test_auto_frontend_falls_back_to_sirius_after_substrait_export_failure(monke
 
     assert plan.frontend == "sirius"
     assert calls == ["substrait", "sirius"]
+
+
+def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch):
+    calls = []
+
+    def export_logical(con, sql):
+        calls.append(sql)
+        return DummyLogicalPlan()
+
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
+
+    con = duckdb.connect()
+    plan = compile_sirius_plan(con, "select count(*) as n from lineitem")
+
+    assert plan.query_id is None
+    assert plan.frontend == "sirius"
+    assert plan.source_sql == "select count(*) as n from lineitem"
+    assert calls == ["select count(*) as n from lineitem"]

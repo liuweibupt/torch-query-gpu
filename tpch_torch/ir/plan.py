@@ -21,8 +21,9 @@ class DuckDBPlanMetadata:
 class TQPPlan:
     """Internal query plan passed from a TQP frontend to an execution backend."""
 
-    query_id: int
+    query_id: int | None
     source_sql: str
     frontend: FrontendName
     duckdb_metadata: DuckDBPlanMetadata | None = None
     plan_json: dict[str, Any] | None = None
+    generic_plan: Any | None = None
