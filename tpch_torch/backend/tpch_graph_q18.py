@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import duckdb
-import torch
 
-from tpch_torch.relational import aggregate_sum_by_keys, decode, fetch_tensor_table, lookup_values, yyyymmdd_to_iso
+from tpch_torch.backend.graph_nodes import SemiJoinNode, aggregate_sum_by_keys, decode, fetch_tensor_table, lookup_values, yyyymmdd_to_iso
 
 
 def execute_q18_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -17,7 +16,7 @@ def execute_q18_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
 
     order_keys, qty_sums = aggregate_sum_by_keys([lineitem.columns["l_orderkey"]], lineitem.columns["l_quantity"])
     large_orderkeys = order_keys[:, 0][qty_sums > 300.0]
-    order_mask = torch.isin(orders.columns["o_orderkey"], large_orderkeys)
+    order_mask = SemiJoinNode(orders.columns["o_orderkey"], large_orderkeys).execute()
     qty_by_order = lookup_values(order_keys[:, 0], qty_sums, orders.columns["o_orderkey"])
     cust_name = lookup_values(customer.columns["c_custkey"], customer.columns["c_name"], orders.columns["o_custkey"])
     rows = []

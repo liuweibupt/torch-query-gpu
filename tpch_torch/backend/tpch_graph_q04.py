@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_count_by_keys, decode, fetch_tensor_table
+from tpch_torch.backend.graph_nodes import SemiJoinNode, aggregate_count_by_keys, decode, fetch_tensor_table
 
 
 def execute_q4_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -19,7 +19,7 @@ def execute_q4_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> lis
     mask = (
         (orders.columns["o_orderdate"] >= 19930701)
         & (orders.columns["o_orderdate"] < 19931001)
-        & torch.isin(orders.columns["o_orderkey"], late_orderkeys)
+        & SemiJoinNode(orders.columns["o_orderkey"], late_orderkeys).execute()
     )
     keys, counts = aggregate_count_by_keys([orders.columns["o_orderpriority"][mask]])
     rows = [

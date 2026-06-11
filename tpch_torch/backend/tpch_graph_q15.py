@@ -6,7 +6,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.relational import aggregate_sum_by_keys, decode, fetch_tensor_table, lookup_values
+from tpch_torch.backend.graph_nodes import MaterializedCTENode, ScalarSubqueryNode, aggregate_sum_by_keys, decode, fetch_tensor_table, lookup_values
 
 
 def execute_q15_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -16,8 +16,9 @@ def execute_q15_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
     mask = (lineitem.columns["l_shipdate"] >= 19960101) & (lineitem.columns["l_shipdate"] < 19960401)
     revenue = lineitem.columns["l_extendedprice"][mask] * (1.0 - lineitem.columns["l_discount"][mask])
     keys, sums = aggregate_sum_by_keys([lineitem.columns["l_suppkey"][mask]], revenue)
-    max_revenue = sums.max()
-    selected_supplier = keys[:, 0][sums == max_revenue]
+    revenue_cte = MaterializedCTENode("revenue", {"supplier_no": keys[:, 0], "total_revenue": sums}).execute()
+    max_revenue = ScalarSubqueryNode.max(revenue_cte.columns["total_revenue"]).execute()
+    selected_supplier = revenue_cte.columns["supplier_no"][revenue_cte.columns["total_revenue"] == max_revenue]
     supplier_rows = lookup_values(supplier.columns["s_suppkey"], supplier.columns["s_suppkey"], selected_supplier)
     rows = []
     for suppkey in supplier_rows:

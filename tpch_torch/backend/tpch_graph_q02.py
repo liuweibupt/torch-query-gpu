@@ -6,7 +6,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.relational import decode, fetch_tensor_table, lookup_values, string_eq
+from tpch_torch.backend.graph_nodes import GroupedScalarSubqueryNode, decode, fetch_tensor_table, lookup_values, string_eq
 
 
 def execute_q2_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -51,16 +51,11 @@ def _part_type_endswith(part, encoded_type, suffix: str):
     return torch.isin(encoded_type, torch.tensor(matching_ids, dtype=encoded_type.dtype, device=encoded_type.device))
 
 
-def _min_cost_by_part(partsupp, mask) -> dict[int, float]:
-    partkeys = partsupp.columns["ps_partkey"][mask].cpu().tolist()
-    costs = partsupp.columns["ps_supplycost"][mask].cpu().tolist()
-    result: dict[int, float] = {}
-    for partkey, cost in zip(partkeys, costs):
-        key = int(partkey)
-        value = float(cost)
-        if key not in result or value < result[key]:
-            result[key] = value
-    return result
+def _min_cost_by_part(partsupp, mask):
+    return GroupedScalarSubqueryNode.min(
+        (partsupp.columns["ps_partkey"][mask],),
+        partsupp.columns["ps_supplycost"][mask],
+    )
 
 
 def _materialize_rows(part, partsupp, supplier, nation, part_row, supplier_row, min_cost_by_part, mask):
@@ -71,7 +66,8 @@ def _materialize_rows(part, partsupp, supplier, nation, part_row, supplier_row, 
         index = int(raw_index)
         partkey = int(partsupp.columns["ps_partkey"][index].item())
         cost = float(partsupp.columns["ps_supplycost"][index].cpu().item())
-        if cost != min_cost_by_part[partkey]:
+        min_cost = min_cost_by_part.lookup((partsupp.columns["ps_partkey"][index].reshape(1),))[0]
+        if cost != float(min_cost.cpu().item()):
             continue
         p_index = int(part_row[index].item())
         s_index = int(supplier_row[index].item())

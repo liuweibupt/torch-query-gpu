@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import decode, fetch_tensor_table, lookup_values, string_eq, string_startswith
+from tpch_torch.backend.graph_nodes import AntiJoinNode, decode, fetch_tensor_table, lookup_values, string_eq, string_startswith
 
 Q16_SIZES = (49, 14, 23, 45, 19, 3, 36, 9)
 
@@ -24,7 +24,7 @@ def execute_q16_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
     valid = (
         (brand >= 0)
         & (part_type >= 0)
-        & ~torch.isin(partsupp.columns["ps_suppkey"], bad_suppkeys)
+        & AntiJoinNode(partsupp.columns["ps_suppkey"], bad_suppkeys).execute()
         & (brand != int(part.columns["p_brand"][string_eq(part, "p_brand", "Brand#45")][0].item()))
         & ~_type_startswith(part, part_type, "MEDIUM POLISHED")
         & torch.isin(size, torch.tensor(Q16_SIZES, dtype=size.dtype, device=device))

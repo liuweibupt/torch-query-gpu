@@ -6,7 +6,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.relational import aggregate_sum_by_keys, composite_key, decode, fetch_tensor_table, lookup_values, string_contains, yyyymmdd_to_year
+from tpch_torch.backend.graph_nodes import aggregate_sum_by_keys, composite_key, decode, fetch_tensor_table, lookup_values, string_contains, yyyymmdd_to_year
 
 KEY_MULTIPLIER = 1_000_000
 

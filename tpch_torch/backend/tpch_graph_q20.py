@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_sum_by_keys, composite_key, decode, fetch_tensor_table, lookup_values, string_eq, string_startswith
+from tpch_torch.backend.graph_nodes import GroupedScalarSubqueryNode, SemiJoinNode, decode, fetch_tensor_table, string_eq, string_startswith
 
 
 def execute_q20_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -17,27 +17,19 @@ def execute_q20_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
     supplier = fetch_tensor_table(con, "supplier", ["s_suppkey", "s_name", "s_address", "s_nationkey"], device)
     nation = fetch_tensor_table(con, "nation", ["n_nationkey", "n_name"], device)
 
-    multiplier = int(max(partsupp.columns["ps_suppkey"].max().item(), lineitem.columns["l_suppkey"].max().item())) + 1
     ship_mask = (lineitem.columns["l_shipdate"] >= 19940101) & (lineitem.columns["l_shipdate"] < 19950101)
-    line_keys, quantity_sum = aggregate_sum_by_keys(
-        [lineitem.columns["l_partkey"][ship_mask], lineitem.columns["l_suppkey"][ship_mask]],
+    shipped_quantity_by_pair = GroupedScalarSubqueryNode.sum(
+        (lineitem.columns["l_partkey"][ship_mask], lineitem.columns["l_suppkey"][ship_mask]),
         lineitem.columns["l_quantity"][ship_mask],
     )
-    line_composite = composite_key(line_keys[:, 0], line_keys[:, 1], multiplier)
-    ps_composite = composite_key(partsupp.columns["ps_partkey"], partsupp.columns["ps_suppkey"], multiplier)
-    shipped_quantity = lookup_values(line_composite, quantity_sum, ps_composite, missing_value=0.0)
-    has_shipment = (
-        lookup_values(
-            line_composite,
-            torch.ones(quantity_sum.shape, dtype=torch.int64, device=quantity_sum.device),
-            ps_composite,
-            missing_value=0,
-        )
-        == 1
+    shipped_quantity = shipped_quantity_by_pair.lookup(
+        (partsupp.columns["ps_partkey"], partsupp.columns["ps_suppkey"]),
+        missing_value=0.0,
     )
+    has_shipment = shipped_quantity > 0.0
     forest_partkeys = part.columns["p_partkey"][string_startswith(part, "p_name", "forest")]
     qualifying_suppkeys = torch.unique(partsupp.columns["ps_suppkey"][
-        torch.isin(partsupp.columns["ps_partkey"], forest_partkeys)
+        SemiJoinNode(partsupp.columns["ps_partkey"], forest_partkeys).execute()
         & has_shipment
         & (partsupp.columns["ps_availqty"] > 0.5 * shipped_quantity)
     ])

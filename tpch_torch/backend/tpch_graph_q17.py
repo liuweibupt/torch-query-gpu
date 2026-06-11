@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_count_by_keys, aggregate_sum_by_keys, fetch_tensor_table, lookup_values, string_eq
+from tpch_torch.backend.graph_nodes import GroupedScalarSubqueryNode, fetch_tensor_table, string_eq
 
 
 def execute_q17_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -16,10 +16,11 @@ def execute_q17_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
 
     part_mask = string_eq(part, "p_brand", "Brand#23") & string_eq(part, "p_container", "MED BOX")
     candidate_partkeys = part.columns["p_partkey"][part_mask]
-    grouped_keys, quantity_sums = aggregate_sum_by_keys([lineitem.columns["l_partkey"]], lineitem.columns["l_quantity"])
-    _, quantity_counts = aggregate_count_by_keys([lineitem.columns["l_partkey"]])
-    avg_quantity = quantity_sums / quantity_counts.to(dtype=quantity_sums.dtype)
-    lineitem_avg_quantity = lookup_values(grouped_keys[:, 0], avg_quantity, lineitem.columns["l_partkey"])
+    avg_quantity_by_part = GroupedScalarSubqueryNode.mean(
+        (lineitem.columns["l_partkey"],),
+        lineitem.columns["l_quantity"],
+    )
+    lineitem_avg_quantity = avg_quantity_by_part.lookup((lineitem.columns["l_partkey"],))
     mask = (
         torch.isin(lineitem.columns["l_partkey"], candidate_partkeys)
         & (lineitem.columns["l_quantity"] < 0.2 * lineitem_avg_quantity)

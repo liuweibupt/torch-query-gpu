@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_count_by_keys, aggregate_sum_by_keys, fetch_tensor_table
+from tpch_torch.backend.graph_nodes import AntiJoinNode, ScalarSubqueryNode, aggregate_count_by_keys, aggregate_sum_by_keys, fetch_tensor_table
 
 Q22_COUNTRY_CODES = ("13", "31", "23", "29", "30", "18", "17")
 
@@ -18,9 +18,9 @@ def execute_q22_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
 
     country_ids = _country_ids(customer, device)
     positive_in_country = (country_ids >= 0) & (customer.columns["c_acctbal"] > 0.0)
-    avg_acctbal = customer.columns["c_acctbal"][positive_in_country].mean()
-    has_order = torch.isin(customer.columns["c_custkey"], torch.unique(orders.columns["o_custkey"]))
-    mask = (country_ids >= 0) & (customer.columns["c_acctbal"] > avg_acctbal) & ~has_order
+    avg_acctbal = ScalarSubqueryNode.avg(customer.columns["c_acctbal"][positive_in_country]).execute()
+    no_order = AntiJoinNode(customer.columns["c_custkey"], torch.unique(orders.columns["o_custkey"])).execute()
+    mask = (country_ids >= 0) & (customer.columns["c_acctbal"] > avg_acctbal) & no_order
     if not bool(mask.any().item()):
         return []
     keys, counts = aggregate_count_by_keys([country_ids[mask]])

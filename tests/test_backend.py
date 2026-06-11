@@ -1,5 +1,6 @@
 import duckdb
 import pytest
+import torch
 
 from tpch_torch.duckdb_bridge import create_lineitem_fixture
 from tpch_torch.ir import TQPPlan
@@ -8,6 +9,7 @@ from tpch_torch.sql import TPC_H_Q1_SQL
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.frontend import compile_sirius_plan
 from tpch_torch.backend import PyTorchBackend
+from tpch_torch.compressed import PlainMask
 
 
 FIXTURE_ROWS = [
@@ -69,24 +71,32 @@ def test_pytorch_backend_executes_generic_tqp_plan():
 
 
 def test_pytorch_backend_passes_compressed_mask_option_to_q6(monkeypatch):
+    con = duckdb.connect()
+    con.execute(
+        "create table lineitem("
+        "l_quantity double, l_extendedprice double, l_discount double, l_shipdate date"
+        ")"
+    )
+    con.execute("insert into lineitem values (10.0, 100.0, 0.06, date '1994-02-01')")
+    graph = TQPOperatorGraph(
+        source_sql="select -- q6",
+        query_id=6,
+        root_id="n0",
+        nodes=(TQPOperatorNode(node_id="n0", kind=OperatorKind.SCAN, name="SEQ_SCAN"),),
+    )
+    plan = TQPPlan(query_id=6, source_sql="select -- q6", frontend="sirius", operator_graph=graph)
     calls = []
 
-    def execute_q6(con, *, device, use_compressed_masks=False):
-        calls.append((device, use_compressed_masks))
-        return [{"revenue": 1.0}]
+    def compressed_mask(table):
+        calls.append(tuple(sorted(table.columns)))
+        return PlainMask(torch.tensor([True], dtype=torch.bool))
 
-    monkeypatch.setattr("tpch_torch.queries.q06.execute_q6", execute_q6)
-    plan = TQPPlan(
-        query_id=6,
-        source_sql="select -- q6",
-        frontend="sirius",
-        operator_graph=_compiled_tpch_graph(6, "select -- q6"),
-    )
+    monkeypatch.setattr("tpch_torch.backend.graph._q6_compressed_mask", compressed_mask)
 
-    rows = PyTorchBackend().execute(duckdb.connect(), plan, device="cpu", use_compressed_masks=True)
+    rows = PyTorchBackend().execute(con, plan, device="cpu", use_compressed_masks=True)
 
-    assert rows == [{"revenue": 1.0}]
-    assert calls == [("cpu", True)]
+    assert rows == [{"revenue": 6.0}]
+    assert calls == [("l_discount", "l_extendedprice", "l_quantity", "l_shipdate")]
 
 
 def test_pytorch_backend_executes_tpch_through_operator_graph(monkeypatch):

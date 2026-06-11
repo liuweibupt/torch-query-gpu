@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_count_by_keys, decode, fetch_tensor_table, lookup_values, string_eq
+from tpch_torch.backend.graph_nodes import AntiJoinNode, SemiJoinNode, aggregate_count_by_keys, decode, fetch_tensor_table, lookup_values, string_eq
 
 
 def execute_q21_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -28,9 +28,9 @@ def execute_q21_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
     late = lineitem.columns["l_receiptdate"] > lineitem.columns["l_commitdate"]
     order_distinct_supp = _distinct_supplier_count_by_order(lineitem.columns["l_orderkey"], lineitem.columns["l_suppkey"])
     late_distinct_supp = _distinct_supplier_count_by_order(lineitem.columns["l_orderkey"][late], lineitem.columns["l_suppkey"][late])
-    all_supplier_count = lookup_values(order_distinct_supp[0], order_distinct_supp[1], lineitem.columns["l_orderkey"], missing_value=0)
-    late_supplier_count = lookup_values(late_distinct_supp[0], late_distinct_supp[1], lineitem.columns["l_orderkey"], missing_value=0)
-    mask = late & order_finished & (supplier_row >= 0) & saudi_supplier & (all_supplier_count > 1) & (late_supplier_count == 1)
+    has_other_supplier = SemiJoinNode(lineitem.columns["l_orderkey"], order_distinct_supp[0][order_distinct_supp[1] > 1]).execute()
+    no_other_late_supplier = AntiJoinNode(lineitem.columns["l_orderkey"], late_distinct_supp[0][late_distinct_supp[1] > 1]).execute()
+    mask = late & order_finished & (supplier_row >= 0) & saudi_supplier & has_other_supplier & no_other_late_supplier
     keys, counts = aggregate_count_by_keys([supplier_row[mask]])
     rows = [
         {

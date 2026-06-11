@@ -6,7 +6,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.relational import aggregate_count_by_keys, fetch_tensor_table, lookup_values, string_not_like_special_requests
+from tpch_torch.backend.graph_nodes import aggregate_count_by_keys, fetch_tensor_table, lookup_values, string_not_like_special_requests
 
 
 def execute_q13_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:

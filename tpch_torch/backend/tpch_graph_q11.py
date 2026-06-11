@@ -6,7 +6,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.relational import aggregate_sum_by_keys, fetch_tensor_table, lookup_values, string_eq
+from tpch_torch.backend.graph_nodes import ScalarSubqueryNode, aggregate_sum_by_keys, fetch_tensor_table, lookup_values, string_eq
 
 
 def execute_q11_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
@@ -19,7 +19,7 @@ def execute_q11_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> li
     mask = supplier_nation == germany
     value = partsupp.columns["ps_supplycost"][mask] * partsupp.columns["ps_availqty"][mask]
     keys, sums = aggregate_sum_by_keys([partsupp.columns["ps_partkey"][mask]], value)
-    threshold = float(value.sum().cpu().item()) * 0.0001
+    threshold = float(ScalarSubqueryNode.sum(value, multiplier=0.0001).execute().cpu().item())
     rows = [
         {"ps_partkey": int(keys[i, 0].item()), "value": float(sums[i].cpu().item())}
         for i in range(int(keys.shape[0]))

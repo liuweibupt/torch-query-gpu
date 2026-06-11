@@ -7,7 +7,7 @@ from typing import Any
 import duckdb
 import torch
 
-from tpch_torch.relational import aggregate_sum_by_keys, fetch_tensor_table, lookup_values, string_eq, yyyymmdd_to_year
+from tpch_torch.backend.graph_nodes import aggregate_sum_by_keys, fetch_tensor_table, lookup_values, string_eq, yyyymmdd_to_year
 
 
 def execute_q8_graph(con: duckdb.DuckDBPyConnection, device: str = "cpu") -> list[dict[str, Any]]:
