@@ -106,6 +106,13 @@ tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend subs
 tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend substrait
 ```
 
+Correctness-first compressed mask execution, currently wired into Q6 only:
+
+```bash
+tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-masks
+tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-masks
+```
+
 Supported frontends are explicit:
 
 - `sirius`: default DuckDB parser/planner admission path.
@@ -129,8 +136,10 @@ Current implementation status:
 - [x] Batch 1 paper primitives: grouped min/max/mean, mask helpers, top-k, and first RLE mask primitives.
 - [x] Batch 2 generic SQL basics: `MIN`, `MAX`, `AVG`, `COUNT(col)`, boolean filters (`AND`/`OR`/`NOT`), `IN`, `LIKE`, and `ORDER BY ASC/DESC`.
 - [ ] Generic joins and subquery lowering.
+- [x] Reusable operator fast paths: NumPy columnar fetch, dense low-cardinality group reductions, lookup indexes, and tensorized generic grouped aggregates.
 - [x] First compressed mask primitives: RLE/Index intersection, Index/Index intersection/union, `complement_index`, and `rle_to_plain`.
-- [ ] Compressed storage metadata and full encoded mask execution.
+- [x] Encoded mask dispatch for `PlainMask`/`RLEMask`/`IndexMask` logical `AND`/`OR`/`NOT`, plus explicit Q6 compressed-mask execution via `--compressed-masks`.
+- [ ] Compressed storage metadata and full encoded column execution.
 - [ ] Compressed aggregation/join execution and compression-aware optimizer rules.
 - [ ] Compiler/fusion/scheduling experiments.
 
@@ -175,7 +184,11 @@ falls inside the current generic executor subset.
 `PyTorchBackend` executes `TQPPlan` with correctness-first tensor operators in
 `tpch_torch/queries/q01.py` through `q22.py` for TPC-H templates, and with
 `tpch_torch/backend/generic.py` for the supported generic SQL subset. This keeps
-backend execution separate from SQL admission.
+backend execution separate from SQL admission. Reusable fast paths now cover
+columnar NumPy fetch, lookup indexes, dense grouped reductions, and tensorized
+generic grouped aggregates. Q6 can optionally route its predicate masks through
+encoded `PlainMask`/`RLEMask`/`IndexMask` dispatch with `--compressed-masks`;
+this is not yet full compressed storage.
 
 ## Native DuckDB Substrait policy (B方案)
 

@@ -89,16 +89,20 @@ until a readable full paper/appendix is available.
 
 ### TQP optimization TODO
 
-- [ ] Keep data-dependent loops out of hot paths; loops over schema/operators are
-      acceptable, loops over rows are not.
+- [x] First generic grouped aggregate path avoids Python row-group loops and uses
+      tensor group ids plus grouped reductions. Non-aggregate projection
+      materialization still decodes result rows explicitly.
+- [ ] Keep remaining data-dependent loops out of hot paths; loops over
+      schema/operators are acceptable, loops over rows are not.
 - [ ] Preserve columnar late materialization: joins produce row-index pairs before
       materializing payload columns.
 - [ ] Prefer tensor operations over Python control flow for row-level work.
 - [ ] Use compiled execution where possible: TorchScript/TVM/torch compile paths,
       common sub-expression elimination, operator fusion, code generation, and
       Python dependency removal.
+- [x] Add reusable `LookupIndex` for pre-sorted dimension-key lookup probes.
 - [ ] Add optimizer awareness for sorted/unique columns to avoid redundant `sort`,
-      `unique`, and `unique_consecutive`.
+      `unique`, and `unique_consecutive` across whole query plans.
 - [ ] Add join strategy selection between hash and sort joins based on collision
       degree, key cardinality, and device.
 - [ ] Track backend-specific bottlenecks: `unique`, indexing, `masked_select`,
@@ -150,19 +154,19 @@ until a readable full paper/appendix is available.
 
 ### Logical operators on encoded masks
 
-- [ ] AND for Plain/Plain: direct boolean mask `&`.
-- [ ] AND for RLE/RLE: `range_intersect`.
-- [ ] AND for RLE/Plain: choose RLE→Index or RLE→Plain conversion before direct
-      application, with explicit cost model.
+- [x] AND for Plain/Plain: direct boolean mask `&`.
+- [x] AND for RLE/RLE: `range_intersect`.
+- [x] AND for RLE/Plain: correctness-first dispatch via explicit Index
+      conversion; cost model remains pending.
 - [x] Primitive support for RLE/Index AND via `idx_in_rle` and `rle_contain_idx`;
       cost-based selection remains pending.
 - [x] AND for Index/Index: `idx_in_idx`.
-- [ ] OR for RLE/RLE: `range_union`.
+- [x] OR for RLE/RLE: `range_union`.
 - [x] OR for Index/Index: `merge_sorted_idx`.
-- [ ] OR for mixed RLE/Plain and RLE/Index: conversion or bucketized inclusion as
-      indicated by the encoded-mask design tables.
-- [ ] NOT Plain: tensor complement.
-- [ ] NOT RLE: `complement_rle`.
+- [x] OR for mixed RLE/Plain and RLE/Index: correctness-first dispatch via
+      explicit Plain/Index conversion; bucketized inclusion remains pending.
+- [x] NOT Plain: tensor complement.
+- [x] NOT RLE: `complement_rle`.
 - [x] NOT Index: `complement_index`, returning RLE because complements of sparse
       masks are usually continuous.
 - [ ] Composite mask rewrites with De Morgan expansions for RLE+Index and
@@ -180,8 +184,10 @@ until a readable full paper/appendix is available.
 - [ ] Binary arithmetic: `+`, `-`, `*`, `/`, modulo/remainder across aligned
       columns.
 - [ ] Binary comparison: `=`, `!=`, `<`, `<=`, `>`, `>=` across aligned columns.
-- [ ] Selection: compute encoded `MaskColumn`, align it with the selected
-      `DataColumn`, and apply only when the target column is Plain.
+- [x] First Q6 selection path computes encoded `MaskColumn`, converts to row
+      indices, and applies to Plain revenue columns.
+- [ ] General selection: compute encoded `MaskColumn`, align it with the selected
+      `DataColumn`, and apply output encoding rules for non-Plain targets.
 - [ ] Preserve output encoding decisions from the paper's tables instead of
       silently materializing plain tensors.
 
@@ -321,8 +327,10 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 - [ ] Encoding metadata and RLE/Index column storage.
 - [x] First encoded logical mask primitives for RLE/Index/Index combinations.
-- [ ] Full encoded logical mask dispatch and alignment.
-- [ ] Encoded selection and predicate pushdown.
+- [x] Correctness-first encoded logical mask dispatch for Plain/RLE/Index.
+- [x] First encoded selection path in TPC-H Q6 behind `--compressed-masks`.
+- [ ] Full compressed column alignment and output-encoding decisions.
+- [ ] General encoded selection and predicate pushdown.
 
 ### Batch 5: compressed aggregate and join execution
 

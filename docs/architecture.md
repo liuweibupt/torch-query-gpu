@@ -240,7 +240,13 @@ planner. It dispatches to tensor kernels or to the generic SQL subset executor.
 
 ```python
 class PyTorchBackend:
-    def execute(self, con, plan: TQPPlan, device: str = "cpu") -> list[dict[str, Any]]:
+    def execute(
+        self,
+        con,
+        plan: TQPPlan,
+        device: str = "cpu",
+        use_compressed_masks: bool = False,
+    ) -> list[dict[str, Any]]:
         if plan.query_id is None:
             if plan.generic_plan is None:
                 detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
@@ -255,11 +261,115 @@ class PyTorchBackend:
         if module_name is None:
             raise UnsupportedPlanError(...)
         module = __import__(f"tpch_torch.queries.{module_name}", fromlist=[...])
-        return getattr(module, f"execute_q{plan.query_id}")(con, device=device)
+        executor = getattr(module, f"execute_q{plan.query_id}")
+        if plan.query_id == 6:
+            return executor(con, device=device, use_compressed_masks=use_compressed_masks)
+        return executor(con, device=device)
 ```
 
 The Q1 branch can consume real Substrait JSON when `frontend="substrait"`; for
-`frontend="sirius"`, it uses a canonical internal Q1 plan.
+`frontend="sirius"`, it uses a canonical internal Q1 plan. Q6 additionally has
+an explicit correctness-first compressed-mask option exposed by CLI
+`--compressed-masks`. This flag changes only PyTorch predicate-mask execution;
+it does not alter SQL, frontend admission, validation baseline, or storage
+format.
+
+
+## Operator fast paths added below the backend
+
+The backend now avoids several correctness-first but slow Python materialization
+paths while keeping the same frontend/backend boundary. Typed TPC-H fetch and
+generic single-table fetch use DuckDB `fetchnumpy()` and encode NumPy arrays
+directly:
+
+```python
+def table_from_columnar_typed(columnar, device="cpu") -> TensorTable:
+    columns = {}
+    dictionaries = {}
+    for column_name, values_iterable in columnar.items():
+        tensor, vocabulary = encode_column(column_name, values_iterable, device)
+        columns[column_name] = tensor
+        if vocabulary is not None:
+            dictionaries[column_name] = vocabulary
+    return TensorTable(columns=columns, dictionaries=dictionaries)
+
+def _encode_numpy_typed_column(column_name, values, device):
+    if column_name in STRING_COLUMNS_EXTENDED:
+        vocabulary, inverse = np.unique(values.astype(str), return_inverse=True)
+        return torch.as_tensor(inverse, dtype=torch.int64, device=device), tuple(vocabulary.tolist())
+    if column_name in INT_COLUMNS:
+        return torch.as_tensor(values, dtype=torch.int64, device=device), None
+    return torch.as_tensor(values, dtype=torch.float64, device=device), None
+```
+
+Reusable grouping and lookup helpers live in `tpch_torch/operators.py` and
+`tpch_torch/relational.py`:
+
+```python
+def low_cardinality_group_ids(key_columns, cardinalities):
+    group_ids = torch.zeros(key_columns[0].shape, dtype=torch.int64, device=key_columns[0].device)
+    multiplier = 1
+    for key, cardinality in reversed(tuple(zip(key_columns, cardinalities))):
+        group_ids = group_ids + key.to(dtype=torch.int64) * multiplier
+        multiplier *= cardinality
+    return group_ids, multiplier
+
+@dataclass(frozen=True)
+class LookupIndex:
+    sorted_keys: torch.Tensor
+    sorted_values: torch.Tensor
+```
+
+The generic grouped aggregate executor now groups masked rows with tensor
+`composite_group_ids()` and computes aggregate columns with grouped reductions.
+It decodes only final group keys and aggregate scalars, instead of building a
+Python dictionary of row-index lists per group.
+
+## Encoded mask execution
+
+`tpch_torch/compressed.py` now has an explicit mask abstraction for the first
+compressed execution experiments:
+
+```python
+@dataclass(frozen=True)
+class PlainMask:
+    values: torch.Tensor
+
+@dataclass(frozen=True)
+class RLEMask:
+    ranges: RLERanges
+    row_count: int
+
+@dataclass(frozen=True)
+class IndexMask:
+    positions: torch.Tensor
+    row_count: int
+
+def mask_and(left, right):
+    if isinstance(left, RLEMask) and isinstance(right, RLEMask):
+        return RLEMask(range_intersect(left.ranges, right.ranges), left.row_count)
+    if isinstance(left, IndexMask) and isinstance(right, IndexMask):
+        return IndexMask(idx_in_idx(left.positions, right.positions), left.row_count)
+    return _mask_and_mixed(left, right)
+```
+
+Q6 uses this path only when requested:
+
+```python
+def execute_q6(con, device="cpu", use_compressed_masks=False):
+    table = fetch_tensor_table(con, "lineitem", LINEITEM_COLUMNS, device=device)
+    if use_compressed_masks:
+        mask = _q6_compressed_mask(table)
+        positions = mask_to_index(mask)
+        revenue = (extendedprice.index_select(0, positions) * discount.index_select(0, positions)).sum()
+        return [{"revenue": float(revenue.cpu().item())}]
+    return [_execute_q6_plain_mask_row(table)]
+```
+
+Mixed mask cases use documented explicit conversion to Plain or Index for
+correctness. That exposes the encoded-mask boundary without pretending that the
+repository already has full compressed column storage, compressed joins, or
+cost-based encoding selection.
 
 ## Query identification and generic SQL
 
