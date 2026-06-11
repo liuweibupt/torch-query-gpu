@@ -6,6 +6,7 @@ import duckdb
 
 from tpch_torch.generic_sql import parse_generic_sql
 from tpch_torch.ir import DuckDBPlanMetadata, TQPPlan
+from tpch_torch.duckdb_plan_json import export_duckdb_physical_plan_json, lower_duckdb_json_to_operator_graph
 from tpch_torch.planner import export_duckdb_logical_plan
 from tpch_torch.query_catalog import identify_tpch_query
 from tpch_torch.errors import UnsupportedPlanError
@@ -25,6 +26,8 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
             generic_plan = parse_generic_sql(sql)
         except UnsupportedPlanError as exc:
             generic_error = str(exc)
+    physical_plan_json = export_duckdb_physical_plan_json(con, sql)
+    operator_graph = lower_duckdb_json_to_operator_graph(sql, query_id, physical_plan_json)
     return TQPPlan(
         query_id=query_id,
         source_sql=sql,
@@ -36,4 +39,5 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
         ),
         generic_plan=generic_plan,
         generic_error=generic_error,
+        operator_graph=operator_graph,
     )

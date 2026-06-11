@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from tpch_torch.operator_graph import TQPOperatorGraph
+
 FrontendName = Literal["sirius", "substrait"]
 
 
@@ -28,3 +30,4 @@ class TQPPlan:
     plan_json: dict[str, Any] | None = None
     generic_plan: Any | None = None
     generic_error: str | None = None
+    operator_graph: TQPOperatorGraph | None = None

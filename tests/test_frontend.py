@@ -4,6 +4,7 @@ import duckdb
 
 from tpch_torch.frontend import compile_sirius_plan, compile_substrait_plan
 from tpch_torch.sql import TPC_H_Q1_SQL
+from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
 
 
 @dataclass(frozen=True)
@@ -11,6 +12,12 @@ class DummyLogicalPlan:
     logical_plan: str = "logical"
     logical_opt: str = "optimized"
     physical_plan: str = "physical"
+
+
+def _dummy_graph(sql: str, query_id: int | None = 1) -> TQPOperatorGraph:
+    node = TQPOperatorNode(node_id="n0", kind=OperatorKind.SCAN, name="SEQ_SCAN")
+    return TQPOperatorGraph(source_sql=sql, query_id=query_id, root_id="n0", nodes=(node,))
+
 
 
 def test_sirius_frontend_returns_tqp_plan_with_duckdb_metadata(monkeypatch):
@@ -21,6 +28,8 @@ def test_sirius_frontend_returns_tqp_plan_with_duckdb_metadata(monkeypatch):
         return DummyLogicalPlan()
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
+    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
@@ -61,6 +70,8 @@ def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch
         return DummyLogicalPlan()
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
+    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, "select count(*) as n from lineitem")
@@ -76,6 +87,8 @@ def test_sirius_frontend_admits_non_executable_generic_sql(monkeypatch):
         return DummyLogicalPlan()
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
+    monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
+    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, "select * from t join u on t.id = u.id")
