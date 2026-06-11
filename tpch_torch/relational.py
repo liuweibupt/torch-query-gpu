@@ -9,6 +9,7 @@ from numbers import Integral
 from typing import Any, Iterable, Mapping, Sequence
 
 import duckdb
+import numpy as np
 import torch
 
 from tpch_torch.operators import composite_group_ids, grouped_count, grouped_sum
@@ -110,7 +111,7 @@ def table_from_columnar_typed(
     columns: dict[str, torch.Tensor] = {}
     dictionaries: dict[str, tuple[str, ...]] = {}
     for column_name, values_iterable in columnar.items():
-        tensor, vocabulary = encode_column(column_name, list(values_iterable), device)
+        tensor, vocabulary = encode_column(column_name, values_iterable, device)
         columns[column_name] = tensor
         if vocabulary is not None:
             dictionaries[column_name] = vocabulary
@@ -118,6 +119,33 @@ def table_from_columnar_typed(
 
 
 def encode_column(
+    column_name: str, values: Iterable[Any], device: str | torch.device
+) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+    if isinstance(values, np.ndarray):
+        return _encode_numpy_typed_column(column_name, values, device)
+    return _encode_typed_sequence(column_name, list(values), device)
+
+
+def _encode_numpy_typed_column(
+    column_name: str, values: np.ndarray, device: str | torch.device
+) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+    if column_name in STRING_COLUMNS_EXTENDED:
+        vocabulary, inverse = np.unique(values.astype(str), return_inverse=True)
+        tensor = torch.as_tensor(inverse, dtype=torch.int64, device=device)
+        return tensor, tuple(str(value) for value in vocabulary.tolist())
+    if values.dtype == np.dtype("O"):
+        return _encode_typed_sequence(column_name, values.tolist(), device)
+    if column_name in DATE_COLUMNS_EXTENDED:
+        tensor = torch.as_tensor(values, dtype=torch.int32, device=device)
+        return tensor, None
+    if column_name in INT_COLUMNS:
+        tensor = torch.as_tensor(values, dtype=torch.int64, device=device)
+        return tensor, None
+    tensor = torch.as_tensor(values, dtype=torch.float64, device=device)
+    return tensor, None
+
+
+def _encode_typed_sequence(
     column_name: str, values: list[Any], device: str | torch.device
 ) -> tuple[torch.Tensor, tuple[str, ...] | None]:
     if column_name in STRING_COLUMNS_EXTENDED:

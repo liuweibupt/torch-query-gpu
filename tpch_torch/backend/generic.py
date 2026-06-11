@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from numbers import Integral
-from typing import Any
+from typing import Any, Iterable
 
 import duckdb
+import numpy as np
 import torch
 
 from tpch_torch.generic_sql import GenericFilter, GenericOrderBy, GenericProjection, GenericSQLPlan
@@ -46,11 +47,10 @@ def _fetch_generic_tensor_table(
     device: str,
 ) -> TensorTable:
     select_list = ", ".join(columns)
-    rows = con.execute(f"select {select_list} from {table}").fetchall()
-    by_column = {column: [row[index] for row in rows] for index, column in enumerate(columns)}
+    columnar = con.execute(f"select {select_list} from {table}").fetchnumpy()
     encoded_columns: dict[str, torch.Tensor] = {}
     dictionaries: dict[str, tuple[str, ...]] = {}
-    for column, values in by_column.items():
+    for column, values in columnar.items():
         tensor, vocabulary = _encode_generic_column(values, device)
         encoded_columns[column] = tensor
         if vocabulary is not None:
@@ -58,7 +58,40 @@ def _fetch_generic_tensor_table(
     return TensorTable(columns=encoded_columns, dictionaries=dictionaries)
 
 
-def _encode_generic_column(values: list[Any], device: str) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+def _encode_generic_column(
+    values: Iterable[Any] | np.ndarray, device: str
+) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+    if isinstance(values, np.ndarray):
+        return _encode_numpy_generic_column(values, device)
+    return _encode_generic_sequence(list(values), device)
+
+
+def _encode_numpy_generic_column(
+    values: np.ndarray, device: str
+) -> tuple[torch.Tensor, tuple[str, ...] | None]:
+    if values.dtype.kind in {"U", "S"}:
+        return _encode_numpy_string_column(values, device)
+    if np.issubdtype(values.dtype, np.datetime64):
+        days = values.astype("datetime64[D]").astype(np.int64)
+        epoch_ordinal = date(1970, 1, 1).toordinal()
+        dates = [date.fromordinal(int(day) + epoch_ordinal) for day in days]
+        return torch.tensor([_date_to_yyyymmdd(value) for value in dates], dtype=torch.int32, device=device), None
+    if values.dtype == np.dtype("O"):
+        return _encode_generic_sequence(values.tolist(), device)
+    if values.dtype.kind in {"i", "u"}:
+        return torch.as_tensor(values, dtype=torch.int64, device=device), None
+    return torch.as_tensor(values, dtype=torch.float64, device=device), None
+
+
+def _encode_numpy_string_column(
+    values: np.ndarray, device: str
+) -> tuple[torch.Tensor, tuple[str, ...]]:
+    vocabulary, inverse = np.unique(values.astype(str), return_inverse=True)
+    tensor = torch.as_tensor(inverse, dtype=torch.int64, device=device)
+    return tensor, tuple(str(value) for value in vocabulary.tolist())
+
+
+def _encode_generic_sequence(values: list[Any], device: str) -> tuple[torch.Tensor, tuple[str, ...] | None]:
     if _is_string_column(values):
         vocabulary = tuple(sorted({str(value) for value in values}))
         ids = {value: index for index, value in enumerate(vocabulary)}

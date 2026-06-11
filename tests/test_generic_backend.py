@@ -1,5 +1,6 @@
 import duckdb
 import pytest
+import torch
 
 from tpch_torch.backend.generic import execute_generic_sql_plan
 from tpch_torch.generic_sql import parse_generic_sql
@@ -86,3 +87,30 @@ def test_generic_backend_executes_descending_order_by_with_limit():
     rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
 
     assert rows == [{"a": 2, "b": 3.0}, {"a": 1, "b": 2.5}]
+
+
+def test_fetch_generic_tensor_table_uses_columnar_numpy_fetch():
+    import numpy as np
+    from tpch_torch.backend.generic import _fetch_generic_tensor_table
+
+    class FakeResult:
+        def fetchnumpy(self):
+            return {
+                "a": np.array([1, 2, 3], dtype=np.int64),
+                "c": np.array(["x", "y", "x"]),
+            }
+
+        def fetchall(self):
+            raise AssertionError("generic table fetch must not materialize rows with fetchall")
+
+    class FakeConnection:
+        def execute(self, sql):
+            assert sql == "select a, c from t"
+            return FakeResult()
+
+    table = _fetch_generic_tensor_table(FakeConnection(), "t", ("a", "c"), "cpu")
+
+    assert table.columns["a"].tolist() == [1, 2, 3]
+    assert table.columns["a"].dtype == torch.int64
+    assert table.columns["c"].tolist() == [0, 1, 0]
+    assert table.dictionaries["c"] == ("x", "y")
