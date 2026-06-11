@@ -37,3 +37,21 @@ def test_all_tpch_queries_validate_through_sirius_frontend(tpch_con, query_id):
 
     assert result.query_id == query_id
     assert result.max_abs_error <= 1e-2
+
+
+def test_all_tpch_queries_do_not_call_query_template_executors(tpch_con, monkeypatch):
+    for query_id in range(2, 23):
+        module = __import__(f"tpch_torch.queries.q{query_id:02d}", fromlist=[f"execute_q{query_id}"])
+        monkeypatch.setattr(
+            module,
+            f"execute_q{query_id}",
+            lambda *args, _query_id=query_id, **kwargs: (_ for _ in ()).throw(
+                AssertionError(f"q{_query_id:02d} template executor called")
+            ),
+        )
+
+    for query_id in range(1, 23):
+        sql = get_tpch_query(tpch_con, query_id)
+        result = validate_sql_with_frontend(tpch_con, sql, device="cpu", frontend="sirius")
+        assert result.query_id == query_id
+        assert result.max_abs_error <= 1e-2

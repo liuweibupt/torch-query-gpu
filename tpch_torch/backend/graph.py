@@ -62,31 +62,27 @@ class PyTorchGraphExecutor:
     ) -> list[dict[str, Any]]:
         root = graph.root
         if root.kind == OperatorKind.COMPILED_TPCH:
-            return _execute_compiled_tpch_node(con, plan, root, device, use_compressed_masks)
+            raise UnsupportedPlanError("compiled TPC-H compatibility roots are no longer executable")
         if plan.query_id == 1:
             return _execute_q1_graph(con, plan, device)
         if plan.query_id == 6:
             return _execute_q6_graph(con, device, use_compressed_masks)
-        return _execute_complex_tpch_graph(con, plan, graph, device, use_compressed_masks)
+        return _execute_tpch_graph_query(con, plan, device)
 
 
-def _execute_complex_tpch_graph(
+def _execute_tpch_graph_query(
     con: duckdb.DuckDBPyConnection,
     plan: TQPPlan,
-    graph: TQPOperatorGraph,
     device: str,
-    use_compressed_masks: bool,
 ) -> list[dict[str, Any]]:
     if plan.query_id is None:
-        raise UnsupportedPlanError("complex TPC-H graph execution requires query_id")
-    node = TQPOperatorNode(
-        node_id=graph.root_id,
-        kind=OperatorKind.COMPILED_TPCH,
-        name="COMPLEX_TPCH_COMPAT",
-        children=(graph.root_id,),
-        metadata={"query_id": plan.query_id, "lowered_root": graph.root.name},
+        raise UnsupportedPlanError("TPC-H graph query execution requires query_id")
+    module = __import__(
+        f"tpch_torch.backend.tpch_graph_q{plan.query_id:02d}",
+        fromlist=[f"execute_q{plan.query_id}_graph"],
     )
-    return _execute_compiled_tpch_node(con, plan, node, device, use_compressed_masks)
+    executor = getattr(module, f"execute_q{plan.query_id}_graph")
+    return executor(con, device=device)
 
 
 def _execute_q1_graph(
@@ -225,49 +221,6 @@ def _q6_compressed_mask(table: TensorTable):
     discount_mask = PlainMask((columns["l_discount"] >= 0.05) & (columns["l_discount"] <= 0.07))
     quantity_mask = PlainMask(columns["l_quantity"] < 24.0)
     return mask_and(mask_and(date_mask, discount_mask), quantity_mask)
-
-
-def _execute_compiled_tpch_node(
-    con: duckdb.DuckDBPyConnection,
-    plan: TQPPlan,
-    node: TQPOperatorNode,
-    device: str,
-    use_compressed_masks: bool,
-) -> list[dict[str, Any]]:
-    query_id = int(node.metadata.get("query_id", plan.query_id or -1))
-    module_name = _EXECUTOR_BY_QUERY.get(query_id)
-    if module_name is None:
-        raise UnsupportedPlanError(f"TQP graph references TPC-H Q{query_id}, but no PyTorch executor is registered")
-    module = __import__(f"tpch_torch.queries.{module_name}", fromlist=[f"execute_q{query_id}"])
-    executor = getattr(module, f"execute_q{query_id}")
-    if query_id == 6:
-        return executor(con, device=device, use_compressed_masks=use_compressed_masks)
-    return executor(con, device=device)
-
-
-_EXECUTOR_BY_QUERY = {
-    2: "q02",
-    3: "q03",
-    4: "q04",
-    5: "q05",
-    6: "q06",
-    7: "q07",
-    8: "q08",
-    9: "q09",
-    10: "q10",
-    11: "q11",
-    12: "q12",
-    13: "q13",
-    14: "q14",
-    15: "q15",
-    16: "q16",
-    17: "q17",
-    18: "q18",
-    19: "q19",
-    20: "q20",
-    21: "q21",
-    22: "q22",
-}
 
 
 def _compile_q1_plan(plan_json: dict[str, Any] | None) -> Q1Plan:

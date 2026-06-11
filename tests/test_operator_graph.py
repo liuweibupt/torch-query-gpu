@@ -118,3 +118,11 @@ def test_all_tpch_queries_have_real_lowered_duckdb_graph_roots(tmp_path) -> None
 
     assert compiled_roots == []
     assert missing_scan == []
+
+
+def test_graph_executor_has_no_complex_tpch_compatibility_entrypoints() -> None:
+    import tpch_torch.backend.graph as graph_module
+
+    assert not hasattr(graph_module, "_execute_complex_tpch_graph")
+    assert not hasattr(graph_module, "_execute_compiled_tpch_node")
+    assert not hasattr(graph_module, "_EXECUTOR_BY_QUERY")
