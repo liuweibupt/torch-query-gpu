@@ -120,3 +120,16 @@ def test_grouped_sum_and_count_bincount_reduce_dense_ids():
 
     assert grouped_sum_bincount(values, group_ids, 6).tolist() == [0.0, 4.0, 10.0, 0.0, 0.0, 3.0]
     assert grouped_count_bincount(group_ids, 6).tolist() == [0, 2, 1, 0, 0, 1]
+
+
+def test_grouped_sum_bincount_preserves_integer_value_dtype():
+    from tpch_torch.operators import grouped_sum_bincount
+
+    result = grouped_sum_bincount(
+        torch.tensor([2, 3, 5], dtype=torch.int64),
+        torch.tensor([0, 0, 1], dtype=torch.int64),
+        3,
+    )
+
+    assert result.dtype == torch.int64
+    assert result.tolist() == [5, 5, 0]

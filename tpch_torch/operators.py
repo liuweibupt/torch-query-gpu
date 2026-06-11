@@ -69,7 +69,8 @@ def grouped_sum_bincount(values: torch.Tensor, group_ids: torch.Tensor, group_co
     """Sum values per dense group id using torch.bincount."""
 
     _validate_grouped_reduction_inputs(values, group_ids, group_count)
-    return torch.bincount(group_ids.to(dtype=torch.int64), weights=values, minlength=group_count)[:group_count]
+    result = torch.bincount(group_ids.to(dtype=torch.int64), weights=values, minlength=group_count)
+    return result[:group_count].to(dtype=values.dtype)
 
 
 def grouped_count_bincount(group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
