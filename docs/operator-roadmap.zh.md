@@ -21,7 +21,7 @@
 
 - 默认链路：原始 SQL → DuckDB/Sirius-like planner admission → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
-- TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1/Q6 已由真实 graph primitives 执行，复杂 Q2-Q22 子图仍由显式兼容执行器承载。
+- TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1/Q6 已由直接 graph primitives 执行；Q2-Q22 已由通用 Join/Subquery/CTE/Aggregate graph nodes 组合的 graph recipes 执行。
 - Generic SQL：单表 projection/filter/aggregate/order/limit 子集。
 - 压缩执行：已有 Plain/RLE/Index mask 原型，Q6 可通过 `--compressed-masks` 显式开启。
 
@@ -263,7 +263,8 @@
 ### Batch 6：Compiler / fusion / scheduling
 
 - [x] 第一版 `TQPPlan.operator_graph` 与 DuckDB JSON physical plan lowering。
-- [ ] 将复杂 Q2-Q22 的兼容执行器拆成通用 Join/Subquery/CTE/Distinct graph nodes。
+- [x] 将 Q2-Q22 兼容执行器拆成由通用 Join/Subquery/CTE/Aggregate nodes 组合的 graph recipes。
+- [ ] 将 query-id graph recipes 进一步替换成 DuckDB physical-plan interpreter，支持任意 SQL join/subquery 自动 lowering。
 - [ ] projection/filter/aggregate/map-reduce chains 的 fusion passes。
 - [ ] Device/data-movement scheduler and metrics。
 - [ ] `torch.compile` / Antares / alternative compiler experiments。

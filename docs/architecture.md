@@ -1,505 +1,170 @@
-# Current Architecture: DuckDB Frontend -> TQP IR -> PyTorch Backend
+# Current Architecture: DuckDB/Sirius-like Frontend → TQP IR → PyTorch Graph Nodes
 
 中文版本见 [`docs/architecture.zh.md`](architecture.zh.md).
 
 This repository is a correctness-first TQP-style prototype for analytical query
 execution on PyTorch tensors. The default path uses DuckDB for SQL admission and
-planning metadata, then lowers DuckDB JSON physical plans into `TQPOperatorGraph` and executes them with PyTorch operators on CPU or CUDA.
-
-Substrait is preserved as an explicit strict experimental frontend. There is no
-automatic fallback between frontends.
+planning metadata, lowers DuckDB JSON physical plans into `TQPOperatorGraph`,
+and executes the plan through PyTorch graph nodes on CPU or CUDA. DuckDB is used
+as a validation baseline only; PyTorch result rows are never sourced from DuckDB
+fallback execution.
 
 ## End-to-end flow
 
-```text
-SQL text / --query N
-  -> runner.load_sql()
-  -> Sirius-like DuckDB frontend
-       DuckDB parses, binds, plans, and optimizes the original SQL via EXPLAIN
-  -> TQPPlan
-       immutable frontend/backend boundary object
-  -> PyTorchBackend
-       executes TQPOperatorGraph via PyTorchGraphExecutor
-       Q1/Q6 use real graph primitives; complex Q2-Q22 use explicit compatibility nodes while being decomposed
-  -> optional DuckDB validation baseline
+```mermaid
+flowchart LR
+    SQL["SQL text<br/>--query / --sql / --sql-file"] --> Runner["runner.load_sql"]
+    Runner --> Frontend{"frontend"}
+    Frontend -->|default sirius| Sirius["DuckDB parser/binder/planner<br/>EXPLAIN + JSON physical plan"]
+    Frontend -->|strict substrait| Substrait["DuckDB native Substrait exporter"]
+    Sirius --> Graph["TQPOperatorGraph"]
+    Substrait --> Plan["TQPPlan"]
+    Graph --> Plan
+    Plan --> Backend["PyTorchBackend"]
+    Backend --> GraphExec["PyTorchGraphExecutor"]
+    GraphExec -->|Q1/Q6| Prim["direct graph primitives"]
+    GraphExec -->|Q2-Q22| Recipes["TPC-H graph recipes"]
+    Recipes --> Nodes["common graph_nodes"]
+    GraphExec -->|generic SQL subset| Generic["generic.py"]
+    Prim --> Torch["PyTorch tensor ops<br/>CPU / CUDA"]
+    Nodes --> Torch
+    Generic --> Torch
+    Torch --> Rows["result rows"]
+    Rows -. validation only .-> DuckDB["DuckDB baseline"]
 ```
 
-The validation baseline runs the same original SQL in DuckDB and compares rows.
-It is not used as a fallback result for the PyTorch path.
+## Current backend contract
 
-Frontend admission and backend execution are intentionally separate. The
-Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
-PyTorch backend now receives `TQPOperatorGraph` for all TPC-H Q1-Q22 plus an explicit generic SQL
-subset: single-table `SELECT`, simple `WHERE`, arithmetic projections,
-`COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`, `AVG`, simple `GROUP BY`,
-`ORDER BY` with `ASC`/`DESC`, `IN`, `LIKE`, `AND`, `OR`, `NOT`, and `LIMIT`. Unsupported
-generic operators raise `UnsupportedPlanError`.
-
-## Runtime entrypoints
-
-The generic CLI commands are:
-
-```bash
-# Default clean path.
-tpch-torch-run \
-  --db data/tpch_sf1.duckdb \
-  --query 21 \
-  --device cuda \
-  --frontend sirius
-
-# Validate all TPC-H queries on the same path.
-tpch-torch-validate \
-  --db data/tpch_sf1.duckdb \
-  --queries all \
-  --device cuda \
-  --frontend sirius \
-  --keep-going
-
-# Strict experimental Substrait path for DuckDB-exportable queries.
-tpch-torch-validate \
-  --db data/tpch_sf1.duckdb \
-  --query 6 \
-  --device cuda \
-  --frontend substrait
-```
-
-Supported frontends:
-
-- `sirius`: default DuckDB parser/planner admission path.
-- `substrait`: strict native DuckDB Substrait export path.
+- All TPC-H Q1-Q22 enter the backend with a real `TQPOperatorGraph` root lowered
+  from DuckDB `EXPLAIN (FORMAT JSON)`.
+- `OperatorKind.COMPILED_TPCH` roots are rejected; there is no compiled-template
+  fallback path.
+- Q1/Q6 execute direct primitives in `tpch_torch/backend/graph.py`.
+- Q2-Q22 execute `tpch_torch/backend/tpch_graph_qXX.py` graph recipes composed
+  from reusable nodes in `tpch_torch/backend/graph_nodes.py`.
+- Non-TPC-H SQL uses the explicit generic SQL subset. Unsupported generic shapes
+  raise `UnsupportedPlanError`.
 
 ## Module map
 
 | Layer | Files | Responsibility |
 | --- | --- | --- |
-| CLI | `scripts/run_query.py`, `scripts/validate_query.py` | Parse command-line arguments and pass explicit frontend/device/query source. |
-| Runner | `tpch_torch/runner.py` | Thin orchestration: load SQL, compile frontend plan, call backend, validate output. |
+| CLI | `scripts/run_query.py`, `scripts/validate_query.py`, `scripts/benchmark_query.py` | Parse query source, frontend, device, validation and benchmark options. |
+| Runner | `tpch_torch/runner.py` | Thin orchestration: load SQL, compile frontend plan, call backend, optionally validate. |
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | Compile original SQL into `TQPPlan`. |
-| IR | `tpch_torch/ir/plan.py` | Immutable internal plan object passed from frontend to backend. |
-| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py` | Execute `TQPPlan.operator_graph` with PyTorch tensor operators. |
-| Query catalog | `tpch_torch/query_catalog.py` | Identify supported TPC-H query shapes from original SQL text. |
-| DuckDB planner admission | `tpch_torch/planner.py` | Ask DuckDB to parse/plan original SQL via `EXPLAIN`. |
-| Tensor kernels | `tpch_torch/queries/q02.py` ... `q22.py` | Compatibility executors for complex TPC-H subgraphs while generic graph nodes are added; Q1/Q6 are graph primitives. |
-| Strict Substrait bridge | `tpch_torch/duckdb_bridge.py`, `tpch_torch/substrait.py` | Export and compile real DuckDB Substrait plans for the experimental frontend. |
+| DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | Export DuckDB textual/JSON plans and lower JSON nodes to `TQPOperatorGraph`. |
+| IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | Immutable frontend/backend boundary. |
+| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q6, Q2-Q22 recipes, and generic SQL. |
+| Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan, filter, lookup join, semi/anti join, scalar subquery, grouped scalar subquery, CTE materialization, aggregate, sort/limit helpers. |
+| TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | Query-specific graph recipes composed from common nodes; do not call old `tpch_torch.queries.qXX` templates. |
+| Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | Grouped reductions, low-cardinality group ids, top-k, Plain/RLE/Index mask primitives. |
 
-## Runner orchestration
+## Key code snippets
 
-`tpch_torch/runner.py` is intentionally small. It does not contain frontend or
-backend implementation details; it only wires the selected frontend to the
-PyTorch backend.
+Frontend lowering attaches an operator graph to the plan:
 
 ```python
-def run_sql_with_frontend(
-    con: duckdb.DuckDBPyConnection,
-    sql: str,
-    device: str = "cpu",
-    frontend: FrontendName = "sirius",
-) -> QueryResult:
-    _validate_device(device)
-    plan = compile_tqp_plan(con, sql, frontend)
-    rows = PyTorchBackend().execute(con, plan, device=device)
-    return QueryResult(query_id=plan.query_id, rows=rows)
+physical_plan_json = export_duckdb_physical_plan_json(con, sql)
+operator_graph = lower_duckdb_json_to_operator_graph(sql, query_id, physical_plan_json)
+return TQPPlan(..., operator_graph=operator_graph)
 ```
 
-Frontend selection is explicit:
+Backend execution refuses non-graph TPC-H plans and compiled compatibility roots:
 
 ```python
-def compile_tqp_plan(
-    con: duckdb.DuckDBPyConnection,
-    sql: str,
-    frontend: FrontendName = "sirius",
-) -> TQPPlan:
-    if frontend == "sirius":
-        return compile_sirius_plan(con, sql)
-    if frontend == "substrait":
-        return compile_substrait_plan(con, sql)
-    raise ValueError(f"unknown frontend: {frontend}")
-```
-
-Validation calls the same execution path, then compares against DuckDB:
-
-```python
-def validate_sql_with_frontend(...):
-    result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
-    duckdb_rows = run_duckdb_sql(con, sql)
-    max_abs_error = compare_rows(duckdb_rows, result.rows)
-    return SQLValidationResult(...)
-```
-
-## TQP IR boundary
-
-The internal IR is currently a compact immutable plan object. It is deliberately
-small, but now includes `operator_graph`: the repository guarantees all TPC-H queries run through a clean graph boundary, then incrementally replaces complex compatibility subgraphs with richer generic operator nodes.
-
-```python
-FrontendName = Literal["sirius", "substrait"]
-
-
-@dataclass(frozen=True)
-class DuckDBPlanMetadata:
-    logical_plan: str = ""
-    logical_opt: str = ""
-    physical_plan: str = ""
-
-
-@dataclass(frozen=True)
-class TQPPlan:
-    query_id: int | None
-    source_sql: str
-    frontend: FrontendName
-    duckdb_metadata: DuckDBPlanMetadata | None = None
-    plan_json: dict[str, Any] | None = None
-    generic_plan: Any | None = None
-    generic_error: str | None = None
-```
-
-Important fields:
-
-- `query_id`: identified TPC-H shape, or `None` for generic SQL.
-- `source_sql`: the unchanged original SQL.
-- `frontend`: `sirius` or `substrait`.
-- `duckdb_metadata`: textual DuckDB plans captured by the Sirius-like frontend.
-- `plan_json`: real DuckDB Substrait JSON when the strict Substrait frontend is
-  selected.
-- `generic_plan`: executable generic SQL subset plan for non-TPC-H SQL.
-- `generic_error`: parser/executor-subset reason when the frontend admitted SQL
-  but the PyTorch backend does not yet support that generic shape.
-
-## Sirius-like frontend
-
-The default frontend uses DuckDB as the SQL parser/binder/planner/optimizer. It
-captures DuckDB's logical, optimized logical, and physical plan text through
-`EXPLAIN` and stores that metadata in `TQPPlan`.
-
-```python
-def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
-    duckdb_plan = export_duckdb_logical_plan(con, sql)
-    generic_plan = None
-    generic_error = None
-    try:
-        query_id = identify_tpch_query(sql)
-    except UnsupportedPlanError:
-        query_id = None
-        try:
-            generic_plan = parse_generic_sql(sql)
-        except UnsupportedPlanError as exc:
-            generic_error = str(exc)
-    return TQPPlan(
-        query_id=query_id,
-        source_sql=sql,
-        frontend="sirius",
-        duckdb_metadata=DuckDBPlanMetadata(...),
-        generic_plan=generic_plan,
-        generic_error=generic_error,
+if plan.operator_graph is not None:
+    return PyTorchGraphExecutor().execute(con, plan, device=device)
+if plan.query_id is not None:
+    raise UnsupportedPlanError(
+        f"TPC-H Q{plan.query_id} requires a frontend-lowered TQP operator graph"
     )
 ```
 
-The DuckDB admission function is:
-
-```python
-def export_duckdb_logical_plan(con: object, sql: str) -> DuckDBLogicalPlan:
-    try:
-        con.execute("PRAGMA explain_output='all'")
-        rows = con.execute(f"EXPLAIN {sql}").fetchall()
-    except duckdb.Error as exc:
-        raise DuckDBPlannerError(f"DuckDB EXPLAIN failed: {exc}") from exc
-    sections = {str(name): str(plan) for name, plan in rows}
-    return DuckDBLogicalPlan(
-        logical_plan=sections.get("logical_plan", ""),
-        logical_opt=sections.get("logical_opt", ""),
-        physical_plan=sections.get("physical_plan", ""),
-    )
-```
-
-This mirrors the Sirius architectural choice: rely on DuckDB's parser/planner
-rather than requiring every query to be exportable through DuckDB's Substrait
-extension.
-
-## Strict Substrait frontend
-
-The strict Substrait frontend remains available for experiments and for checking
-DuckDB Substrait exporter coverage. It does not synthesize plans and does not
-fallback to another frontend.
-
-```python
-def compile_substrait_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
-    return TQPPlan(
-        query_id=identify_tpch_query(sql),
-        source_sql=sql,
-        frontend="substrait",
-        plan_json=export_substrait_json(con, sql),
-    )
-```
-
-If DuckDB cannot export the original SQL, this path raises
-`DuckDBSubstraitError`.
-
-## PyTorch backend
-
-The backend receives a `TQPPlan`; it does not parse SQL or call DuckDB's
-planner. It dispatches to tensor kernels or to the generic SQL subset executor.
-
-```python
-class PyTorchBackend:
-    def execute(
-        self,
-        con,
-        plan: TQPPlan,
-        device: str = "cpu",
-        use_compressed_masks: bool = False,
-    ) -> list[dict[str, Any]]:
-        if plan.operator_graph is not None:
-            return PyTorchGraphExecutor().execute(
-                con,
-                plan,
-                device=device,
-                use_compressed_masks=use_compressed_masks,
-            )
-        if plan.query_id is not None:
-            raise UnsupportedPlanError(
-                f"TPC-H Q{plan.query_id} requires a frontend-lowered TQP operator graph"
-            )
-        return PyTorchGraphExecutor().execute(
-            con,
-            plan,
-            device=device,
-            use_compressed_masks=use_compressed_masks,
-        )
-```
-
-The Q1 graph path uses DuckDB JSON lowering on `frontend="sirius"`; the strict Substrait frontend can still provide real Substrait JSON for the dedicated Q1 plan compiler. Q6 additionally has
-an explicit correctness-first compressed-mask option exposed by CLI
-`--compressed-masks`. This flag changes only PyTorch predicate-mask execution;
-it does not alter SQL, frontend admission, validation baseline, or storage
-format.
-
-
-## Operator fast paths added below the backend
-
-The backend now avoids several correctness-first but slow Python materialization
-paths while keeping the same frontend/backend boundary. Typed TPC-H fetch and
-generic single-table fetch use DuckDB `fetchnumpy()` and encode NumPy arrays
-directly:
-
-```python
-def table_from_columnar_typed(columnar, device="cpu") -> TensorTable:
-    columns = {}
-    dictionaries = {}
-    for column_name, values_iterable in columnar.items():
-        tensor, vocabulary = encode_column(column_name, values_iterable, device)
-        columns[column_name] = tensor
-        if vocabulary is not None:
-            dictionaries[column_name] = vocabulary
-    return TensorTable(columns=columns, dictionaries=dictionaries)
-
-def _encode_numpy_typed_column(column_name, values, device):
-    if column_name in STRING_COLUMNS_EXTENDED:
-        vocabulary, inverse = np.unique(values.astype(str), return_inverse=True)
-        return torch.as_tensor(inverse, dtype=torch.int64, device=device), tuple(vocabulary.tolist())
-    if column_name in INT_COLUMNS:
-        return torch.as_tensor(values, dtype=torch.int64, device=device), None
-    return torch.as_tensor(values, dtype=torch.float64, device=device), None
-```
-
-Reusable grouping and lookup helpers live in `tpch_torch/operators.py` and
-`tpch_torch/relational.py`:
-
-```python
-def low_cardinality_group_ids(key_columns, cardinalities):
-    group_ids = torch.zeros(key_columns[0].shape, dtype=torch.int64, device=key_columns[0].device)
-    multiplier = 1
-    for key, cardinality in reversed(tuple(zip(key_columns, cardinalities))):
-        group_ids = group_ids + key.to(dtype=torch.int64) * multiplier
-        multiplier *= cardinality
-    return group_ids, multiplier
-
-@dataclass(frozen=True)
-class LookupIndex:
-    sorted_keys: torch.Tensor
-    sorted_values: torch.Tensor
-```
-
-The generic grouped aggregate executor now groups masked rows with tensor
-`composite_group_ids()` and computes aggregate columns with grouped reductions.
-It decodes only final group keys and aggregate scalars, instead of building a
-Python dictionary of row-index lists per group.
-
-## Encoded mask execution
-
-`tpch_torch/compressed.py` now has an explicit mask abstraction for the first
-compressed execution experiments:
+Common graph nodes expose reusable relational patterns:
 
 ```python
 @dataclass(frozen=True)
-class PlainMask:
+class SemiJoinNode:
+    probe_keys: torch.Tensor
+    build_keys: torch.Tensor
+
+    def execute(self) -> torch.Tensor:
+        return torch.isin(self.probe_keys, torch.unique(self.build_keys))
+
+@dataclass(frozen=True)
+class GroupedScalarSubqueryNode:
+    keys: torch.Tensor
     values: torch.Tensor
 
-@dataclass(frozen=True)
-class RLEMask:
-    ranges: RLERanges
-    row_count: int
-
-@dataclass(frozen=True)
-class IndexMask:
-    positions: torch.Tensor
-    row_count: int
-
-def mask_and(left, right):
-    if isinstance(left, RLEMask) and isinstance(right, RLEMask):
-        return RLEMask(range_intersect(left.ranges, right.ranges), left.row_count)
-    if isinstance(left, IndexMask) and isinstance(right, IndexMask):
-        return IndexMask(idx_in_idx(left.positions, right.positions), left.row_count)
-    return _mask_and_mixed(left, right)
+    def lookup(self, probe_keys, missing_value=-1):
+        build_key, probe_key = _packed_lookup_keys(...)
+        return lookup_tensor_values(build_key, self.values, probe_key, missing_value)
 ```
 
-Q6 uses this path only when requested:
+Q20 is now expressed as graph-node composition for a correlated grouped scalar
+subquery plus semi-join:
 
 ```python
-def execute_q6(con, device="cpu", use_compressed_masks=False):
-    table = fetch_tensor_table(con, "lineitem", LINEITEM_COLUMNS, device=device)
-    if use_compressed_masks:
-        mask = _q6_compressed_mask(table)
-        positions = mask_to_index(mask)
-        revenue = (extendedprice.index_select(0, positions) * discount.index_select(0, positions)).sum()
-        return [{"revenue": float(revenue.cpu().item())}]
-    return [_execute_q6_plain_mask_row(table)]
+shipped_quantity_by_pair = GroupedScalarSubqueryNode.sum(
+    (lineitem.columns["l_partkey"][ship_mask], lineitem.columns["l_suppkey"][ship_mask]),
+    lineitem.columns["l_quantity"][ship_mask],
+)
+shipped_quantity = shipped_quantity_by_pair.lookup(
+    (partsupp.columns["ps_partkey"], partsupp.columns["ps_suppkey"]),
+    missing_value=0.0,
+)
+qualifying_suppkeys = torch.unique(partsupp.columns["ps_suppkey"][
+    SemiJoinNode(partsupp.columns["ps_partkey"], forest_partkeys).execute()
+    & (partsupp.columns["ps_availqty"] > 0.5 * shipped_quantity)
+])
 ```
 
-Mixed mask cases use documented explicit conversion to Plain or Index for
-correctness. That exposes the encoded-mask boundary without pretending that the
-repository already has full compressed column storage, compressed joins, or
-cost-based encoding selection.
+## Q1 graph primitive layering
 
-## Query identification and generic SQL
-
-TPC-H queries still use query-id identification, but backend dispatch now goes through `TQPOperatorGraph` rather than direct qXX template dispatch. `tpch_torch/query_catalog.py`
-identifies those queries by checking stable SQL markers from DuckDB's TPC-H
-query text. Non-TPC-H SQL is admitted with `query_id=None`. If the SQL falls in
-the current generic backend subset, it is parsed into `GenericSQLPlan`;
-otherwise the plan keeps `generic_plan=None` and records `generic_error` so
-backend failure is explicit and attributable to unsupported execution, not
-frontend admission.
-
-```python
-def identify_tpch_query(sql: str) -> int:
-    normalized = _normalize_sql(sql)
-    for query_id, markers in QUERY_MARKERS:
-        if all(_normalize_sql(marker) in normalized for marker in markers):
-            return query_id
-    raise UnsupportedPlanError("SQL text does not match a supported TPC-H query shape")
+```mermaid
+flowchart TD
+    Q1SQL["TPC-H Q1 SQL"] --> Frontend["DuckDB/Sirius-like frontend"]
+    Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
+    Graph --> Fetch["fetch_lineitem_tensor_table"]
+    Fetch --> Filter["l_shipdate <= cutoff"]
+    Filter --> GroupID["dense group id"]
+    GroupID --> Reduce["torch.bincount sums/counts"]
+    Reduce --> Decode["decode low-cardinality keys"]
+    Decode --> Sort["ORDER BY returnflag, linestatus"]
+    Sort --> Rows["result rows"]
 ```
 
-This is intentionally a correctness-first bridge. The current generic plan is a
-small operator subset. The next architectural step is to replace the remaining complex TPC-H compatibility subgraphs with generic graph nodes:
+Q1 keeps the heavy scan/filter/group/reduce work in tensors. Only final grouped
+rows are decoded and materialized on the host.
+
+## SQL support boundary
+
+The Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
+PyTorch backend currently executes:
 
 ```text
-Scan -> Filter -> Join -> Aggregate -> Sort -> Limit
+TPC-H Q1-Q22 via TQPOperatorGraph + PyTorch graph nodes
+single-table generic SELECT/WHERE/projection/aggregate/GROUP BY/ORDER BY/LIMIT
 ```
 
-## Current SQL support
+Generic joins, generic subqueries, windows, set operations, and HAVING still fail
+explicitly. The next architectural step is to replace query-id recipe dispatch
+with a DuckDB physical-plan interpreter that lowers arbitrary supported plan
+nodes directly into the same graph-node set.
 
-Generic SQL subset supported by the PyTorch backend:
-
-```text
-single-table SELECT
-WHERE with comparisons, IN, LIKE, AND, OR, and NOT
-column projection and column * constant projection
-COUNT(*), COUNT(column), SUM, MIN, MAX, and AVG
-simple GROUP BY
-ORDER BY output columns with ASC/DESC
-LIMIT
-```
-
-Unsupported generic SQL, including joins, subqueries, windows, set operations,
-and HAVING, fails explicitly.
-
-## Current TPC-H support
+## TPC-H support matrix
 
 | Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend |
 | --- | --- | --- | --- |
 | Q1, Q3, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15, Q18, Q19 | yes | yes | yes |
 | Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | blocked in DuckDB 1.2.x Substrait export | yes |
 
-The strict Substrait failures are explicit exporter limitations, not PyTorch
-backend fallbacks.
-
-## Operator roadmap
-
-The paper-derived operator and optimization backlog is tracked in
-[`docs/operator-roadmap.md`](operator-roadmap.md). It separates verified full-text
-items from abstract-derived TQEx/TQP++/CoddSpeed items and identifies the current
-implementation batches.
-
-## Cold/hot benchmark timing
-
-`tpch_torch/benchmark.py` provides the repository's reproducible timing path. It
-intentionally times the same execution chain as `tpch-torch-run` rather than a
-handwritten query shortcut:
-
-```text
-SQL text already resolved from --query/--sql/--sql-file
-  -> run_sql_with_frontend()
-  -> compile_tqp_plan()
-  -> PyTorchBackend.execute()
-  -> query/generic tensor executor
-  -> materialized result rows
-```
-
-The CLI entrypoint is `tpch-torch-benchmark`:
-
-```bash
-tpch-torch-benchmark \
-  --db data/tpch_sf1.duckdb \
-  --query 6 \
-  --device cuda \
-  --frontend sirius \
-  --cold-runs 3 \
-  --warmup-runs 5 \
-  --hot-runs 20 \
-  --json
-```
-
-Key implementation snippet:
-
-```python
-def benchmark_sql(config, *, connect=connect_database, runner=run_sql_with_frontend):
-    sync = _synchronizer(config.device, synchronizer)
-    cold_samples = _measure_cold(config, connect, runner, clock_ns, sync)
-    hot_samples = _measure_hot(config, connect, runner, clock_ns, sync)
-    return BenchmarkReport(
-        config=config,
-        cold=summarize_samples(cold_samples),
-        hot=summarize_samples(hot_samples),
-        samples=tuple(cold_samples + hot_samples),
-    )
-
-def _measure_one(mode, iteration, con, config, runner, clock_ns, sync):
-    sync()
-    start_ns = clock_ns()
-    result = runner(con, config.sql, device=config.device, frontend=config.frontend)
-    sync()
-    elapsed_ms = (clock_ns() - start_ns) / 1_000_000.0
-    return TimingSample(mode, iteration, elapsed_ms, result.query_id, len(result.rows))
-```
-
-Cold samples open and close a new DuckDB connection for each measured run. Hot
-samples reuse one connection and run unrecorded warmups before measurement. CUDA
-samples synchronize before and after every measured run so asynchronous kernels
-are included. The command reports `min`, `median`, `mean`, nearest-rank `p95`,
-`max`, and sample standard deviation for cold and hot groups. It does not run
-DuckDB validation; validation remains a separate correctness step.
+The strict Substrait failures are DuckDB exporter coverage limits. They are not
+PyTorch backend fallbacks.
 
 ## Verification commands
-
-Use these commands after architecture changes:
 
 ```bash
 timeout 60 /work/torch-query-gpu/.venv/bin/python -m pytest -q
 timeout 60 /work/torch-query-gpu/.venv/bin/python -m compileall -q tpch_torch scripts
-timeout 300 /work/torch-query-gpu/.venv/bin/tpch-torch-validate \
-  --db /work/torch-query-gpu/data/tpch_sf1.duckdb \
-  --queries all \
-  --device cuda \
-  --frontend sirius \
-  --keep-going
 ```

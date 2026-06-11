@@ -26,7 +26,7 @@ until a readable full paper/appendix is available.
 - Experimental strict frontend: original SQL → DuckDB native Substrait JSON →
   `TQPPlan`; no fabricated JSON and no frontend fallback.
 - Backend path: `TQPPlan` → PyTorch operators on CPU/CUDA.
-- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6 execute with real graph primitives; complex Q2-Q22 subgraphs still use explicit compatibility execution while generic join/subquery/CTE nodes are added. DuckDB native Substrait remains limited by exporter coverage for several queries.
+- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6 execute with direct graph primitives; Q2-Q22 execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
 - Current generic SQL status: single-table projection/filter/aggregate subset.
 
 ## Operator inventory from TQP (**verified**)
@@ -341,7 +341,8 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 ### Batch 6: compiler/fusion/scheduling
 
 - [x] First explicit operator graph inside `TQPPlan`.
-- [ ] Replace complex Q2-Q22 compatibility execution with generic Join/Subquery/CTE/Distinct graph nodes.
+- [x] Replace Q2-Q22 compatibility execution with graph recipes built from common Join/Subquery/CTE/Aggregate nodes.
+- [ ] Replace query-id graph recipes with a DuckDB physical-plan interpreter for arbitrary supported joins/subqueries.
 - [ ] Fusion passes for map-reduce and projection/filter/aggregate chains.
 - [ ] Device/data-movement scheduler and metrics.
 - [ ] Torch compile / Antares / alternative compiler experiments.

@@ -118,3 +118,56 @@ def test_all_tpch_queries_have_real_lowered_duckdb_graph_roots(tmp_path) -> None
 
     assert compiled_roots == []
     assert missing_scan == []
+
+
+def test_graph_executor_has_no_complex_tpch_compatibility_entrypoints() -> None:
+    import tpch_torch.backend.graph as graph_module
+
+    assert not hasattr(graph_module, "_execute_complex_tpch_graph")
+    assert not hasattr(graph_module, "_execute_compiled_tpch_node")
+    assert not hasattr(graph_module, "_EXECUTOR_BY_QUERY")
+
+
+def test_tpch_graph_query_modules_compose_common_graph_nodes() -> None:
+    import ast
+    from pathlib import Path
+
+    backend_dir = Path(__file__).resolve().parents[1] / "tpch_torch" / "backend"
+    offenders: list[str] = []
+    missing_graph_nodes: list[str] = []
+    for module_path in sorted(backend_dir.glob("tpch_graph_q*.py")):
+        tree = ast.parse(module_path.read_text())
+        imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+        if "tpch_torch.relational" in imports:
+            offenders.append(module_path.name)
+        if "tpch_torch.backend.graph_nodes" not in imports:
+            missing_graph_nodes.append(module_path.name)
+
+    assert offenders == []
+    assert missing_graph_nodes == []
+
+
+def test_complex_tpch_graph_modules_use_explicit_subquery_nodes() -> None:
+    from pathlib import Path
+
+    backend_dir = Path(__file__).resolve().parents[1] / "tpch_torch" / "backend"
+    expected = {
+        "tpch_graph_q02.py": ("GroupedScalarSubqueryNode",),
+        "tpch_graph_q04.py": ("SemiJoinNode",),
+        "tpch_graph_q11.py": ("ScalarSubqueryNode",),
+        "tpch_graph_q15.py": ("MaterializedCTENode", "ScalarSubqueryNode"),
+        "tpch_graph_q16.py": ("AntiJoinNode",),
+        "tpch_graph_q17.py": ("GroupedScalarSubqueryNode",),
+        "tpch_graph_q18.py": ("SemiJoinNode",),
+        "tpch_graph_q20.py": ("SemiJoinNode", "GroupedScalarSubqueryNode"),
+        "tpch_graph_q21.py": ("AntiJoinNode", "SemiJoinNode"),
+        "tpch_graph_q22.py": ("AntiJoinNode", "ScalarSubqueryNode"),
+    }
+    missing: dict[str, tuple[str, ...]] = {}
+    for filename, node_names in expected.items():
+        source = (backend_dir / filename).read_text()
+        absent = tuple(node_name for node_name in node_names if node_name not in source)
+        if absent:
+            missing[filename] = absent
+
+    assert missing == {}
