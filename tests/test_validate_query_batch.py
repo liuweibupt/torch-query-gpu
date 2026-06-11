@@ -25,8 +25,8 @@ def test_validate_queries_loads_original_sql_and_validates_each_query():
         assert isinstance(con, FakeConnection)
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device, frontend):
-        calls.append((sql, device, frontend))
+    def validator(con, sql, device, frontend, use_compressed_masks):
+        calls.append((sql, device, frontend, use_compressed_masks))
         return _result(int(sql.rsplit("q", 1)[1]))
 
     results = validate_queries(
@@ -42,9 +42,9 @@ def test_validate_queries_loads_original_sql_and_validates_each_query():
     assert [result.query_id for result in results] == [1, 3, 6]
     assert [result.ok for result in results] == [True, True, True]
     assert calls == [
-        ("select -- q1", "cuda", "sirius"),
-        ("select -- q3", "cuda", "sirius"),
-        ("select -- q6", "cuda", "sirius"),
+        ("select -- q1", "cuda", "sirius", False),
+        ("select -- q3", "cuda", "sirius", False),
+        ("select -- q6", "cuda", "sirius", False),
     ]
 
 
@@ -52,7 +52,7 @@ def test_validate_queries_keep_going_records_failures():
     def load_query(con, query_id):
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device, frontend):
+    def validator(con, sql, device, frontend, use_compressed_masks):
         query_id = int(sql.rsplit("q", 1)[1])
         if query_id == 3:
             raise RuntimeError("backend unsupported")
@@ -77,7 +77,7 @@ def test_validate_queries_without_keep_going_raises_first_failure():
     def load_query(con, query_id):
         return f"select -- q{query_id}"
 
-    def validator(con, sql, device, frontend):
+    def validator(con, sql, device, frontend, use_compressed_masks):
         raise RuntimeError("backend unsupported")
 
     with pytest.raises(RuntimeError, match="backend unsupported"):
@@ -109,8 +109,8 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
         assert path == tmp_path / "tpch.duckdb"
         return con
 
-    def validate_batch(connection, query_ids, *, device, tolerance, keep_going, frontend):
-        calls.append((connection, query_ids, device, tolerance, keep_going, frontend))
+    def validate_batch(connection, query_ids, *, device, tolerance, keep_going, frontend, use_compressed_masks):
+        calls.append((connection, query_ids, device, tolerance, keep_going, frontend, use_compressed_masks))
         return [
             validate_query.BatchValidationRecord(
                 query_id=1,
@@ -146,7 +146,7 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
 
     validate_query.main()
 
-    assert calls == [(con, (1, 3), "cuda", 1e-2, True, "sirius")]
+    assert calls == [(con, (1, 3), "cuda", 1e-2, True, "sirius", False)]
     assert con.closed is True
     assert capsys.readouterr().out.splitlines() == [
         "validated query=1 rows=4 max_abs_error=0",

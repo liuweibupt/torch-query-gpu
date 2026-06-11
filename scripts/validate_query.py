@@ -18,7 +18,7 @@ FIRST_TPCH_QUERY_ID = 1
 LAST_TPCH_QUERY_ID = 22
 ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
-QueryValidator = Callable[[object, str, str, FrontendName], SQLValidationResult]
+QueryValidator = Callable[[object, str, str, FrontendName, bool], SQLValidationResult]
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="TQP frontend used before PyTorch execution",
     )
     parser.add_argument("--keep-going", action="store_true", help="Continue batch validation after a query fails")
+    parser.add_argument(
+        "--compressed-masks",
+        action="store_true",
+        help="Use explicit compressed mask execution where implemented, currently TPC-H Q6",
+    )
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
     return parser
 
@@ -67,6 +72,7 @@ def validate_queries(
     tolerance: float,
     keep_going: bool,
     frontend: FrontendName = "sirius",
+    use_compressed_masks: bool = False,
     load_query: QueryLoader = get_tpch_query,
     validator: QueryValidator = validate_sql_with_frontend,
 ) -> list[BatchValidationRecord]:
@@ -79,6 +85,7 @@ def validate_queries(
                 device=device,
                 tolerance=tolerance,
                 frontend=frontend,
+                use_compressed_masks=use_compressed_masks,
                 load_query=load_query,
                 validator=validator,
             )
@@ -100,9 +107,10 @@ def _validate_one_query(
     frontend: FrontendName,
     load_query: QueryLoader,
     validator: QueryValidator,
+    use_compressed_masks: bool,
 ) -> BatchValidationRecord:
     sql = load_query(con, query_id)
-    result = validator(con, sql, device, frontend)
+    result = validator(con, sql, device, frontend, use_compressed_masks)
     if result.max_abs_error > tolerance:
         raise AssertionError(
             f"Q{result.query_id} validation failed: "
@@ -129,6 +137,7 @@ def main() -> None:
                 tolerance=args.tolerance,
                 keep_going=args.keep_going,
                 frontend=args.frontend,
+                use_compressed_masks=args.compressed_masks,
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
@@ -139,6 +148,7 @@ def main() -> None:
             sql,
             device=args.device,
             frontend=args.frontend,
+            use_compressed_masks=args.compressed_masks,
         )
     finally:
         con.close()

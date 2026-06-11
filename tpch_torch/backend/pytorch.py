@@ -23,7 +23,13 @@ from tpch_torch.substrait import (
 class PyTorchBackend:
     """Execute internal TQP plans with existing PyTorch tensor query kernels."""
 
-    def execute(self, con: duckdb.DuckDBPyConnection, plan: TQPPlan, device: str = "cpu") -> list[dict[str, Any]]:
+    def execute(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        plan: TQPPlan,
+        device: str = "cpu",
+        use_compressed_masks: bool = False,
+    ) -> list[dict[str, Any]]:
         if plan.query_id is None:
             if plan.generic_plan is None:
                 detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
@@ -34,15 +40,14 @@ class PyTorchBackend:
             from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
 
             return execute_q1(fetch_lineitem_tensor_table(con, device=device), q1_plan)
-        if plan.query_id == 6:
-            from tpch_torch.queries.q06 import execute_q6
-
-            return execute_q6(con, device=device)
         module_name = _EXECUTOR_BY_QUERY.get(plan.query_id)
         if module_name is None:
             raise UnsupportedPlanError(f"TPC-H Q{plan.query_id} exported to frontend but has no PyTorch executor yet")
         module = __import__(f"tpch_torch.queries.{module_name}", fromlist=[f"execute_q{plan.query_id}"])
-        return getattr(module, f"execute_q{plan.query_id}")(con, device=device)
+        executor = getattr(module, f"execute_q{plan.query_id}")
+        if plan.query_id == 6:
+            return executor(con, device=device, use_compressed_masks=use_compressed_masks)
+        return executor(con, device=device)
 
 
 _EXECUTOR_BY_QUERY = {
@@ -50,6 +55,7 @@ _EXECUTOR_BY_QUERY = {
     3: "q03",
     4: "q04",
     5: "q05",
+    6: "q06",
     7: "q07",
     8: "q08",
     9: "q09",

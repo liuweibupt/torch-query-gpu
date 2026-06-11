@@ -33,8 +33,19 @@ def load_sql(
     return sql_file.read_text()
 
 
-def run_sql(con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu") -> QueryResult:
-    return run_sql_with_frontend(con, sql, device=device, frontend="sirius")
+def run_sql(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    device: str = "cpu",
+    use_compressed_masks: bool = False,
+) -> QueryResult:
+    return run_sql_with_frontend(
+        con,
+        sql,
+        device=device,
+        frontend="sirius",
+        use_compressed_masks=use_compressed_masks,
+    )
 
 
 def run_sql_with_frontend(
@@ -42,17 +53,32 @@ def run_sql_with_frontend(
     sql: str,
     device: str = "cpu",
     frontend: FrontendName = "sirius",
+    use_compressed_masks: bool = False,
 ) -> QueryResult:
     _validate_device(device)
     plan = compile_tqp_plan(con, sql, frontend)
-    rows = PyTorchBackend().execute(con, plan, device=device)
+    rows = PyTorchBackend().execute(
+        con,
+        plan,
+        device=device,
+        use_compressed_masks=use_compressed_masks,
+    )
     return QueryResult(query_id=plan.query_id, rows=rows)
 
 
 def validate_sql(
-    con: duckdb.DuckDBPyConnection, sql: str, device: str = "cpu"
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    device: str = "cpu",
+    use_compressed_masks: bool = False,
 ) -> SQLValidationResult:
-    return validate_sql_with_frontend(con, sql, device=device, frontend="sirius")
+    return validate_sql_with_frontend(
+        con,
+        sql,
+        device=device,
+        frontend="sirius",
+        use_compressed_masks=use_compressed_masks,
+    )
 
 
 def validate_sql_with_frontend(
@@ -60,8 +86,15 @@ def validate_sql_with_frontend(
     sql: str,
     device: str = "cpu",
     frontend: FrontendName = "sirius",
+    use_compressed_masks: bool = False,
 ) -> SQLValidationResult:
-    result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
+    result = run_sql_with_frontend(
+        con,
+        sql,
+        device=device,
+        frontend=frontend,
+        use_compressed_masks=use_compressed_masks,
+    )
     duckdb_rows = run_duckdb_sql(con, sql)
     max_abs_error = compare_rows(duckdb_rows, result.rows)
     return SQLValidationResult(
@@ -78,17 +111,30 @@ def timed_run_sql(
     sql: str,
     device: str = "cpu",
     frontend: FrontendName = "sirius",
+    use_compressed_masks: bool = False,
 ) -> tuple[QueryResult, float]:
     if device == "cuda":
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
+        result = run_sql_with_frontend(
+            con,
+            sql,
+            device=device,
+            frontend=frontend,
+            use_compressed_masks=use_compressed_masks,
+        )
         end.record()
         torch.cuda.synchronize()
         return result, float(start.elapsed_time(end))
     start_time = perf_counter()
-    result = run_sql_with_frontend(con, sql, device=device, frontend=frontend)
+    result = run_sql_with_frontend(
+        con,
+        sql,
+        device=device,
+        frontend=frontend,
+        use_compressed_masks=use_compressed_masks,
+    )
     return result, (perf_counter() - start_time) * 1000.0
 
 

@@ -143,9 +143,10 @@ def test_run_query_main_prints_generic_query_label(monkeypatch, tmp_path, capsys
     def connect_database(path):
         return FakeConnection()
 
-    def timed_run_sql(con, sql, *, device, frontend):
+    def timed_run_sql(con, sql, *, device, frontend, use_compressed_masks):
         assert sql == "select count(*) as n from t"
         assert frontend == "sirius"
+        assert use_compressed_masks is False
         return QueryResult(query_id=None, rows=[{"n": 2}]), 1.25
 
     monkeypatch.setattr(run_query, "connect_database", connect_database)
@@ -164,3 +165,13 @@ def test_run_query_main_prints_generic_query_label(monkeypatch, tmp_path, capsys
     run_query.main()
 
     assert capsys.readouterr().out.splitlines() == ["{'n': 2}", "generic_pytorch_ms=1.250"]
+
+
+def test_run_and_validate_parsers_accept_compressed_masks(tmp_path):
+    db_path = tmp_path / "tpch.duckdb"
+
+    run_args = run_parser().parse_args(["--db", str(db_path), "--query", "6", "--compressed-masks"])
+    validate_args = validate_parser().parse_args(["--db", str(db_path), "--query", "6", "--compressed-masks"])
+
+    assert run_args.compressed_masks is True
+    assert validate_args.compressed_masks is True

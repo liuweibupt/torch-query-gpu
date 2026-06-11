@@ -45,3 +45,22 @@ def test_pytorch_backend_executes_generic_tqp_plan():
     )
 
     assert PyTorchBackend().execute(con, plan, device="cpu") == [{"n": 2}]
+
+
+def test_pytorch_backend_passes_compressed_mask_option_to_q6(monkeypatch):
+    import tpch_torch.backend.pytorch as backend_module
+
+    calls = []
+
+    def execute_q6(con, *, device, use_compressed_masks=False):
+        calls.append((device, use_compressed_masks))
+        return [{"revenue": 1.0}]
+
+    monkeypatch.setitem(backend_module._EXECUTOR_BY_QUERY, 6, "q06")
+    monkeypatch.setattr("tpch_torch.queries.q06.execute_q6", execute_q6)
+    plan = TQPPlan(query_id=6, source_sql="select -- q6", frontend="sirius")
+
+    rows = PyTorchBackend().execute(duckdb.connect(), plan, device="cpu", use_compressed_masks=True)
+
+    assert rows == [{"revenue": 1.0}]
+    assert calls == [("cpu", True)]

@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="TQP frontend used before PyTorch execution",
     )
     parser.add_argument("--json", action="store_true", help="Print result rows as JSON")
+    parser.add_argument(
+        "--compressed-masks",
+        action="store_true",
+        help="Use explicit compressed mask execution where implemented, currently TPC-H Q6",
+    )
     return parser
 
 
@@ -38,6 +43,7 @@ def main() -> None:
             sql,
             device=args.device,
             frontend=args.frontend,
+            use_compressed_masks=args.compressed_masks,
         )
     finally:
         con.close()
