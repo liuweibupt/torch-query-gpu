@@ -171,3 +171,24 @@ def test_index_helpers_reject_unsorted_or_out_of_bounds_inputs():
         complement_index(torch.tensor([3]), row_count=3)
     with pytest.raises(ValueError, match="row_count"):
         rle_to_plain(RLERanges(starts=torch.tensor([0]), ends=torch.tensor([2])), row_count=2)
+
+
+def test_mask_column_dispatch_matches_plain_boolean_logic():
+    from tpch_torch.compressed import IndexMask, RLEMask, mask_and, mask_not, mask_or, mask_to_plain
+
+    left = RLEMask(plain_to_rle(torch.tensor([False, True, True, False, True])), row_count=5)
+    right = IndexMask(torch.tensor([2, 3, 4], dtype=torch.int64), row_count=5)
+
+    assert mask_to_plain(mask_and(left, right)).tolist() == [False, False, True, False, True]
+    assert mask_to_plain(mask_or(left, right)).tolist() == [False, True, True, True, True]
+    assert mask_to_plain(mask_not(right)).tolist() == [True, True, False, False, False]
+
+
+def test_mask_column_dispatch_rejects_incompatible_masks():
+    from tpch_torch.compressed import IndexMask, PlainMask, mask_and
+
+    left = PlainMask(torch.tensor([True, False]))
+    right = IndexMask(torch.tensor([0], dtype=torch.int64), row_count=3)
+
+    with pytest.raises(ValueError, match="row_count"):
+        mask_and(left, right)

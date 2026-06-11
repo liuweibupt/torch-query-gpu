@@ -57,6 +57,65 @@ class RLERanges:
 
 
 
+
+@dataclass(frozen=True)
+class PlainMask:
+    """Plain boolean mask column."""
+
+    values: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.values.dtype is not torch.bool:
+            raise TypeError("PlainMask values must be boolean")
+        if self.values.ndim != 1:
+            raise ValueError("PlainMask values must be 1-D")
+
+    @property
+    def row_count(self) -> int:
+        return int(self.values.numel())
+
+    @property
+    def device(self) -> torch.device:
+        return self.values.device
+
+
+@dataclass(frozen=True)
+class RLEMask:
+    """RLE encoded boolean mask column."""
+
+    ranges: RLERanges
+    row_count: int
+
+    def __post_init__(self) -> None:
+        _validate_row_count(self.row_count)
+        if self.ranges.ends.numel() and bool(torch.any(self.ranges.ends >= self.row_count).cpu().item()):
+            raise ValueError("RLEMask ranges cannot extend past row_count")
+
+    @property
+    def device(self) -> torch.device:
+        return self.ranges.device
+
+
+@dataclass(frozen=True)
+class IndexMask:
+    """Index encoded boolean mask column with sorted selected positions."""
+
+    positions: torch.Tensor
+    row_count: int
+
+    def __post_init__(self) -> None:
+        _validate_row_count(self.row_count)
+        _validate_index_positions(self.positions, name="mask")
+        if self.positions.numel() and bool(torch.any(self.positions >= self.row_count).cpu().item()):
+            raise ValueError("IndexMask positions cannot extend past row_count")
+
+    @property
+    def device(self) -> torch.device:
+        return self.positions.device
+
+
+MaskColumn = PlainMask | RLEMask | IndexMask
+
 def plain_to_rle(mask: torch.Tensor) -> RLERanges:
     """Encode a 1-D boolean mask as inclusive RLE ranges of true values."""
 
@@ -253,6 +312,110 @@ def complement_index(positions: torch.Tensor, row_count: int) -> RLERanges:
     return plain_to_rle(torch.logical_not(selected))
 
 
+
+
+def mask_to_plain(mask: MaskColumn) -> torch.Tensor:
+    """Materialize any encoded mask as a plain boolean tensor."""
+
+    if isinstance(mask, PlainMask):
+        return mask.values.clone()
+    if isinstance(mask, RLEMask):
+        return rle_to_plain(mask.ranges, mask.row_count)
+    if isinstance(mask, IndexMask):
+        values = torch.zeros(mask.row_count, dtype=torch.bool, device=mask.device)
+        if mask.positions.numel():
+            values[mask.positions] = True
+        return values
+    raise TypeError(f"unsupported mask type: {type(mask).__name__}")
+
+
+def mask_to_index(mask: MaskColumn) -> torch.Tensor:
+    """Materialize any encoded mask as sorted selected row positions."""
+
+    if isinstance(mask, PlainMask):
+        return torch.nonzero(mask.values).flatten().to(dtype=torch.int64)
+    if isinstance(mask, RLEMask):
+        return rle_to_index(mask.ranges)
+    if isinstance(mask, IndexMask):
+        return mask.positions.clone()
+    raise TypeError(f"unsupported mask type: {type(mask).__name__}")
+
+
+def mask_and(left: MaskColumn, right: MaskColumn) -> MaskColumn:
+    """Return encoded logical AND for two compatible masks."""
+
+    _validate_compatible_masks(left, right)
+    if isinstance(left, PlainMask) and isinstance(right, PlainMask):
+        return PlainMask(torch.logical_and(left.values, right.values))
+    if isinstance(left, RLEMask) and isinstance(right, RLEMask):
+        return RLEMask(range_intersect(left.ranges, right.ranges), left.row_count)
+    if isinstance(left, IndexMask) and isinstance(right, IndexMask):
+        return IndexMask(idx_in_idx(left.positions, right.positions), left.row_count)
+    return _mask_and_mixed(left, right)
+
+
+def mask_or(left: MaskColumn, right: MaskColumn) -> MaskColumn:
+    """Return encoded logical OR for two compatible masks."""
+
+    _validate_compatible_masks(left, right)
+    if isinstance(left, PlainMask) and isinstance(right, PlainMask):
+        return PlainMask(torch.logical_or(left.values, right.values))
+    if isinstance(left, RLEMask) and isinstance(right, RLEMask):
+        return RLEMask(range_union(left.ranges, right.ranges), left.row_count)
+    if isinstance(left, IndexMask) and isinstance(right, IndexMask):
+        return IndexMask(merge_sorted_idx(left.positions, right.positions), left.row_count)
+    return _mask_or_mixed(left, right)
+
+
+def mask_not(mask: MaskColumn) -> MaskColumn:
+    """Return encoded logical NOT for a mask."""
+
+    if isinstance(mask, PlainMask):
+        return PlainMask(torch.logical_not(mask.values))
+    if isinstance(mask, RLEMask):
+        return RLEMask(complement_rle(mask.ranges, mask.row_count), mask.row_count)
+    if isinstance(mask, IndexMask):
+        return RLEMask(complement_index(mask.positions, mask.row_count), mask.row_count)
+    raise TypeError(f"unsupported mask type: {type(mask).__name__}")
+
+
+def _mask_and_mixed(left: MaskColumn, right: MaskColumn) -> MaskColumn:
+    if isinstance(left, IndexMask) and isinstance(right, RLEMask):
+        return IndexMask(idx_in_rle(left.positions, right.ranges), left.row_count)
+    if isinstance(left, RLEMask) and isinstance(right, IndexMask):
+        return IndexMask(idx_in_rle(right.positions, left.ranges), left.row_count)
+    if isinstance(left, PlainMask) and isinstance(right, IndexMask):
+        return IndexMask(right.positions[left.values[right.positions]], left.row_count)
+    if isinstance(left, IndexMask) and isinstance(right, PlainMask):
+        return IndexMask(left.positions[right.values[left.positions]], left.row_count)
+    if isinstance(left, PlainMask) and isinstance(right, RLEMask):
+        return IndexMask(idx_in_rle(mask_to_index(left), right.ranges), left.row_count)
+    if isinstance(left, RLEMask) and isinstance(right, PlainMask):
+        return IndexMask(idx_in_rle(mask_to_index(right), left.ranges), left.row_count)
+    raise TypeError(f"unsupported mask types: {type(left).__name__}, {type(right).__name__}")
+
+
+def _mask_or_mixed(left: MaskColumn, right: MaskColumn) -> MaskColumn:
+    if isinstance(left, PlainMask):
+        values = left.values.clone()
+        values[mask_to_index(right)] = True
+        return PlainMask(values)
+    if isinstance(right, PlainMask):
+        values = right.values.clone()
+        values[mask_to_index(left)] = True
+        return PlainMask(values)
+    if isinstance(left, RLEMask) and isinstance(right, IndexMask):
+        return IndexMask(merge_sorted_idx(rle_to_index(left.ranges), right.positions), left.row_count)
+    if isinstance(left, IndexMask) and isinstance(right, RLEMask):
+        return IndexMask(merge_sorted_idx(left.positions, rle_to_index(right.ranges)), left.row_count)
+    raise TypeError(f"unsupported mask types: {type(left).__name__}, {type(right).__name__}")
+
+
+def _validate_compatible_masks(left: MaskColumn, right: MaskColumn) -> None:
+    if left.row_count != right.row_count:
+        raise ValueError("mask row_count must match")
+    if left.device != right.device:
+        raise ValueError("masks must be on the same device")
 
 def _validate_range_tensor(name: str, tensor: torch.Tensor) -> None:
     if tensor.ndim != 1:
