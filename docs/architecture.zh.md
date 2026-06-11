@@ -1,6 +1,6 @@
 # 当前架构：DuckDB/Sirius-like 前端 → TQP IR → PyTorch/CUDA 后端
 
-本文档描述当前仓库的真实执行链路。项目目标不是把 DuckDB 当执行引擎，也不是在失败时偷偷回退到 DuckDB；当前默认路径是：DuckDB 负责 SQL 解析/绑定/计划准入，TQP IR 作为前后端边界，PyTorch 负责 CPU/CUDA 上的算子执行。
+本文档描述当前仓库的真实执行链路。项目目标不是把 DuckDB 当执行引擎，也不是在失败时偷偷回退到 DuckDB；当前默认路径是：DuckDB 负责 SQL 解析/绑定/计划准入并输出 JSON physical plan，Sirius-like 前端 lowering 成 `TQPOperatorGraph`，TQP IR 作为前后端边界，PyTorch graph executor 负责 CPU/CUDA 上的算子执行。
 
 ## 1. 一图看懂端到端链路
 
@@ -10,12 +10,16 @@ flowchart LR
     Load --> Frontend{"frontend"}
     Frontend -->|默认 sirius| Sirius["DuckDB Parser/Binder/Planner<br/>EXPLAIN logical / optimized / physical"]
     Frontend -->|显式 substrait| Substrait["DuckDB get_substrait_json<br/>严格原生 Substrait 导出"]
-    Sirius --> IR["TQPPlan IR<br/>不可变前后端边界"]
-    Substrait --> IR
+    Sirius --> Graph["DuckDB JSON physical plan<br/>→ TQPOperatorGraph"]
+    Substrait --> IR["TQPPlan IR"]
+    Graph --> IR["TQPPlan IR<br/>operator_graph boundary"]
     IR --> Backend["PyTorchBackend.execute"]
-    Backend -->|query_id=1..22| TPC["TPC-H tensor executors<br/>q01.py ... q22.py"]
-    Backend -->|query_id=None| Generic["generic SQL subset executor"]
-    TPC --> Torch["PyTorch Tensor Ops<br/>CPU / CUDA"]
+    Backend --> GraphExec["PyTorchGraphExecutor"]
+    GraphExec -->|Q1/Q6| Primitives["Scan / Filter / Aggregate / Sort primitives"]
+    GraphExec -->|Q2-Q22 complex| Compat["explicit compatibility subgraph executor"]
+    GraphExec -->|generic SQL| Generic["generic SQL subset executor"]
+    Primitives --> Torch["PyTorch Tensor Ops<br/>CPU / CUDA"]
+    Compat --> Torch
     Generic --> Torch
     Torch --> Rows["Result rows"]
     Rows -. validate only .-> DuckDB["DuckDB baseline<br/>仅用于正确性对照"]
@@ -26,7 +30,7 @@ flowchart LR
 - **默认前端是 `sirius`**：使用 DuckDB 的 parser/binder/planner/optimizer 做 SQL 准入，并读取 `EXPLAIN` 计划元数据。
 - **Substrait 不是默认路径**：`--frontend substrait` 是严格实验路径，只使用 DuckDB 原生 `get_substrait_json(original_sql)`；导不出就显式失败。
 - **DuckDB 不做执行回退**：validation 会用 DuckDB 结果做比较，但 PyTorch 输出来自 PyTorch 后端，不来自 DuckDB rows。
-- **前端准入 ≠ 后端全支持**：DuckDB 能解析/计划的 SQL 可以被前端接收；后端当前只执行 TPC-H Q1-Q22 模板和有限 generic SQL subset。
+- **前端准入 ≠ 后端全支持**：DuckDB 能解析/计划的 SQL 可以被前端接收；TPC-H Q1-Q22 都会生成 `operator_graph`。Q1/Q6 已由真实 graph primitives 执行，复杂 Q2-Q22 子图仍由显式兼容执行器承载。
 
 ## 2. 模块分层
 
@@ -37,9 +41,9 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译为 `TQPPlan`。 |
 | Planner bridge | `tpch_torch/planner.py`, `tpch_torch/substrait.py` | 对接 DuckDB `EXPLAIN` 和 `get_substrait_json()`。 |
 | IR | `tpch_torch/ir/plan.py` | 保存不可变的前后端边界对象。 |
-| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/generic.py` | 分发到 TPC-H 模板或 generic SQL subset，并执行 PyTorch tensor 算子。 |
+| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py` | 通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q1/Q6 已是真实 primitive graph，复杂 TPC-H 子图仍有兼容 executor。 |
 | Tensor storage | `tpch_torch/storage.py`, `tpch_torch/duckdb_bridge.py` | 从 DuckDB columnar fetch 到 tensor table，处理字典编码等。 |
-| TPC-H kernels | `tpch_torch/queries/q01.py` ... `q22.py` | 正确性优先的 TPC-H PyTorch 实现。 |
+| TPC-H kernels | `tpch_torch/queries/q02.py` ... `q22.py` | 复杂 TPC-H 兼容 executor 仍复用旧查询实现；Q1/Q6 已迁入 `backend/graph.py` primitives。 |
 | Reusable operators | `tpch_torch/operators.py`, `tpch_torch/relational.py` | 分组聚合、lookup index、比较、结果对齐等可复用算子。 |
 | Compression experiments | `tpch_torch/compressed.py`, `tpch_torch/queries/q06.py` | RLE/Index/Plain mask 原型，当前 Q6 可用 `--compressed-masks` 显式开启。 |
 | Benchmark | `tpch_torch/benchmark.py` | 冷/热端到端计时，统计 min/median/mean/p95/max/std。 |
@@ -94,7 +98,7 @@ def validate_sql_with_frontend(...):
 
 ## 4. TQPPlan：当前前后端边界
 
-当前 IR 仍然紧凑，目标是先保证端到端链路干净，再逐步演进为更完整的显式 operator graph。
+当前 IR 已包含第一版显式 `operator_graph`。目标是继续把复杂 join/subquery/CTE 兼容执行器拆成通用算子节点。
 
 ```python
 FrontendName = Literal["sirius", "substrait"]
@@ -199,20 +203,20 @@ class PyTorchBackend:
         device: str = "cpu",
         use_compressed_masks: bool = False,
     ) -> list[dict[str, Any]]:
-        if plan.query_id is None:
-            if plan.generic_plan is None:
-                detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
-                raise UnsupportedPlanError(f"generic SQL is not executable by PyTorch backend: {detail}")
-            return execute_generic_sql_plan(con, plan.generic_plan, device=device)
-        if plan.query_id == 1:
-            q1_plan = _compile_q1_plan(plan.plan_json)
-            from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
-            return execute_q1(fetch_lineitem_tensor_table(con, device=device), q1_plan)
-        module_name = _EXECUTOR_BY_QUERY.get(plan.query_id)
-        ...
+        if plan.operator_graph is not None:
+            return PyTorchGraphExecutor().execute(
+                con, plan, device=device, use_compressed_masks=use_compressed_masks
+            )
+        if plan.query_id is not None:
+            raise UnsupportedPlanError(
+                f"TPC-H Q{plan.query_id} requires a frontend-lowered TQP operator graph"
+            )
+        return PyTorchGraphExecutor().execute(
+            con, plan, device=device, use_compressed_masks=use_compressed_masks
+        )
 ```
 
-TPC-H Q1-Q22 都有 PyTorch executor。Q6 额外支持 `--compressed-masks`，仅改变 PyTorch 端 mask 表达，不改变 SQL、前端、validation baseline 或存储格式。
+TPC-H Q1-Q22 都先 lowering 到 `TQPOperatorGraph`。Q1/Q6 已由 graph primitives 执行；Q2-Q22 的复杂 join/subquery/CTE 子图仍通过 graph executor 内显式兼容执行器运行。Q6 额外支持 `--compressed-masks`。
 
 ## 8. Q1 分层与实现
 
@@ -221,7 +225,8 @@ TPC-H Q1-Q22 都有 PyTorch executor。Q6 额外支持 `--compressed-masks`，�
 ```mermaid
 flowchart TD
     Q1SQL["TPC-H Q1 SQL"] --> Frontend["Sirius-like DuckDB frontend<br/>或 strict Substrait frontend"]
-    Frontend --> Plan["TQPPlan / Q1Plan"]
+    Frontend --> Graph["DuckDB JSON plan → TQPOperatorGraph"]
+    Graph --> Plan["TQPPlan.operator_graph / Q1Plan"]
     Plan --> Fetch["fetch_lineitem_tensor_table(con, device)"]
     Fetch --> Encoded["lineitem columnar tensors<br/>l_returnflag/l_linestatus 预编码"]
     Encoded --> Filter["l_shipdate <= cutoff"]
@@ -236,13 +241,13 @@ flowchart TD
 
 ### Q1 关键代码片段
 
-后端对 Q1 有专门分支，用真实 Substrait JSON 或 canonical Q1 plan 构造 `Q1Plan`：
+后端对 Q1 不再直接走 `q01.py` 模板，而是通过 `PyTorchGraphExecutor` 执行 graph primitive：
 
 ```python
-if plan.query_id == 1:
-    q1_plan = _compile_q1_plan(plan.plan_json)
-    from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
-    return execute_q1(fetch_lineitem_tensor_table(con, device=device), q1_plan)
+if plan.operator_graph is not None:
+    return PyTorchGraphExecutor().execute(
+        con, plan, device=device, use_compressed_masks=use_compressed_masks
+    )
 ```
 
 `fetch_lineitem_tensor_table()` 用 DuckDB columnar fetch，并把低基数字符串列预编码成 int id：
@@ -321,7 +326,7 @@ CUDA 计时在每个样本前后调用 `torch.cuda.synchronize()`，报告 wall-
 
 ## 11. 架构演进方向
 
-下一步希望把 `TQPPlan` 从紧凑边界对象逐步扩展为显式 operator graph：
+`TQPPlan` 已经包含第一版显式 graph。下一步是把兼容复杂子图逐步替换为通用算子：
 
 ```text
 Scan -> Filter -> Join -> Aggregate -> Sort -> Limit
