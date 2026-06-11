@@ -11,10 +11,18 @@ import duckdb
 import numpy as np
 import torch
 
+from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.generic_sql import GenericFilter, GenericOrderBy, GenericProjection, GenericSQLPlan
+from tpch_torch.operators import (
+    composite_group_ids,
+    grouped_count,
+    grouped_max,
+    grouped_mean,
+    grouped_min,
+    grouped_sum,
+)
 from tpch_torch.relational import decode
 from tpch_torch.storage import TensorTable
-from tpch_torch.errors import UnsupportedPlanError
 
 
 def execute_generic_sql_plan(
@@ -219,16 +227,84 @@ def _execute_ungrouped(table: TensorTable, plan: GenericSQLPlan, mask: torch.Ten
 
 
 def _execute_grouped(table: TensorTable, plan: GenericSQLPlan, mask: torch.Tensor) -> list[dict[str, Any]]:
-    groups: dict[tuple[Any, ...], list[int]] = {}
-    indices = mask.nonzero().flatten().cpu().tolist()
-    for raw_index in indices:
-        index = int(raw_index)
-        key = tuple(_decode_cell(table, column, index) for column in plan.group_by)
-        groups.setdefault(key, []).append(index)
-    rows = []
-    for key, group_indices in groups.items():
-        rows.append(_grouped_row(table, plan.projections, plan.group_by, key, group_indices))
-    return rows
+    selected_indices = mask.nonzero().flatten()
+    if selected_indices.numel() == 0:
+        return []
+    key_columns = [table.columns[column][selected_indices].to(dtype=torch.int64) for column in plan.group_by]
+    group_ids, unique_keys = composite_group_ids(key_columns)
+    aggregate_columns = _grouped_aggregate_columns(table, plan.projections, selected_indices, group_ids, unique_keys)
+    return [
+        _tensorized_grouped_row(table, plan.projections, plan.group_by, unique_keys, aggregate_columns, group_index)
+        for group_index in range(int(unique_keys.shape[0]))
+    ]
+
+
+
+def _grouped_aggregate_columns(
+    table: TensorTable,
+    projections: tuple[GenericProjection, ...],
+    selected_indices: torch.Tensor,
+    group_ids: torch.Tensor,
+    unique_keys: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    group_count = int(unique_keys.shape[0])
+    aggregates: dict[str, torch.Tensor] = {}
+    for projection in projections:
+        if projection.kind == "column":
+            continue
+        aggregates[projection.alias] = _evaluate_group_aggregate_tensor(
+            table, projection, selected_indices, group_ids, group_count
+        )
+    return aggregates
+
+
+def _evaluate_group_aggregate_tensor(
+    table: TensorTable,
+    projection: GenericProjection,
+    selected_indices: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+) -> torch.Tensor:
+    if projection.kind == "count_star":
+        return grouped_count(group_ids, group_count)
+    if projection.kind == "count" and projection.column is not None:
+        return grouped_count(group_ids, group_count)
+    if projection.kind == "sum" and projection.column is not None:
+        values = table.columns[projection.column][selected_indices]
+        return grouped_sum(values, group_ids, group_count)
+    if projection.kind == "min" and projection.column is not None:
+        values = table.columns[projection.column][selected_indices]
+        return grouped_min(values, group_ids, group_count)
+    if projection.kind == "max" and projection.column is not None:
+        values = table.columns[projection.column][selected_indices]
+        return grouped_max(values, group_ids, group_count)
+    if projection.kind == "avg" and projection.column is not None:
+        values = table.columns[projection.column][selected_indices]
+        return grouped_mean(values, group_ids, group_count)
+    raise UnsupportedPlanError(f"generic SQL grouped projection is not supported: {projection.kind}")
+
+
+def _tensorized_grouped_row(
+    table: TensorTable,
+    projections: tuple[GenericProjection, ...],
+    group_by: tuple[str, ...],
+    unique_keys: torch.Tensor,
+    aggregate_columns: dict[str, torch.Tensor],
+    group_index: int,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {}
+    group_positions = {column: index for index, column in enumerate(group_by)}
+    for projection in projections:
+        if projection.kind == "column" and projection.column in group_positions:
+            key_index = group_positions[projection.column]
+            value = unique_keys[group_index, key_index].cpu().item()
+            row[projection.alias] = _decode_encoded_value(table, projection.column, value)
+            continue
+        if projection.alias in aggregate_columns:
+            row[projection.alias] = _normalize_tensor_scalar(aggregate_columns[projection.alias][group_index])
+            continue
+        raise UnsupportedPlanError(f"generic SQL grouped projection is not supported: {projection.kind}")
+    return row
 
 
 def _projection_row(table: TensorTable, projections: tuple[GenericProjection, ...], index: int) -> dict[str, Any]:
@@ -242,23 +318,6 @@ def _aggregate_row(
 ) -> dict[str, Any]:
     return {projection.alias: _evaluate_aggregate(table, projection, mask) for projection in projections}
 
-
-def _grouped_row(
-    table: TensorTable,
-    projections: tuple[GenericProjection, ...],
-    group_by: tuple[str, ...],
-    key: tuple[Any, ...],
-    indices: list[int],
-) -> dict[str, Any]:
-    row: dict[str, Any] = {}
-    group_values = dict(zip(group_by, key))
-    index_tensor = torch.tensor(indices, dtype=torch.int64, device=next(iter(table.columns.values())).device)
-    for projection in projections:
-        if projection.kind == "column" and projection.column in group_values:
-            row[projection.alias] = group_values[projection.column]
-            continue
-        row[projection.alias] = _evaluate_group_aggregate(table, projection, index_tensor)
-    return row
 
 
 def _evaluate_projection(table: TensorTable, projection: GenericProjection, index: int) -> Any:
@@ -286,22 +345,6 @@ def _evaluate_aggregate(table: TensorTable, projection: GenericProjection, mask:
     raise UnsupportedPlanError(f"generic SQL aggregate is not supported: {projection.kind}")
 
 
-def _evaluate_group_aggregate(table: TensorTable, projection: GenericProjection, indices: torch.Tensor) -> Any:
-    if projection.kind == "count_star":
-        return int(indices.numel())
-    if projection.kind == "count" and projection.column is not None:
-        return int(indices.numel())
-    if projection.kind == "sum" and projection.column is not None:
-        return float(table.columns[projection.column][indices].sum().cpu().item())
-    if projection.kind == "min" and projection.column is not None:
-        return float(table.columns[projection.column][indices].min().cpu().item())
-    if projection.kind == "max" and projection.column is not None:
-        return float(table.columns[projection.column][indices].max().cpu().item())
-    if projection.kind == "avg" and projection.column is not None:
-        return float(table.columns[projection.column][indices].mean().cpu().item())
-    raise UnsupportedPlanError(f"generic SQL grouped projection is not supported: {projection.kind}")
-
-
 def _decode_cell(table: TensorTable, column: str, index: int) -> Any:
     value = table.columns[column][index].cpu().item()
     if column in table.dictionaries:
@@ -309,6 +352,22 @@ def _decode_cell(table: TensorTable, column: str, index: int) -> Any:
     if isinstance(value, float):
         return float(value)
     return int(value)
+
+
+
+def _decode_encoded_value(table: TensorTable, column: str, value: Any) -> Any:
+    if column in table.dictionaries:
+        return decode(table, column, int(value))
+    if isinstance(value, float):
+        return float(value)
+    return int(value)
+
+
+def _normalize_tensor_scalar(value: torch.Tensor) -> Any:
+    raw = value.cpu().item()
+    if isinstance(raw, float):
+        return float(raw)
+    return int(raw)
 
 
 def _is_scalar_aggregate(projections: tuple[GenericProjection, ...]) -> bool:

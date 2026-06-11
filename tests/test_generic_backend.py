@@ -114,3 +114,31 @@ def test_fetch_generic_tensor_table_uses_columnar_numpy_fetch():
     assert table.columns["a"].dtype == torch.int64
     assert table.columns["c"].tolist() == [0, 1, 0]
     assert table.dictionaries["c"] == ("x", "y")
+
+
+def test_generic_backend_tensorizes_grouped_aggregates_with_filter():
+    sql = (
+        "select a, sum(b) as total, count(*) as n, avg(b) as mean_b "
+        "from t where b >= 2 group by a order by a"
+    )
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [
+        {"a": 1, "total": 2.5, "n": 1, "mean_b": 2.5},
+        {"a": 2, "total": 3.0, "n": 1, "mean_b": 3.0},
+    ]
+
+
+def test_generic_grouped_aggregates_do_not_materialize_row_groups(monkeypatch):
+    import tpch_torch.backend.generic as generic
+
+    def fail_projection_row(*args, **kwargs):
+        raise AssertionError("row projection materialization path used")
+
+    monkeypatch.setattr(generic, "_projection_row", fail_projection_row)
+    sql = "select a, sum(b) as total from t group by a order by a"
+
+    rows = generic.execute_generic_sql_plan(_make_table(), parse_generic_sql(sql), device="cpu")
+
+    assert rows == [{"a": 1, "total": 4.0}, {"a": 2, "total": 3.0}]
