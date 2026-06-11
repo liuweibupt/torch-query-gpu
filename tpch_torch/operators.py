@@ -44,6 +44,50 @@ def grouped_count(group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
     return result
 
 
+
+
+def low_cardinality_group_ids(
+    key_columns: Sequence[torch.Tensor], cardinalities: Sequence[int]
+) -> tuple[torch.Tensor, int]:
+    """Encode dense low-cardinality key columns as composite group ids."""
+
+    if not key_columns:
+        raise ValueError("at least one key column is required")
+    if len(key_columns) != len(cardinalities):
+        raise ValueError("key_columns and cardinalities must have the same length")
+    first = key_columns[0]
+    _validate_low_cardinality_inputs(key_columns, cardinalities, first)
+    group_ids = torch.zeros(first.shape, dtype=torch.int64, device=first.device)
+    multiplier = 1
+    for key, cardinality in reversed(tuple(zip(key_columns, cardinalities))):
+        group_ids = group_ids + key.to(dtype=torch.int64) * multiplier
+        multiplier *= cardinality
+    return group_ids, multiplier
+
+
+def grouped_sum_bincount(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    """Sum values per dense group id using torch.bincount."""
+
+    _validate_grouped_reduction_inputs(values, group_ids, group_count)
+    return torch.bincount(group_ids.to(dtype=torch.int64), weights=values, minlength=group_count)[:group_count]
+
+
+def grouped_count_bincount(group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    """Count rows per dense group id using torch.bincount."""
+
+    if group_ids.ndim != 1:
+        raise ValueError("group_ids must be 1-D")
+    if group_ids.dtype not in _INTEGER_DTYPES:
+        raise TypeError("group_ids must use an integer dtype")
+    if not isinstance(group_count, int) or group_count < 0:
+        raise ValueError("group_count must be a non-negative integer")
+    if group_ids.numel() == 0:
+        return torch.zeros(group_count, dtype=torch.int64, device=group_ids.device)
+    if bool(torch.any(group_ids < 0).cpu().item()) or bool(torch.any(group_ids >= group_count).cpu().item()):
+        raise ValueError("group_ids contain values out of range")
+    return torch.bincount(group_ids.to(dtype=torch.int64), minlength=group_count)[:group_count]
+
+
 def logical_and_all(masks: Sequence[torch.Tensor]) -> torch.Tensor:
     """Return the element-wise conjunction of boolean masks."""
 
@@ -127,6 +171,30 @@ def topk_indices(values: torch.Tensor, k: int, descending: bool = True) -> torch
     if k == 0:
         return torch.empty(0, dtype=torch.int64, device=values.device)
     return torch.topk(values, k, largest=descending, sorted=True).indices.to(dtype=torch.int64)
+
+
+
+def _validate_low_cardinality_inputs(
+    key_columns: Sequence[torch.Tensor], cardinalities: Sequence[int], first: torch.Tensor
+) -> None:
+    if first.ndim != 1:
+        raise ValueError("key columns must be 1-D")
+    for key, cardinality in zip(key_columns, cardinalities):
+        if key.ndim != 1:
+            raise ValueError("key columns must be 1-D")
+        if key.shape != first.shape:
+            raise ValueError("key columns must have the same shape")
+        if key.device != first.device:
+            raise ValueError("key columns must be on the same device")
+        if key.dtype not in _INTEGER_DTYPES:
+            raise TypeError("key columns must use integer dtypes")
+        if not isinstance(cardinality, int) or cardinality <= 0:
+            raise ValueError("cardinalities must be positive integers")
+        if key.numel() == 0:
+            continue
+        out_of_range = torch.logical_or(key < 0, key >= cardinality)
+        if bool(torch.any(out_of_range).cpu().item()):
+            raise ValueError("key values contain values out of cardinality range")
 
 
 def _validate_masks(masks: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:

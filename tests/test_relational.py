@@ -27,3 +27,11 @@ def test_table_from_columnar_typed_encodes_numpy_without_python_iteration():
     assert table.columns["l_shipdate"].dtype == torch.int32
     assert table.columns["l_orderkey"].dtype == torch.int64
     assert table.columns["l_extendedprice"].dtype == torch.float64
+
+
+def test_lookup_index_reuses_sorted_dimension_keys():
+    from tpch_torch.relational import build_lookup_index, lookup_values_from_index
+
+    index = build_lookup_index(torch.tensor([30, 10, 20]), torch.tensor([3, 1, 2]))
+
+    assert lookup_values_from_index(index, torch.tensor([20, 40, 10])).tolist() == [2, -1, 1]

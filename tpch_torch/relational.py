@@ -12,7 +12,14 @@ import duckdb
 import numpy as np
 import torch
 
-from tpch_torch.operators import composite_group_ids, grouped_count, grouped_sum
+from tpch_torch.operators import (
+    composite_group_ids,
+    grouped_count,
+    grouped_count_bincount,
+    grouped_sum,
+    grouped_sum_bincount,
+    low_cardinality_group_ids,
+)
 from tpch_torch.storage import DATE_COLUMNS, STRING_COLUMNS, TensorTable
 
 INT_COLUMNS = frozenset(
@@ -71,6 +78,28 @@ STRING_COLUMNS_EXTENDED = STRING_COLUMNS | frozenset(
 )
 
 DATE_COLUMNS_EXTENDED = DATE_COLUMNS | frozenset({"o_orderdate"})
+
+
+
+
+@dataclass(frozen=True)
+class LookupIndex:
+    """Sorted dimension-key index for repeated lookup probes."""
+
+    sorted_keys: torch.Tensor
+    sorted_values: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.sorted_keys.ndim != 1 or self.sorted_values.ndim != 1:
+            raise ValueError("lookup index tensors must be 1-D")
+        if self.sorted_keys.shape != self.sorted_values.shape:
+            raise ValueError("lookup index keys and values must have the same shape")
+        if self.sorted_keys.device != self.sorted_values.device:
+            raise ValueError("lookup index keys and values must be on the same device")
+        if self.sorted_keys.numel() <= 1:
+            return
+        if bool(torch.any(self.sorted_keys[1:] < self.sorted_keys[:-1]).cpu().item()):
+            raise ValueError("lookup index keys must be sorted")
 
 
 @dataclass(frozen=True)
@@ -162,6 +191,35 @@ def _encode_typed_sequence(
     return torch.tensor(normalized, dtype=torch.float64, device=device), None
 
 
+def build_lookup_index(dimension_keys: torch.Tensor, dimension_values: torch.Tensor) -> LookupIndex:
+    """Build a reusable sorted-key index for dimension lookups."""
+
+    if dimension_keys.ndim != 1 or dimension_values.ndim != 1:
+        raise ValueError("lookup inputs must be 1-D")
+    if dimension_keys.shape != dimension_values.shape:
+        raise ValueError("lookup keys and values must have the same shape")
+    if dimension_keys.device != dimension_values.device:
+        raise ValueError("lookup keys and values must be on the same device")
+    sorted_keys, order = torch.sort(dimension_keys.to(dtype=torch.int64))
+    return LookupIndex(sorted_keys=sorted_keys, sorted_values=dimension_values[order])
+
+
+def lookup_values_from_index(
+    index: LookupIndex, fact_keys: torch.Tensor, missing_value: int | float = -1
+) -> torch.Tensor:
+    """Map fact keys through a pre-sorted lookup index."""
+
+    if fact_keys.device != index.sorted_keys.device:
+        raise ValueError("fact keys and lookup index must be on the same device")
+    positions = torch.searchsorted(index.sorted_keys, fact_keys.to(dtype=torch.int64))
+    in_bounds = positions < index.sorted_keys.numel()
+    safe_positions = torch.clamp(positions, max=max(int(index.sorted_keys.numel()) - 1, 0))
+    matched = in_bounds & (index.sorted_keys[safe_positions] == fact_keys.to(dtype=torch.int64))
+    result = torch.full(fact_keys.shape, missing_value, dtype=index.sorted_values.dtype, device=fact_keys.device)
+    result[matched] = index.sorted_values[safe_positions[matched]]
+    return result
+
+
 def lookup_values(
     dimension_keys: torch.Tensor,
     dimension_values: torch.Tensor,
@@ -170,15 +228,11 @@ def lookup_values(
 ) -> torch.Tensor:
     """Map fact keys to dimension values with an explicit missing sentinel."""
 
-    sorted_keys, order = torch.sort(dimension_keys.to(dtype=torch.int64))
-    sorted_values = dimension_values[order]
-    positions = torch.searchsorted(sorted_keys, fact_keys.to(dtype=torch.int64))
-    in_bounds = positions < sorted_keys.numel()
-    safe_positions = torch.clamp(positions, max=max(int(sorted_keys.numel()) - 1, 0))
-    matched = in_bounds & (sorted_keys[safe_positions] == fact_keys.to(dtype=torch.int64))
-    result = torch.full(fact_keys.shape, missing_value, dtype=dimension_values.dtype, device=fact_keys.device)
-    result[matched] = sorted_values[safe_positions[matched]]
-    return result
+    return lookup_values_from_index(
+        build_lookup_index(dimension_keys, dimension_values),
+        fact_keys,
+        missing_value=missing_value,
+    )
 
 
 def lookup_row_indices(
@@ -257,6 +311,21 @@ def aggregate_sum_by_keys(
 def aggregate_count_by_keys(key_columns: Sequence[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     group_ids, unique_keys = composite_group_ids([key.to(dtype=torch.int64) for key in key_columns])
     return unique_keys, grouped_count(group_ids, int(unique_keys.shape[0]))
+
+
+
+def aggregate_sum_by_low_cardinality_keys(
+    key_columns: Sequence[torch.Tensor], cardinalities: Sequence[int], value: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    group_ids, group_count = low_cardinality_group_ids(key_columns, cardinalities)
+    return group_ids, grouped_sum_bincount(value, group_ids, group_count)
+
+
+def aggregate_count_by_low_cardinality_keys(
+    key_columns: Sequence[torch.Tensor], cardinalities: Sequence[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    group_ids, group_count = low_cardinality_group_ids(key_columns, cardinalities)
+    return group_ids, grouped_count_bincount(group_ids, group_count)
 
 
 def run_duckdb_sql(con: duckdb.DuckDBPyConnection, sql: str) -> list[dict[str, Any]]:

@@ -98,3 +98,25 @@ def test_topk_indices_rejects_invalid_k_and_non_vector_values():
         topk_indices(torch.tensor([1.0]), 2)
     with pytest.raises(ValueError, match="1-D"):
         topk_indices(torch.tensor([[1.0]]), 1)
+
+
+def test_low_cardinality_group_ids_encode_dense_composite_keys():
+    from tpch_torch.operators import low_cardinality_group_ids
+
+    group_ids, group_count = low_cardinality_group_ids(
+        (torch.tensor([0, 0, 1, 1]), torch.tensor([1, 2, 1, 2])),
+        (2, 3),
+    )
+
+    assert group_count == 6
+    assert group_ids.tolist() == [1, 2, 4, 5]
+
+
+def test_grouped_sum_and_count_bincount_reduce_dense_ids():
+    from tpch_torch.operators import grouped_count_bincount, grouped_sum_bincount
+
+    group_ids = torch.tensor([1, 1, 2, 5])
+    values = torch.tensor([1.5, 2.5, 10.0, 3.0])
+
+    assert grouped_sum_bincount(values, group_ids, 6).tolist() == [0.0, 4.0, 10.0, 0.0, 0.0, 3.0]
+    assert grouped_count_bincount(group_ids, 6).tolist() == [0, 2, 1, 0, 0, 1]
