@@ -67,9 +67,26 @@ class PyTorchGraphExecutor:
             return _execute_q1_graph(con, plan, device)
         if plan.query_id == 6:
             return _execute_q6_graph(con, device, use_compressed_masks)
-        raise UnsupportedPlanError(
-            f"TQP graph for TPC-H Q{plan.query_id} has no executable root: {root.kind}"
-        )
+        return _execute_complex_tpch_graph(con, plan, graph, device, use_compressed_masks)
+
+
+def _execute_complex_tpch_graph(
+    con: duckdb.DuckDBPyConnection,
+    plan: TQPPlan,
+    graph: TQPOperatorGraph,
+    device: str,
+    use_compressed_masks: bool,
+) -> list[dict[str, Any]]:
+    if plan.query_id is None:
+        raise UnsupportedPlanError("complex TPC-H graph execution requires query_id")
+    node = TQPOperatorNode(
+        node_id=graph.root_id,
+        kind=OperatorKind.COMPILED_TPCH,
+        name="COMPLEX_TPCH_COMPAT",
+        children=(graph.root_id,),
+        metadata={"query_id": plan.query_id, "lowered_root": graph.root.name},
+    )
+    return _execute_compiled_tpch_node(con, plan, node, device, use_compressed_masks)
 
 
 def _execute_q1_graph(

@@ -59,18 +59,6 @@ def lower_duckdb_json_to_operator_graph(
     if len(plan_json) != 1:
         raise DuckDBPlannerError(f"expected one DuckDB root plan, got {len(plan_json)}")
     root_id = lower_node(plan_json[0], (0,))
-    if query_id is not None and query_id not in {1, 6}:
-        compiled_root_id = "compiled_tpch"
-        nodes.append(
-            TQPOperatorNode(
-                node_id=compiled_root_id,
-                kind=OperatorKind.COMPILED_TPCH,
-                name="COMPILED_TPCH",
-                children=(root_id,),
-                metadata={"query_id": query_id},
-            )
-        )
-        root_id = compiled_root_id
     return TQPOperatorGraph(
         source_sql=source_sql,
         query_id=query_id,

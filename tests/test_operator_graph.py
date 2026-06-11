@@ -95,3 +95,26 @@ def test_q1_and_q6_lower_to_real_operator_graph_roots(tmp_path) -> None:
             assert OperatorKind.AGGREGATE in kinds
     finally:
         con.close()
+
+
+def test_all_tpch_queries_have_real_lowered_duckdb_graph_roots(tmp_path) -> None:
+    db = tmp_path / "tpch-real-roots.duckdb"
+    con = connect_database(db)
+    try:
+        con.execute("INSTALL tpch")
+        con.execute("LOAD tpch")
+        con.execute("CALL dbgen(sf=0.01)")
+        compiled_roots = []
+        missing_scan = []
+        for query_id in range(1, 23):
+            plan = compile_sirius_plan(con, get_tpch_query(con, query_id))
+            assert plan.operator_graph is not None
+            if plan.operator_graph.root.kind == OperatorKind.COMPILED_TPCH:
+                compiled_roots.append(query_id)
+            if not any(node.kind == OperatorKind.SCAN for node in plan.operator_graph.nodes):
+                missing_scan.append(query_id)
+    finally:
+        con.close()
+
+    assert compiled_roots == []
+    assert missing_scan == []
