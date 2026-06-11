@@ -6,6 +6,7 @@ from tpch_torch.ir import TQPPlan
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
 from tpch_torch.sql import TPC_H_Q1_SQL
 from tpch_torch.errors import UnsupportedPlanError
+from tpch_torch.frontend import compile_sirius_plan
 from tpch_torch.backend import PyTorchBackend
 
 
@@ -29,7 +30,7 @@ def _compiled_tpch_graph(query_id: int, sql: str) -> TQPOperatorGraph:
 def test_pytorch_backend_executes_q1_tqp_plan():
     con = duckdb.connect()
     create_lineitem_fixture(con, FIXTURE_ROWS)
-    plan = TQPPlan(query_id=1, source_sql=TPC_H_Q1_SQL, frontend="sirius", operator_graph=_compiled_tpch_graph(1, TPC_H_Q1_SQL))
+    plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
 
     rows = PyTorchBackend().execute(con, plan, device="cpu")
 
@@ -117,3 +118,19 @@ def test_pytorch_backend_executes_tpch_through_operator_graph(monkeypatch):
 
     assert rows == [{"ok": True}]
     assert calls == [(3, "cpu", True)]
+
+
+def test_q1_graph_execution_does_not_call_template(monkeypatch):
+    from tpch_torch.frontend import compile_sirius_plan
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
+    monkeypatch.setattr(
+        "tpch_torch.queries.q01.execute_q1",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("q01 template called")),
+    )
+
+    rows = PyTorchBackend().execute(con, plan, device="cpu")
+
+    assert [row["l_returnflag"] for row in rows] == ["A", "N"]

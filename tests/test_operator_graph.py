@@ -77,3 +77,21 @@ def test_sirius_frontend_lowers_all_tpch_queries_to_operator_graph(tmp_path) -> 
         con.close()
 
     assert missing == []
+
+
+def test_q1_and_q6_lower_to_real_operator_graph_roots(tmp_path) -> None:
+    db = tmp_path / "tpch-q1-q6.duckdb"
+    con = connect_database(db)
+    try:
+        con.execute("INSTALL tpch")
+        con.execute("LOAD tpch")
+        con.execute("CALL dbgen(sf=0.01)")
+        for query_id in (1, 6):
+            plan = compile_sirius_plan(con, get_tpch_query(con, query_id))
+            assert plan.operator_graph is not None
+            assert plan.operator_graph.root.kind != OperatorKind.COMPILED_TPCH
+            kinds = {node.kind for node in plan.operator_graph.nodes}
+            assert OperatorKind.SCAN in kinds
+            assert OperatorKind.AGGREGATE in kinds
+    finally:
+        con.close()

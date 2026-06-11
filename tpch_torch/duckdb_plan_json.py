@@ -59,7 +59,7 @@ def lower_duckdb_json_to_operator_graph(
     if len(plan_json) != 1:
         raise DuckDBPlannerError(f"expected one DuckDB root plan, got {len(plan_json)}")
     root_id = lower_node(plan_json[0], (0,))
-    if query_id is not None:
+    if query_id is not None and query_id not in {1, 6}:
         compiled_root_id = "compiled_tpch"
         nodes.append(
             TQPOperatorNode(
@@ -95,7 +95,7 @@ def _operator_kind(name: str) -> OperatorKind:
         return OperatorKind.FILTER
     if "PROJECTION" in normalized:
         return OperatorKind.PROJECT
-    if "GROUP_BY" in normalized or normalized == "UNGROUPED_AGGREGATE":
+    if "GROUP_BY" in normalized or normalized in {"AGGREGATE", "UNGROUPED_AGGREGATE"}:
         return OperatorKind.AGGREGATE
     if "JOIN" in normalized or normalized == "NESTED_LOOP_JOIN":
         return OperatorKind.JOIN
