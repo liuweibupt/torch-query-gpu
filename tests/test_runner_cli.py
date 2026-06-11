@@ -175,3 +175,38 @@ def test_run_and_validate_parsers_accept_compressed_masks(tmp_path):
 
     assert run_args.compressed_masks is True
     assert validate_args.compressed_masks is True
+
+from scripts.benchmark_query import build_parser as benchmark_parser
+
+
+def test_benchmark_parser_accepts_cold_hot_timing_options(tmp_path):
+    db_path = tmp_path / "tpch.duckdb"
+
+    args = benchmark_parser().parse_args(
+        [
+            "--db",
+            str(db_path),
+            "--query",
+            "6",
+            "--device",
+            "cuda",
+            "--frontend",
+            "sirius",
+            "--cold-runs",
+            "2",
+            "--warmup-runs",
+            "3",
+            "--hot-runs",
+            "5",
+            "--compressed-masks",
+            "--json",
+        ]
+    )
+
+    assert args.db == db_path
+    assert args.query == 6
+    assert args.cold_runs == 2
+    assert args.warmup_runs == 3
+    assert args.hot_runs == 5
+    assert args.compressed_masks is True
+    assert args.json is True

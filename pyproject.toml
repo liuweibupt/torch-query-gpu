@@ -23,6 +23,7 @@ dev = ["pytest>=8.0.0"]
 tpch-torch-gen-sf1 = "scripts.gen_sf1:main"
 tpch-torch-run = "scripts.run_query:main"
 tpch-torch-validate = "scripts.validate_query:main"
+tpch-torch-benchmark = "scripts.benchmark_query:main"
 tpch-torch-probe-substrait = "scripts.probe_substrait:main"
 
 [tool.setuptools]
