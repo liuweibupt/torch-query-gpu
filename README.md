@@ -1,51 +1,100 @@
 # torch-query-gpu
 
-A correctness-first TQP-style prototype for analytical query execution on PyTorch
-tensors. The default execution path is a clean DuckDB-planned frontend and a
-PyTorch backend:
+> 中文 README · TQP-style SQL analytics on PyTorch/CUDA tensors
+
+`torch-query-gpu` 是一个**正确性优先**的 TQP 风格原型：从原始 SQL 出发，复用 DuckDB/Sirius-like 前端完成 SQL 解析与计划准入，再把计划交给 PyTorch 后端，在 CPU 或 CUDA tensor 上执行分析型查询。
 
 ```text
-SQL / --query N
-  -> Sirius-like DuckDB frontend
-       DuckDB parses, binds, plans, and optimizes the original SQL
-  -> TQP IR
-       immutable frontend/backend boundary object
-  -> PyTorch backend
-       tensor operators on CPU or CUDA
-  -> optional DuckDB baseline validation
+目标链路：SQL → DuckDB/Sirius-like Frontend → TQP IR → PyTorch/CUDA Operators → Result Rows
 ```
 
-Substrait is not the default execution path. It remains available only as an
-explicit strict frontend for SQL that DuckDB's native Substrait exporter can emit:
+## 当前状态
 
-```text
-SQL / --query N
-  -> DuckDB get_substrait_json(original_sql)
-  -> TQP IR carrying the real Substrait JSON
-  -> PyTorch backend
+- ✅ 默认链路支持 TPC-H Q1-Q22：原始 SQL → DuckDB planner admission → `TQPPlan` → PyTorch backend。
+- ✅ CLI 能直接读取 `--query`、`--sql` 或 `--sql-file`，不需要手工导出 JSON。
+- ✅ strict Substrait 路径仍可显式使用：`--frontend substrait`，只运行 DuckDB 原生 exporter 能导出的 SQL。
+- ✅ Generic SQL subset 已支持单表 projection/filter/aggregate/order/limit。
+- ✅ Q1 有专门 tensor fast path：预编码低基数字符串列，使用 dense group id + `torch.bincount` 做聚合。
+- ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
+- ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
+- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL，但 PyTorch backend 只执行已实现的 TPC-H 模板和 generic subset；其他形状会显式报 `UnsupportedPlanError`。
+
+## 一图看懂架构
+
+```mermaid
+flowchart LR
+    SQL["SQL / TPC-H Query<br/>--query / --sql / --sql-file"] --> Runner["runner.load_sql"]
+    Runner --> Frontend{"frontend"}
+    Frontend -->|默认 sirius| Sirius["DuckDB/Sirius-like Frontend<br/>Parser · Binder · Planner · Optimizer<br/>EXPLAIN metadata"]
+    Frontend -->|显式 substrait| Substrait["DuckDB Native Substrait<br/>get_substrait_json(original_sql)"]
+    Sirius --> IR["TQPPlan IR<br/>immutable frontend/backend boundary"]
+    Substrait --> IR
+    IR --> Backend["PyTorchBackend"]
+    Backend -->|TPC-H Q1-Q22| Templates["tpch_torch/queries/qXX.py"]
+    Backend -->|Generic SQL subset| Generic["tpch_torch/backend/generic.py"]
+    Templates --> Torch["PyTorch Tensor Operators<br/>CPU / CUDA"]
+    Generic --> Torch
+    Torch --> Rows["Result Rows"]
+    Rows -. correctness only .-> DuckDB["DuckDB baseline validation<br/>not a fallback"]
 ```
 
-There is no automatic frontend fallback. The project does **not** rewrite SQL to
-avoid planner limitations, does **not** fabricate Substrait JSON, and does
-**not** use DuckDB result rows as PyTorch output. DuckDB rows are used only as a
-validation baseline.
+### 分层职责
 
-The Sirius-like frontend can admit any SQL that DuckDB can parse and plan. The
-PyTorch backend currently executes all TPC-H Q1-Q22 templates plus an explicit
-generic SQL subset: single-table `SELECT`, boolean `WHERE` (`AND`/`OR`/`NOT`,
-comparisons, `IN`, prefix/suffix/contains `LIKE`), arithmetic projection,
-`COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`, `AVG`, simple `GROUP BY`,
-`ORDER BY` with `ASC`/`DESC`, and `LIMIT`. SQL outside
-that backend subset is admitted by the frontend but fails at backend execution
-with explicit `UnsupportedPlanError`.
+| 层 | 模块 | 做什么 |
+| --- | --- | --- |
+| CLI | `scripts/run_query.py`, `scripts/validate_query.py`, `scripts/benchmark_query.py` | 接收 SQL 来源、frontend、device、benchmark 参数。 |
+| Runner | `tpch_torch/runner.py` | 读取 SQL，编译 `TQPPlan`，调用后端，validation 时比较 DuckDB baseline。 |
+| Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
+| IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
+| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/generic.py` | 分发 TPC-H 模板或 generic SQL subset，执行 PyTorch tensor 算子。 |
+| Tensor/Kernels | `tpch_torch/duckdb_bridge.py`, `tpch_torch/queries/q01.py` ... `q22.py` | columnar fetch、编码、TPC-H tensor executor。 |
+| Operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | grouped reductions、lookup、top-k、Plain/RLE/Index mask 原型。 |
 
-For a module-by-module implementation guide with key code snippets, see
-[`docs/architecture.md`](docs/architecture.md).
+## Q1 是怎么实现的
 
-For the paper-derived operator and optimization backlog, see
-[`docs/operator-roadmap.md`](docs/operator-roadmap.md).
+Q1 当前是显式 fast path，目标是把主聚合路径放在 PyTorch tensor ops 上，而不是 Python row loop。
 
-## Setup
+```mermaid
+flowchart TD
+    Q1SQL["TPC-H Q1 SQL"] --> Frontend["DuckDB/Sirius-like frontend<br/>或 strict Substrait frontend"]
+    Frontend --> Plan["TQPPlan / Q1Plan"]
+    Plan --> Backend["PyTorchBackend query_id == 1"]
+    Backend --> Fetch["fetch_lineitem_tensor_table"]
+    Fetch --> Encoded["lineitem tensors<br/>returnflag / linestatus 预编码"]
+    Encoded --> Filter["l_shipdate <= cutoff"]
+    Filter --> Select["torch.nonzero + index_select"]
+    Select --> Group["dense group id<br/>returnflag_id * status_count + linestatus_id"]
+    Group --> Reduce["torch.bincount<br/>sum / count / avg"]
+    Reduce --> Decode["decode dictionary ids"]
+    Decode --> Sort["order by returnflag, linestatus"]
+    Sort --> Rows["Q1 rows"]
+```
+
+关键代码位置：
+
+- `tpch_torch/backend/pytorch.py`：`query_id == 1` 时调用 `_compile_q1_plan()` 与 `execute_q1()`。
+- `tpch_torch/duckdb_bridge.py`：`fetch_lineitem_tensor_table()` 用 DuckDB columnar fetch，并把 `l_returnflag` / `l_linestatus` 预编码为 int tensor。
+- `tpch_torch/queries/q01.py`：过滤 `l_shipdate`，构造 dense group id，使用 `torch.bincount` 进行 grouped reductions，最后 decode 和排序。
+
+```python
+# tpch_torch/backend/pytorch.py
+if plan.query_id == 1:
+    q1_plan = _compile_q1_plan(plan.plan_json)
+    from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
+    return execute_q1(fetch_lineitem_tensor_table(con, device=device), q1_plan)
+```
+
+```python
+# tpch_torch/queries/q01.py
+group_ids = (columns["l_returnflag"].to(dtype=torch.int64) * status_count) + columns[
+    "l_linestatus"
+].to(dtype=torch.int64)
+
+count_order = torch.bincount(group_ids, minlength=group_count)
+sum_qty = torch.bincount(group_ids, weights=quantity, minlength=group_count)
+```
+
+## 安装
 
 ```bash
 python3 -m venv .venv
@@ -54,41 +103,70 @@ python -m pip install -U pip
 python -m pip install -e '.[dev]'
 ```
 
-## Run tests
+## 生成 TPC-H 数据
 
 ```bash
-timeout 60 python -m pytest -q
-```
+# 默认 SF=1
+python -m scripts.gen_sf1 --db data/tpch_sf1.duckdb --sf 1
 
-## Generate TPC-H data
-
-```bash
-# SF1 by default.
+# 或安装 editable 后使用 entrypoint
 tpch-torch-gen-sf1 --db data/tpch_sf1.duckdb --sf 1
 ```
 
-## End-to-end SQL commands
+## 运行与验证
 
-The generic commands read SQL directly from `--query`, `--sql`, or `--sql-file`.
-They do not require manually exported JSON.
-
-Default Sirius-like frontend for TPC-H templates:
+### 运行单个 TPC-H 查询
 
 ```bash
-tpch-torch-run --db data/tpch_sf1.duckdb --query 21 --device cuda
-tpch-torch-validate --db data/tpch_sf1.duckdb --query 21 --device cuda
+tpch-torch-run \
+  --db data/tpch_sf1.duckdb \
+  --query 1 \
+  --device cuda \
+  --frontend sirius
 ```
 
-Default Sirius-like frontend for a generic SQL subset:
+没有 CUDA 的机器请使用 `--device cpu`。如果显式请求 `--device cuda` 但 PyTorch 检测不到 CUDA，命令会直接报错，不会静默回退到 CPU。
+
+### 验证单个查询
+
+```bash
+tpch-torch-validate \
+  --db data/tpch_sf1.duckdb \
+  --query 1 \
+  --device cuda \
+  --frontend sirius
+```
+
+Validation 会运行同一条 PyTorch 链路，并把结果与 DuckDB 对同一条原始 SQL 的执行结果比较。DuckDB 只用于 baseline，不是 fallback 输出。
+
+### 直接运行 SQL 文本或 SQL 文件
 
 ```bash
 tpch-torch-validate \
   --db data/tpch_sf1.duckdb \
   --sql "select count(*) as n from lineitem" \
   --device cuda
+
+cat queries/my_query.sql | sed -n '1,120p'
+tpch-torch-run \
+  --db data/tpch_sf1.duckdb \
+  --sql-file queries/my_query.sql \
+  --device cuda
 ```
 
-All TPC-H queries through the default clean path:
+当前 generic SQL subset：
+
+```text
+single-table SELECT
+WHERE comparisons / IN / LIKE / AND / OR / NOT
+column projection 与简单 arithmetic projection
+COUNT(*), COUNT(col), SUM, MIN, MAX, AVG
+simple GROUP BY
+ORDER BY output columns ASC / DESC
+LIMIT
+```
+
+### 验证全部 TPC-H
 
 ```bash
 tpch-torch-validate \
@@ -99,32 +177,64 @@ tpch-torch-validate \
   --keep-going
 ```
 
-Strict Substrait frontend for DuckDB-exportable queries:
+这条命令走完整默认链路：**SQL → DuckDB/Sirius-like frontend → TQPPlan → PyTorch backend**。
+
+### Strict Substrait 路径
 
 ```bash
-tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend substrait --json
-tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --frontend substrait
+tpch-torch-run \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --frontend substrait \
+  --json
+
+# 探测 DuckDB 原生 Substrait exporter 当前覆盖情况
+tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries all --json
 ```
 
-Correctness-first compressed mask execution, currently wired into Q6 only:
+Substrait 策略：
+
+```text
+original SQL
+  -> DuckDB get_substrait_json(original_sql)
+  -> TQPPlan carrying real Substrait JSON
+  -> PyTorch backend
+```
+
+如果 DuckDB exporter 导不出原始 SQL，该路径会显式失败；项目不会改写 SQL、伪造 JSON 或自动切到 Sirius-like 路径。
+
+### Q6 压缩 mask 原型
 
 ```bash
-tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-masks
-tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-masks
+tpch-torch-run \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --compressed-masks
+
+tpch-torch-validate \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --compressed-masks
 ```
 
-Cold/hot benchmark timing for more precise performance measurements:
+`--compressed-masks` 当前只改变 Q6 的 PyTorch predicate mask 执行方式：Plain/RLE/Index mask dispatch。它还不是完整压缩列存储或压缩 join/aggregate 执行。
+
+## 冷/热性能计时
 
 ```bash
 tpch-torch-benchmark \
   --db data/tpch_sf1.duckdb \
-  --query 6 \
+  --query 1 \
   --device cuda \
   --frontend sirius \
   --cold-runs 3 \
   --warmup-runs 5 \
   --hot-runs 20
 
+# JSON 输出，便于脚本收集
 tpch-torch-benchmark \
   --db data/tpch_sf1.duckdb \
   --query 6 \
@@ -133,131 +243,56 @@ tpch-torch-benchmark \
   --json
 ```
 
-Benchmark semantics:
+计时语义：
 
-- `cold`: SQL text is resolved before timing; each measured sample opens a fresh
-  DuckDB connection, runs the normal TQP frontend and PyTorch backend once, then
-  closes the connection. This captures frontend compile/admission, tensor
-  fetch/encoding, H2D transfer for CUDA tensors, PyTorch execution, and result
-  materialization. It does not flush the OS page cache or restart Python.
-- `hot`: one DuckDB connection is reused; `--warmup-runs` are unrecorded; then
-  `--hot-runs` measured samples use the same end-to-end execution path.
-- CUDA timing uses `torch.cuda.synchronize()` before and after each measured run
-  and reports wall-clock milliseconds. This captures CPU-side frontend/fetch
-  overhead as well as GPU work; use Nsight/PyTorch profiler for kernel-only
-  breakdowns.
-- Benchmarking does not run DuckDB result validation; use `tpch-torch-validate`
-  separately for correctness.
+- **cold**：每个样本新建 DuckDB connection，运行完整 frontend + tensor fetch/encoding + PyTorch backend + result materialization，再关闭连接。不刷新 OS page cache，也不重启 Python。
+- **hot**：复用一个 DuckDB connection，先执行 `--warmup-runs`，再记录 `--hot-runs`。
+- **CUDA**：每个样本前后调用 `torch.cuda.synchronize()`，报告 wall-clock ms，因此包含 CPU 侧 frontend/fetch/materialization 与 GPU work。
+- Benchmark 不做 DuckDB validation；正确性请单独运行 `tpch-torch-validate`。
 
-Supported frontends are explicit:
+## TPC-H 支持矩阵
 
-- `sirius`: default DuckDB parser/planner admission path.
-- `substrait`: strict DuckDB native Substrait export path.
-
-Use `--device cpu` on machines without CUDA. If `--device cuda` is requested on a
-CPU-only machine, the runner raises an explicit error.
-
-Validation compares PyTorch rows with DuckDB's result for the same original SQL.
-The default absolute tolerance is `1e-2`, which covers the small
-accumulation-order differences between DuckDB decimals and PyTorch reductions at
-SF1. Use `--tolerance` to make the check stricter or looser.
-
-## TODO status
-
-The full paper-derived backlog lives in [`docs/operator-roadmap.md`](docs/operator-roadmap.md).
-Current implementation status:
-
-- [x] TPC-H Q1-Q22 through the default DuckDB/Sirius-like frontend to PyTorch.
-- [x] Strict DuckDB Substrait path for queries exportable by DuckDB.
-- [x] Batch 1 paper primitives: grouped min/max/mean, mask helpers, top-k, and first RLE mask primitives.
-- [x] Batch 2 generic SQL basics: `MIN`, `MAX`, `AVG`, `COUNT(col)`, boolean filters (`AND`/`OR`/`NOT`), `IN`, `LIKE`, and `ORDER BY ASC/DESC`.
-- [ ] Generic joins and subquery lowering.
-- [x] Reusable operator fast paths: NumPy columnar fetch, dense low-cardinality group reductions, lookup indexes, and tensorized generic grouped aggregates.
-- [x] First compressed mask primitives: RLE/Index intersection, Index/Index intersection/union, `complement_index`, and `rle_to_plain`.
-- [x] Encoded mask dispatch for `PlainMask`/`RLEMask`/`IndexMask` logical `AND`/`OR`/`NOT`, plus explicit Q6 compressed-mask execution via `--compressed-masks`.
-- [ ] Compressed storage metadata and full encoded column execution.
-- [ ] Compressed aggregation/join execution and compression-aware optimizer rules.
-- [ ] Compiler/fusion/scheduling experiments.
-
-## TPC-H support matrix
-
-| Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend |
+| Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend |
 | --- | --- | --- | --- |
 | Q1, Q3, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15, Q18, Q19 | yes | yes | yes |
-| Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | blocked in DuckDB 1.2.x Substrait export | yes |
+| Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | DuckDB 1.2.x exporter blocked | yes |
 
-Current all-query command:
+说明：strict Substrait 的 blocked 是 DuckDB 原生 exporter 覆盖限制，不代表 PyTorch backend 没有这些查询的 executor。默认 Sirius-like 路径下 Q1-Q22 可走 PyTorch backend。
 
-```bash
-tpch-torch-validate --db data/tpch_sf1.duckdb --queries all --device cuda --frontend sirius --keep-going
-```
+## Roadmap 摘要
 
-The all-query path is correctness-first. It prioritizes keeping the full
-DuckDB-admitted SQL -> TQP IR -> PyTorch/GPU execution chain runnable over
-performance.
+完整清单见：
 
-## Architecture
+- 中文执行版：[`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md)
+- 英文原版：[`docs/operator-roadmap.md`](docs/operator-roadmap.md)
 
-### Frontends
+当前批次状态：
 
-Frontends compile original SQL into `TQPPlan`:
+- [x] TPC-H Q1-Q22 通过默认 DuckDB/Sirius-like frontend 到 PyTorch backend。
+- [x] Strict DuckDB Substrait path：覆盖 DuckDB exporter 能导出的查询。
+- [x] Batch 1 primitives：grouped min/max/mean、mask helpers、top-k、首批 RLE mask primitives。
+- [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
+- [x] Q1/Q6 等路径加入 columnar fetch、低基数字典编码、dense grouped reductions、compressed mask 原型。
+- [ ] Generic joins、subquery lowering、`HAVING`、`CASE`。
+- [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
+- [ ] 显式 operator graph、fusion、scheduling、compiler lowering。
 
-- `sirius`: DuckDB Parser/Planner/Optimizer admission via `EXPLAIN`; this is the
-  default and covers Q1-Q22.
-- `substrait`: DuckDB's real `get_substrait_json()` export; this is a strict
-  experimental frontend and has no fallback.
+## 文档导航
 
-### TQP IR
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/architecture.zh.md`](docs/architecture.zh.md) | 中文架构说明、关键代码片段、Q1 分层图。 |
+| [`docs/architecture.md`](docs/architecture.md) | 英文架构说明。 |
+| [`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md) | 中文 Roadmap / TODO。 |
+| [`docs/operator-roadmap.md`](docs/operator-roadmap.md) | 英文完整 Roadmap。 |
+| [`docs/papers/README.md`](docs/papers/README.md) | 已下载论文与来源说明。 |
 
-`TQPPlan` is the internal plan object between frontend and backend. It records
-the source SQL, optional TPC-H query id, frontend, DuckDB plan metadata, optional
-real Substrait JSON, and optional generic operator plan. TPC-H templates use
-`query_id`; non-TPC-H SQL uses `query_id=None` plus `generic_plan` when the SQL
-falls inside the current generic executor subset.
-
-### PyTorch backend
-
-`PyTorchBackend` executes `TQPPlan` with correctness-first tensor operators in
-`tpch_torch/queries/q01.py` through `q22.py` for TPC-H templates, and with
-`tpch_torch/backend/generic.py` for the supported generic SQL subset. This keeps
-backend execution separate from SQL admission. Reusable fast paths now cover
-columnar NumPy fetch, lookup indexes, dense grouped reductions, and tensorized
-generic grouped aggregates. Q6 can optionally route its predicate masks through
-encoded `PlainMask`/`RLEMask`/`IndexMask` dispatch with `--compressed-masks`;
-this is not yet full compressed storage.
-
-## Native DuckDB Substrait policy (B方案)
-
-For strict Substrait experiments, this repository follows the native DuckDB
-Substrait path selected for B方案:
-
-```text
-original SQL / --query N
-  -> DuckDB get_substrait_json(original_sql)
-  -> TQP IR carrying the real Substrait JSON
-  -> PyTorch tensor execution
-```
-
-If `--frontend substrait` is selected and DuckDB cannot export the original SQL,
-the command fails with `DuckDBSubstraitError`.
-
-Probe the native export state explicitly:
+## 开发验证
 
 ```bash
-tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries all --json
-tpch-torch-probe-substrait --db data/tpch_sf1.duckdb --queries 2,4,16
+# 单元测试，后端测试建议保持 60 秒 timeout
+timeout 60 python -m pytest -q
+
+# Python 文件语法检查
+timeout 60 python -m compileall -q tpch_torch scripts
 ```
-
-As of DuckDB 1.2.x, original TPC-H Q2, Q4, Q16, Q17, Q20, Q21, and Q22 are
-native-export blocked (`DELIM_JOIN` or `MARK` join). The default Sirius-like
-frontend exists so the clean TQP path is not blocked by that exporter limitation.
-
-If you build or obtain a newer native DuckDB Substrait extension, test it without
-changing SQL by setting:
-
-```bash
-export TQG_SUBSTRAIT_EXTENSION=/path/to/substrait.duckdb_extension
-```
-
-When this variable is set, the bridge loads that exact extension path. Missing
-or unloadable paths are hard errors.
