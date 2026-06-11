@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from math import ceil
+from pathlib import Path
 from statistics import mean, median, stdev
 from time import perf_counter_ns
 from typing import Literal
@@ -85,6 +85,27 @@ class BenchmarkReport:
     samples: tuple[TimingSample, ...]
 
 
+@dataclass(frozen=True)
+class _BenchmarkRuntime:
+    connect: ConnectionFactory
+    runner: QueryRunner
+    clock_ns: Clock
+    sync: Synchronizer
+
+
+@dataclass(frozen=True)
+class _BenchmarkContext:
+    config: BenchmarkConfig
+    runtime: _BenchmarkRuntime
+
+
+@dataclass(frozen=True)
+class _Measurement:
+    mode: BenchmarkMode
+    iteration: int
+    con: duckdb.DuckDBPyConnection
+
+
 def benchmark_sql(
     config: BenchmarkConfig,
     *,
@@ -95,9 +116,10 @@ def benchmark_sql(
 ) -> BenchmarkReport:
     """Measure cold and hot end-to-end execution for one SQL query."""
 
-    sync = _synchronizer(config.device, synchronizer)
-    cold_samples = _measure_cold(config, connect, runner, clock_ns, sync)
-    hot_samples = _measure_hot(config, connect, runner, clock_ns, sync)
+    runtime = _BenchmarkRuntime(connect, runner, clock_ns, _synchronizer(config.device, synchronizer))
+    context = _BenchmarkContext(config=config, runtime=runtime)
+    cold_samples = _measure_cold(context)
+    hot_samples = _measure_hot(context)
     samples = cold_samples + hot_samples
     return BenchmarkReport(
         config=config,
@@ -124,61 +146,52 @@ def summarize_samples(samples: Sequence[TimingSample]) -> TimingSummary:
     )
 
 
-def _measure_cold(
-    config: BenchmarkConfig,
-    connect: ConnectionFactory,
-    runner: QueryRunner,
-    clock_ns: Clock,
-    sync: Synchronizer,
-) -> list[TimingSample]:
+def _measure_cold(context: _BenchmarkContext) -> list[TimingSample]:
     samples: list[TimingSample] = []
-    for iteration in range(config.cold_runs):
-        con = connect(config.db_path)
+    for iteration in range(context.config.cold_runs):
+        con = context.runtime.connect(context.config.db_path)
         try:
-            samples.append(_measure_one("cold", iteration, con, config, runner, clock_ns, sync))
+            measurement = _Measurement("cold", iteration, con)
+            samples.append(_measure_one(context, measurement))
         finally:
             con.close()
     return samples
 
 
-def _measure_hot(
-    config: BenchmarkConfig,
-    connect: ConnectionFactory,
-    runner: QueryRunner,
-    clock_ns: Clock,
-    sync: Synchronizer,
-) -> list[TimingSample]:
-    if config.hot_runs == 0:
+def _measure_hot(context: _BenchmarkContext) -> list[TimingSample]:
+    if context.config.hot_runs == 0:
         return []
-    con = connect(config.db_path)
+    con = context.runtime.connect(context.config.db_path)
     try:
-        for _ in range(config.warmup_runs):
-            _run_query(con, config, runner)
-            sync()
-        return [_measure_one("hot", iteration, con, config, runner, clock_ns, sync) for iteration in range(config.hot_runs)]
+        for _ in range(context.config.warmup_runs):
+            _run_query(context, con)
+            context.runtime.sync()
+        return [
+            _measure_one(context, _Measurement("hot", iteration, con))
+            for iteration in range(context.config.hot_runs)
+        ]
     finally:
         con.close()
 
 
-def _measure_one(
-    mode: BenchmarkMode,
-    iteration: int,
-    con: duckdb.DuckDBPyConnection,
-    config: BenchmarkConfig,
-    runner: QueryRunner,
-    clock_ns: Clock,
-    sync: Synchronizer,
-) -> TimingSample:
-    sync()
-    start_ns = clock_ns()
-    result = _run_query(con, config, runner)
-    sync()
-    elapsed_ms = (clock_ns() - start_ns) / NANOSECONDS_PER_MILLISECOND
-    return TimingSample(mode, iteration, elapsed_ms, result.query_id, len(result.rows))
+def _measure_one(context: _BenchmarkContext, measurement: _Measurement) -> TimingSample:
+    context.runtime.sync()
+    start_ns = context.runtime.clock_ns()
+    result = _run_query(context, measurement.con)
+    context.runtime.sync()
+    elapsed_ms = (context.runtime.clock_ns() - start_ns) / NANOSECONDS_PER_MILLISECOND
+    return TimingSample(
+        measurement.mode,
+        measurement.iteration,
+        elapsed_ms,
+        result.query_id,
+        len(result.rows),
+    )
 
 
-def _run_query(con: duckdb.DuckDBPyConnection, config: BenchmarkConfig, runner: QueryRunner) -> QueryResult:
-    return runner(
+def _run_query(context: _BenchmarkContext, con: duckdb.DuckDBPyConnection) -> QueryResult:
+    config = context.config
+    return context.runtime.runner(
         con,
         config.sql,
         device=config.device,
@@ -191,6 +204,8 @@ def _synchronizer(device: str, synchronizer: Synchronizer | None) -> Synchronize
     if synchronizer is not None:
         return synchronizer
     if device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("--device cuda requested, but torch.cuda.is_available() is false")
         return torch.cuda.synchronize
     return _noop
 

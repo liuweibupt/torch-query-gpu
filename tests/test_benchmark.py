@@ -105,3 +105,16 @@ def test_summarize_samples_uses_nearest_rank_p95():
     samples = tuple(TimingSample("hot", index, float(index + 1), None, 1) for index in range(10))
 
     assert summarize_samples(samples).p95_ms == 10.0
+
+
+def test_cuda_benchmark_without_injected_synchronizer_requires_available_cuda(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    try:
+        benchmark_sql(BenchmarkConfig(db_path=Path("tpch.duckdb"), sql="select 1", device="cuda"))
+    except RuntimeError as exc:
+        assert "torch.cuda.is_available() is false" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
