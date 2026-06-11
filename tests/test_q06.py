@@ -21,3 +21,10 @@ def test_execute_q6_sums_discounted_revenue_for_canonical_predicate():
     rows = execute_q6(con, device="cpu")
 
     assert rows == [{"revenue": pytest.approx(19.0)}]
+
+
+def test_execute_q6_compressed_mask_path_matches_plain_path():
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+
+    assert execute_q6(con, device="cpu", use_compressed_masks=True) == execute_q6(con, device="cpu")
