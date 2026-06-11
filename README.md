@@ -113,6 +113,42 @@ tpch-torch-run --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-ma
 tpch-torch-validate --db data/tpch_sf1.duckdb --query 6 --device cuda --compressed-masks
 ```
 
+Cold/hot benchmark timing for more precise performance measurements:
+
+```bash
+tpch-torch-benchmark \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --frontend sirius \
+  --cold-runs 3 \
+  --warmup-runs 5 \
+  --hot-runs 20
+
+tpch-torch-benchmark \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --compressed-masks \
+  --json
+```
+
+Benchmark semantics:
+
+- `cold`: SQL text is resolved before timing; each measured sample opens a fresh
+  DuckDB connection, runs the normal TQP frontend and PyTorch backend once, then
+  closes the connection. This captures frontend compile/admission, tensor
+  fetch/encoding, H2D transfer for CUDA tensors, PyTorch execution, and result
+  materialization. It does not flush the OS page cache or restart Python.
+- `hot`: one DuckDB connection is reused; `--warmup-runs` are unrecorded; then
+  `--hot-runs` measured samples use the same end-to-end execution path.
+- CUDA timing uses `torch.cuda.synchronize()` before and after each measured run
+  and reports wall-clock milliseconds. This captures CPU-side frontend/fetch
+  overhead as well as GPU work; use Nsight/PyTorch profiler for kernel-only
+  breakdowns.
+- Benchmarking does not run DuckDB result validation; use `tpch-torch-validate`
+  separately for correctness.
+
 Supported frontends are explicit:
 
 - `sirius`: default DuckDB parser/planner admission path.

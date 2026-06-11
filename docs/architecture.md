@@ -432,6 +432,65 @@ The paper-derived operator and optimization backlog is tracked in
 items from abstract-derived TQEx/TQP++/CoddSpeed items and identifies the current
 implementation batches.
 
+## Cold/hot benchmark timing
+
+`tpch_torch/benchmark.py` provides the repository's reproducible timing path. It
+intentionally times the same execution chain as `tpch-torch-run` rather than a
+handwritten query shortcut:
+
+```text
+SQL text already resolved from --query/--sql/--sql-file
+  -> run_sql_with_frontend()
+  -> compile_tqp_plan()
+  -> PyTorchBackend.execute()
+  -> query/generic tensor executor
+  -> materialized result rows
+```
+
+The CLI entrypoint is `tpch-torch-benchmark`:
+
+```bash
+tpch-torch-benchmark \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cuda \
+  --frontend sirius \
+  --cold-runs 3 \
+  --warmup-runs 5 \
+  --hot-runs 20 \
+  --json
+```
+
+Key implementation snippet:
+
+```python
+def benchmark_sql(config, *, connect=connect_database, runner=run_sql_with_frontend):
+    sync = _synchronizer(config.device, synchronizer)
+    cold_samples = _measure_cold(config, connect, runner, clock_ns, sync)
+    hot_samples = _measure_hot(config, connect, runner, clock_ns, sync)
+    return BenchmarkReport(
+        config=config,
+        cold=summarize_samples(cold_samples),
+        hot=summarize_samples(hot_samples),
+        samples=tuple(cold_samples + hot_samples),
+    )
+
+def _measure_one(mode, iteration, con, config, runner, clock_ns, sync):
+    sync()
+    start_ns = clock_ns()
+    result = runner(con, config.sql, device=config.device, frontend=config.frontend)
+    sync()
+    elapsed_ms = (clock_ns() - start_ns) / 1_000_000.0
+    return TimingSample(mode, iteration, elapsed_ms, result.query_id, len(result.rows))
+```
+
+Cold samples open and close a new DuckDB connection for each measured run. Hot
+samples reuse one connection and run unrecorded warmups before measurement. CUDA
+samples synchronize before and after every measured run so asynchronous kernels
+are included. The command reports `min`, `median`, `mean`, nearest-rank `p95`,
+`max`, and sample standard deviation for cold and hot groups. It does not run
+DuckDB validation; validation remains a separate correctness step.
+
 ## Verification commands
 
 Use these commands after architecture changes:
