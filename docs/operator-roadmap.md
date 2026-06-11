@@ -1,5 +1,7 @@
 # TQP-line Operator and Optimization TODO
 
+中文执行版见 [`docs/operator-roadmap.zh.md`](operator-roadmap.zh.md).
+
 This roadmap tracks the operator work needed to evolve this repository from a
 correctness-first TPC-H-on-PyTorch prototype toward the TQP → TQEx → TQP++ →
 CoddSpeed line, including direct GPU execution on lightweight-compressed data.

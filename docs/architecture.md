@@ -1,5 +1,7 @@
 # Current Architecture: DuckDB Frontend -> TQP IR -> PyTorch Backend
 
+中文版本见 [`docs/architecture.zh.md`](architecture.zh.md).
+
 This repository is a correctness-first TQP-style prototype for analytical query
 execution on PyTorch tensors. The default path uses DuckDB for SQL admission and
 planning metadata, then executes with PyTorch operators on CPU or CUDA.
