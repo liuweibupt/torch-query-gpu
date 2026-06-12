@@ -188,6 +188,13 @@ DuckDB physical ORDER_BY / TOP_N / LIMIT
 final aggregate expression alias，例如 100 * sum(x) / sum(y)
 ```
 
+本轮算子优化已覆盖 physical-plan interpreter 的几条热路径：
+
+- `HASH_JOIN` row-index 生成从 Python `dict/list/tolist()` 改为 tensor `searchsorted` 路径；右侧 build key 已排序且唯一时跳过 `argsort` 和重复展开。
+- 已知 TPC-H 低基数字符串列使用 table-aware static dictionary encoding，避免大列上反复 `numpy.unique`。
+- `IN` / 同列 literal `OR` 使用 membership mask；singleton membership 直接走 equality。
+- `PhysicalTable.filter/gather` 对共享 alias 的 `PhysicalValue` 只转换一次，减少 physical plan 中 `col` / `table.col` alias 的重复 tensor selection。
+
 ### 验证全部 TPC-H
 
 ```bash
@@ -285,6 +292,18 @@ tpch-torch-benchmark \
 
 Q1 本轮没有改主算子路径；差异主要来自本次端到端重复测量的系统噪声、frontend/导入开销和同机负载，需用更多 repeats 或固定 CPU/GPU 状态做更严格的 micro-benchmark。
 
+### 当前算子优化 smoke benchmark（SF=1）
+
+命令均为 `--cold-runs 1 --warmup-runs 1 --hot-runs 3 --frontend sirius --device cpu`，计时端到端且较短，仅用于确认优化方向：
+
+| Query | 优化前 hot median | 优化后 hot median | 说明 |
+| --- | ---: | ---: | --- |
+| Q12 | 2293.140 ms | 2049.648 ms | static dictionary + alias 去重；join 仍受 row expansion 影响 |
+| Q14 | 857.160 ms | 703.668 ms | sorted unique build-side join fast path |
+| Q19 | 2111.015 ms | 1744.495 ms | tensor join + membership/OR 折叠 + alias 去重 |
+
+Q1 的直接 graph primitive 主路径本轮未改；本轮主要优化 Q12/Q14/Q19 和 generic physical-plan 算子。
+
 ## TPC-H 支持矩阵
 
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
@@ -311,6 +330,7 @@ Q1 本轮没有改主算子路径；差异主要来自本次端到端重复测�
 - [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
 - [x] Q1/Q6 已迁出 backend 模板分发，使用真实 graph primitive root + columnar fetch / dense grouped reductions / compressed mask 原型。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
+- [x] Physical-plan 算子热路径优化：tensor join index、sorted-unique build fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
 - [ ] Generic subquery lowering、`HAVING`、window、set operations。
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
 - [x] 第一版显式 `TQPOperatorGraph` 与 DuckDB JSON lowering。

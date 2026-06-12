@@ -81,6 +81,19 @@ def test_generic_backend_executes_in_like_or_not_filters():
     assert rows == [{"c": "z"}]
 
 
+def test_generic_backend_singleton_in_filter_uses_fast_membership(monkeypatch):
+    import tpch_torch.backend.generic as generic
+
+    def fail_isin(*_args, **_kwargs):
+        raise AssertionError("singleton IN should not call torch.isin")
+
+    monkeypatch.setattr(generic.torch, "isin", fail_isin)
+
+    rows = execute_generic_sql_plan(_make_table(), parse_generic_sql("select a from t where a in (1)"), device="cpu")
+
+    assert rows == [{"a": 1}, {"a": 1}]
+
+
 def test_generic_backend_executes_descending_order_by_with_limit():
     sql = "select a, b from t order by b desc limit 2"
 
@@ -114,6 +127,96 @@ def test_fetch_generic_tensor_table_uses_columnar_numpy_fetch():
     assert table.columns["a"].dtype == torch.int64
     assert table.columns["c"].tolist() == [0, 1, 0]
     assert table.dictionaries["c"] == ("x", "y")
+
+
+def test_encode_generic_object_string_array_without_python_iteration():
+    import numpy as np
+    from tpch_torch.backend.generic import _encode_generic_column
+
+    class NonIterableObjectArray(np.ndarray):
+        def __new__(cls, values):
+            return np.asarray(values, dtype=object).view(cls)
+
+        def __iter__(self):
+            raise AssertionError("object string arrays should use numpy unique, not Python iteration")
+
+        def tolist(self):
+            raise AssertionError("object string arrays should not be materialized with tolist")
+
+    tensor, vocabulary = _encode_generic_column(NonIterableObjectArray(["b", "a", "b"]), "cpu")
+
+    assert tensor.tolist() == [1, 0, 1]
+    assert vocabulary == ("a", "b")
+
+
+def test_encode_generic_known_string_column_skips_object_probe(monkeypatch):
+    import numpy as np
+    import tpch_torch.backend.generic as generic
+
+    def fail_probe(_values):
+        raise AssertionError("known string columns should not need object probing")
+
+    monkeypatch.setattr(generic, "_is_numpy_string_object_array", fail_probe)
+
+    tensor, vocabulary = generic._encode_generic_column(
+        np.array(["MAIL", "AIR", "MAIL"], dtype=object),
+        "cpu",
+        column_name="l_shipmode",
+        table_name="lineitem",
+    )
+
+    assert tensor.tolist() == [2, 0, 2]
+    assert vocabulary == ("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK")
+
+
+def test_encode_generic_static_dictionary_column_skips_numpy_unique(monkeypatch):
+    import numpy as np
+    import tpch_torch.backend.generic as generic
+
+    def fail_unique(*_args, **_kwargs):
+        raise AssertionError("static low-cardinality columns should not call numpy.unique")
+
+    monkeypatch.setattr(generic.np, "unique", fail_unique)
+
+    tensor, vocabulary = generic._encode_generic_column(
+        np.array(["COLLECT COD", "NONE", "COLLECT COD"], dtype=object),
+        "cpu",
+        column_name="l_shipinstruct",
+        table_name="lineitem",
+    )
+
+    assert tensor.tolist() == [0, 2, 0]
+    assert vocabulary == ("COLLECT COD", "DELIVER IN PERSON", "NONE", "TAKE BACK RETURN")
+
+
+def test_encode_generic_static_dictionary_requires_matching_table():
+    import numpy as np
+    import tpch_torch.backend.generic as generic
+
+    tensor, vocabulary = generic._encode_generic_column(
+        np.array(["MAIL", "AIR", "MAIL"], dtype=object),
+        "cpu",
+        column_name="l_shipmode",
+        table_name="not_lineitem",
+    )
+
+    assert tensor.tolist() == [1, 0, 1]
+    assert vocabulary == ("AIR", "MAIL")
+
+
+def test_encode_generic_known_date_column_takes_precedence_over_object_string_probe():
+    import numpy as np
+    import tpch_torch.backend.generic as generic
+
+    tensor, vocabulary = generic._encode_generic_column(
+        np.array(["1994-01-01", "1995-12-31"], dtype=object),
+        "cpu",
+        column_name="l_shipdate",
+        table_name="lineitem",
+    )
+
+    assert tensor.tolist() == [19940101, 19951231]
+    assert vocabulary is None
 
 
 def test_generic_backend_tensorizes_grouped_aggregates_with_filter():

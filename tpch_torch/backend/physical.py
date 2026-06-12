@@ -16,6 +16,7 @@ from tpch_torch.backend.physical_expr import (
     projection_name,
     strip_order_direction,
 )
+from tpch_torch.backend.physical_join import inner_join_indices
 from tpch_torch.backend.physical_sql import replace_aggregate_calls_with_refs, select_expressions_by_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
 from tpch_torch.errors import UnsupportedPlanError
@@ -183,7 +184,12 @@ def _fetch_physical_table(
     columnar = con.execute(f"select {select_list} from {table_name}").fetchnumpy()
     values: dict[str, PhysicalValue] = {}
     for column in fetched_columns:
-        tensor, vocabulary = _encode_generic_column(columnar[column], device)
+        tensor, vocabulary = _encode_generic_column(
+            columnar[column],
+            device,
+            column_name=column,
+            table_name=table_name,
+        )
         value = PhysicalValue(tensor=tensor, dictionary=vocabulary, is_date=column in DATE_COLUMNS_EXTENDED)
         values[column] = value
         values[f"{table_name}.{column}"] = value
@@ -313,19 +319,7 @@ def _resolve_alias_projections(
 
 
 def _inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    left_values = left_key.to(dtype=torch.int64).cpu().tolist()
-    right_values = right_key.to(dtype=torch.int64).cpu().tolist()
-    right_index: dict[int, list[int]] = {}
-    for row, value in enumerate(right_values):
-        right_index.setdefault(int(value), []).append(row)
-    left_rows: list[int] = []
-    right_rows: list[int] = []
-    for left_row, value in enumerate(left_values):
-        for right_row in right_index.get(int(value), ()):
-            left_rows.append(left_row)
-            right_rows.append(right_row)
-    device = left_key.device
-    return torch.tensor(left_rows, dtype=torch.int64, device=device), torch.tensor(right_rows, dtype=torch.int64, device=device)
+    return inner_join_indices(left_key, right_key)
 
 
 def _combine_join_tables(

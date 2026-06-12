@@ -20,8 +20,10 @@ from tpch_torch.operators import (
     grouped_mean,
     grouped_min,
     grouped_sum,
+    membership_mask,
 )
-from tpch_torch.relational import decode
+from tpch_torch.backend.static_dictionaries import static_string_dictionary
+from tpch_torch.relational import DATE_COLUMNS_EXTENDED, STRING_COLUMNS_EXTENDED, decode
 from tpch_torch.storage import TensorTable
 
 
@@ -59,7 +61,7 @@ def _fetch_generic_tensor_table(
     encoded_columns: dict[str, torch.Tensor] = {}
     dictionaries: dict[str, tuple[str, ...]] = {}
     for column, values in columnar.items():
-        tensor, vocabulary = _encode_generic_column(values, device)
+        tensor, vocabulary = _encode_generic_column(values, device, column_name=column, table_name=table)
         encoded_columns[column] = tensor
         if vocabulary is not None:
             dictionaries[column] = vocabulary
@@ -67,23 +69,31 @@ def _fetch_generic_tensor_table(
 
 
 def _encode_generic_column(
-    values: Iterable[Any] | np.ndarray, device: str
+    values: Iterable[Any] | np.ndarray,
+    device: str,
+    column_name: str | None = None,
+    table_name: str | None = None,
 ) -> tuple[torch.Tensor, tuple[str, ...] | None]:
     if isinstance(values, np.ndarray):
-        return _encode_numpy_generic_column(values, device)
+        return _encode_numpy_generic_column(values, device, column_name, table_name)
     return _encode_generic_sequence(list(values), device)
 
 
 def _encode_numpy_generic_column(
-    values: np.ndarray, device: str
+    values: np.ndarray,
+    device: str,
+    column_name: str | None = None,
+    table_name: str | None = None,
 ) -> tuple[torch.Tensor, tuple[str, ...] | None]:
-    if values.dtype.kind in {"U", "S"}:
+    static_dictionary = static_string_dictionary(table_name, column_name)
+    if static_dictionary is not None:
+        return _encode_numpy_static_string_column(values, static_dictionary, device), static_dictionary
+    if _is_known_date_column(column_name):
+        return _encode_known_numpy_date_column(values, device), None
+    if _is_known_string_column(column_name) or values.dtype.kind in {"U", "S"} or _is_numpy_string_object_array(values):
         return _encode_numpy_string_column(values, device)
     if np.issubdtype(values.dtype, np.datetime64):
-        days = values.astype("datetime64[D]").astype(np.int64)
-        epoch_ordinal = date(1970, 1, 1).toordinal()
-        dates = [date.fromordinal(int(day) + epoch_ordinal) for day in days]
-        return torch.tensor([_date_to_yyyymmdd(value) for value in dates], dtype=torch.int32, device=device), None
+        return _encode_numpy_datetime64_column(values, device), None
     if values.dtype == np.dtype("O"):
         return _encode_generic_sequence(values.tolist(), device)
     if values.dtype.kind in {"i", "u"}:
@@ -96,7 +106,40 @@ def _encode_numpy_string_column(
 ) -> tuple[torch.Tensor, tuple[str, ...]]:
     vocabulary, inverse = np.unique(values.astype(str), return_inverse=True)
     tensor = torch.as_tensor(inverse, dtype=torch.int64, device=device)
-    return tensor, tuple(str(value) for value in vocabulary.tolist())
+    return tensor, tuple(str(value) for value in np.asarray(vocabulary))
+
+
+def _encode_numpy_static_string_column(
+    values: np.ndarray,
+    vocabulary: tuple[str, ...],
+    device: str,
+) -> torch.Tensor:
+    codes = np.full(values.shape, -1, dtype=np.int64)
+    for index, literal in enumerate(vocabulary):
+        codes[values == literal] = index
+    if bool(np.any(codes < 0)):
+        missing_values = np.unique(values[codes < 0].astype(str))
+        formatted = ", ".join(str(value) for value in missing_values[:5])
+        raise UnsupportedPlanError(f"static dictionary does not cover value(s): {formatted}")
+    return torch.as_tensor(codes, dtype=torch.int64, device=device)
+
+
+def _encode_known_numpy_date_column(values: np.ndarray, device: str) -> torch.Tensor:
+    if np.issubdtype(values.dtype, np.datetime64):
+        return _encode_numpy_datetime64_column(values, device)
+    if values.dtype.kind in {"i", "u"}:
+        return torch.as_tensor(values, dtype=torch.int32, device=device)
+    encoded = [_date_to_yyyymmdd(value) for value in values.tolist()]
+    return torch.tensor(encoded, dtype=torch.int32, device=device)
+
+
+def _encode_numpy_datetime64_column(values: np.ndarray, device: str) -> torch.Tensor:
+    dates = values.astype("datetime64[D]").astype(np.int64)
+    year = dates.astype("datetime64[D]").astype("datetime64[Y]").astype(np.int64) + 1970
+    month = dates.astype("datetime64[D]").astype("datetime64[M]").astype(np.int64) % 12 + 1
+    day = dates - values.astype("datetime64[M]").astype("datetime64[D]").astype(np.int64) + 1
+    encoded = (year * 10_000 + month * 100 + day).astype(np.int32, copy=False)
+    return torch.as_tensor(encoded, dtype=torch.int32, device=device)
 
 
 def _encode_generic_sequence(values: list[Any], device: str) -> tuple[torch.Tensor, tuple[str, ...] | None]:
@@ -114,6 +157,22 @@ def _encode_generic_sequence(values: list[Any], device: str) -> tuple[torch.Tens
 
 def _is_string_column(values: list[Any]) -> bool:
     return any(isinstance(value, str) for value in values if value is not None)
+
+
+def _is_known_string_column(column_name: str | None) -> bool:
+    return column_name in STRING_COLUMNS_EXTENDED
+
+
+def _is_known_date_column(column_name: str | None) -> bool:
+    return column_name in DATE_COLUMNS_EXTENDED
+
+
+def _is_numpy_string_object_array(values: np.ndarray) -> bool:
+    if values.dtype != np.dtype("O") or values.size == 0:
+        return False
+    sample = values.reshape(-1)[: min(int(values.size), 32)]
+    is_string_or_null = np.frompyfunc(lambda value: isinstance(value, str) or value is None, 1, 1)
+    return bool(np.all(is_string_or_null(sample)))
 
 
 def _is_date_column(values: list[Any]) -> bool:
@@ -184,10 +243,8 @@ def _evaluate_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor
 
 def _evaluate_in_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor:
     values = table.columns[filter_.column]
-    mask = torch.zeros(values.shape, dtype=torch.bool, device=values.device)
-    for value in filter_.values:
-        mask = torch.logical_or(mask, values == _literal_tensor(table, filter_.column, value))
-    return mask
+    literal_ids = [_literal_scalar_id(table, filter_.column, value) for value in filter_.values]
+    return membership_mask(values, literal_ids)
 
 
 def _evaluate_like_filter(table: TensorTable, filter_: GenericFilter) -> torch.Tensor:
@@ -202,18 +259,21 @@ def _evaluate_like_filter(table: TensorTable, filter_: GenericFilter) -> torch.T
     ]
     if not matching_ids:
         return torch.zeros(table.columns[filter_.column].shape, dtype=torch.bool, device=table.columns[filter_.column].device)
-    accepted = torch.tensor(matching_ids, dtype=table.columns[filter_.column].dtype, device=table.columns[filter_.column].device)
-    return torch.isin(table.columns[filter_.column], accepted)
+    return membership_mask(table.columns[filter_.column], matching_ids)
 
 
 def _literal_tensor(table: TensorTable, column: str, value: int | float | str) -> torch.Tensor:
     values = table.columns[column]
+    return torch.tensor(_literal_scalar_id(table, column, value), dtype=values.dtype, device=values.device)
+
+
+def _literal_scalar_id(table: TensorTable, column: str, value: int | float | str) -> int | float:
     if isinstance(value, str):
         vocabulary = table.dictionaries.get(column)
         if vocabulary is None or value not in vocabulary:
-            return torch.tensor(-1, dtype=values.dtype, device=values.device)
-        return torch.tensor(vocabulary.index(value), dtype=values.dtype, device=values.device)
-    return torch.tensor(value, dtype=values.dtype, device=values.device)
+            return -1
+        return vocabulary.index(value)
+    return value
 
 
 def _execute_ungrouped(table: TensorTable, plan: GenericSQLPlan, mask: torch.Tensor) -> list[dict[str, Any]]:

@@ -89,6 +89,18 @@ def grouped_count_bincount(group_ids: torch.Tensor, group_count: int) -> torch.T
     return torch.bincount(group_ids.to(dtype=torch.int64), minlength=group_count)[:group_count]
 
 
+def membership_mask(values: torch.Tensor, accepted_values: Sequence[int | float]) -> torch.Tensor:
+    """Return a boolean mask selecting values contained in a small literal set."""
+
+    literals = tuple(accepted_values)
+    if not literals:
+        return torch.zeros(values.shape, dtype=torch.bool, device=values.device)
+    if len(literals) == 1:
+        return values == literals[0]
+    accepted = torch.tensor(literals, dtype=values.dtype, device=values.device)
+    return torch.isin(values, accepted)
+
+
 def logical_and_all(masks: Sequence[torch.Tensor]) -> torch.Tensor:
     """Return the element-wise conjunction of boolean masks."""
 

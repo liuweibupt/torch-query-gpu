@@ -48,7 +48,7 @@ flowchart LR
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 `TQPOperatorGraph`。 |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | 不可变前后端边界。 |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1/Q6 primitives、Q12/Q14/Q19 physical interpreter、剩余 recipes、generic SQL。 |
-| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_sql.py`, `physical_types.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression。 |
+| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_expr_folding.py`, `physical_join.py`, `physical_sql.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、membership folding、static dictionary encoding 和 alias 去重 selection。 |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan、filter、lookup join、semi/anti join、scalar subquery、grouped scalar subquery、CTE materialization、aggregate、sort/limit helpers。 |
 | TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | 尚未迁入 physical interpreter 的 query-specific graph recipe；不调用旧 `tpch_torch.queries.qXX` 模板。 |
 | Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | grouped reductions、dense group id、top-k、Plain/RLE/Index mask 原型。 |
@@ -91,6 +91,29 @@ if node.kind == OperatorKind.AGGREGATE:
 ```
 
 该 interpreter 仍保持显式失败原则：不支持的 DuckDB physical node 会抛出 `UnsupportedPlanError`，不会改用 DuckDB rows 作为 PyTorch 输出。
+
+本轮 physical 算子优化保持同一执行边界，只替换热点实现：
+
+```python
+# tpch_torch/backend/physical_join.py
+right_order, sorted_right_values = _sorted_build_keys(right_values)
+starts = torch.searchsorted(sorted_right_values, left_values, right=False)
+ends = torch.searchsorted(sorted_right_values, left_values, right=True)
+if _is_strictly_increasing(sorted_right_values):
+    return _unique_build_join_indices(starts, ends - starts, right_order)
+```
+
+```python
+# tpch_torch/backend/physical_expr.py
+folded = fold_same_column_literal_or(...)
+if folded is not None:
+    return folded
+```
+
+```python
+# tpch_torch/backend/physical_types.py
+_transform_unique_values(self.columns, lambda value: value.gather(indices))
+```
 
 通用 graph nodes 暴露 join/subquery/aggregate 形态：
 

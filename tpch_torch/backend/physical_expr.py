@@ -8,8 +8,10 @@ from typing import Any, Sequence
 
 import torch
 
+from tpch_torch.backend.physical_expr_folding import fold_same_column_literal_or
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.errors import UnsupportedPlanError
+from tpch_torch.operators import membership_mask
 
 _COMPARISON_OPERATORS = (">=", "<=", "!=", "<>", "=", ">", "<")
 _INTERNAL_PREFIXES = ("__internal_compress", "__internal_decompress")
@@ -37,6 +39,16 @@ def evaluate_expression(table: PhysicalTable, expression: str) -> PhysicalValue:
         return _evaluate_in(table, in_parts[0], in_parts[1])
     keyword_parts = _split_top_level_keyword(expr, "OR")
     if len(keyword_parts) > 1:
+        folded = fold_same_column_literal_or(
+            table,
+            keyword_parts,
+            parse_literal=_parse_literal,
+            split_comparison=_split_top_level_comparison,
+            strip_parentheses=_strip_wrapping_parentheses,
+            no_literal=_NO_LITERAL,
+        )
+        if folded is not None:
+            return folded
         return _logical_reduce(table, keyword_parts, torch.logical_or)
     keyword_parts = _split_top_level_keyword(expr, "AND")
     if len(keyword_parts) > 1:
@@ -142,8 +154,7 @@ def _evaluate_in(table: PhysicalTable, left_expr: str, raw_values: str) -> Physi
     if left.dictionary is not None:
         accepted = [left.dictionary.index(str(value)) for value in values if str(value) in left.dictionary]
         return PhysicalValue(tensor=_isin_ids(tensor, accepted))
-    literal_tensor = torch.tensor(values, dtype=tensor.dtype, device=tensor.device)
-    return PhysicalValue(tensor=torch.isin(tensor, literal_tensor))
+    return PhysicalValue(tensor=membership_mask(tensor, values))
 
 
 def _logical_reduce(table: PhysicalTable, parts: Sequence[str], reducer) -> PhysicalValue:
@@ -399,10 +410,7 @@ def _reverse_compare(mask: torch.Tensor, operator: str) -> torch.Tensor:
 
 
 def _isin_ids(values: torch.Tensor, ids: Sequence[int]) -> torch.Tensor:
-    if not ids:
-        return torch.zeros(values.shape, dtype=torch.bool, device=values.device)
-    accepted = torch.tensor(tuple(ids), dtype=values.dtype, device=values.device)
-    return torch.isin(values, accepted)
+    return membership_mask(values, ids)
 
 
 def _strip_wrapping_parentheses(expr: str) -> str:

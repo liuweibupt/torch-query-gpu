@@ -1,5 +1,6 @@
 import duckdb
 import pytest
+import torch
 
 from tpch_torch.duckdb_bridge import generate_tpch
 from tpch_torch.runner import run_sql, validate_sql, validate_sql_with_frontend
@@ -28,6 +29,94 @@ def test_physical_plan_executes_generic_inner_join_without_generic_parser(monkey
 
     assert result.query_id is None
     assert result.rows == [{"a": 1, "name": "x"}, {"a": 2, "name": "x"}, {"a": 3, "name": "y"}]
+
+
+def test_physical_inner_join_indices_stays_in_tensor_path(monkeypatch):
+    from tpch_torch.backend.physical import _inner_join_indices
+
+    expected_left = torch.tensor([0, 0, 1, 2, 2], dtype=torch.int64)
+    expected_right = torch.tensor([0, 1, 3, 0, 1], dtype=torch.int64)
+
+    def fail_tolist(_tensor):
+        raise AssertionError("join indices must not materialize keys through Tensor.tolist")
+
+    monkeypatch.setattr(torch.Tensor, "tolist", fail_tolist)
+
+    left_rows, right_rows = _inner_join_indices(
+        torch.tensor([2, 1, 2, 3], dtype=torch.int64),
+        torch.tensor([2, 2, 4, 1], dtype=torch.int64),
+    )
+
+    assert torch.equal(left_rows, expected_left)
+    assert torch.equal(right_rows, expected_right)
+
+
+def test_physical_inner_join_indices_uses_sorted_unique_build_fast_path(monkeypatch):
+    from tpch_torch.backend.physical import _inner_join_indices
+
+    def fail_argsort(*_args, **_kwargs):
+        raise AssertionError("sorted unique build-side keys should not call torch.argsort")
+
+    def fail_repeat_interleave(*_args, **_kwargs):
+        raise AssertionError("sorted unique build-side keys should not need repeat_interleave")
+
+    monkeypatch.setattr(torch, "argsort", fail_argsort)
+    monkeypatch.setattr(torch, "repeat_interleave", fail_repeat_interleave)
+
+    left_rows, right_rows = _inner_join_indices(
+        torch.tensor([3, 1, 2, 5, 2], dtype=torch.int64),
+        torch.tensor([1, 2, 3, 4], dtype=torch.int64),
+    )
+
+    assert torch.equal(left_rows, torch.tensor([0, 1, 2, 4], dtype=torch.int64))
+    assert torch.equal(right_rows, torch.tensor([2, 0, 1, 1], dtype=torch.int64))
+
+
+def test_physical_expression_folds_same_column_literal_or(monkeypatch):
+    from tpch_torch.backend.physical_expr import evaluate_expression
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+
+    def fail_logical_or(*_args, **_kwargs):
+        raise AssertionError("same-column literal OR should use membership mask")
+
+    monkeypatch.setattr(torch, "logical_or", fail_logical_or)
+
+    table = PhysicalTable(
+        "lineitem",
+        {
+            "l_shipmode": PhysicalValue(
+                torch.tensor([0, 2, 5, 6], dtype=torch.int64),
+                dictionary=("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK"),
+            )
+        },
+        ("l_shipmode",),
+        4,
+    )
+
+    result = evaluate_expression(table, "(l_shipmode = 'MAIL') OR (l_shipmode = 'SHIP')")
+
+    assert torch.equal(result.require_tensor(), torch.tensor([False, True, True, False]))
+
+
+def test_physical_expression_singleton_numeric_in_uses_fast_membership(monkeypatch):
+    from tpch_torch.backend.physical_expr import evaluate_expression
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+
+    def fail_isin(*_args, **_kwargs):
+        raise AssertionError("singleton numeric IN should not call torch.isin")
+
+    monkeypatch.setattr(torch, "isin", fail_isin)
+
+    table = PhysicalTable(
+        "t",
+        {"a": PhysicalValue(torch.tensor([1, 2, 1], dtype=torch.int64))},
+        ("a",),
+        3,
+    )
+
+    result = evaluate_expression(table, "a IN (1)")
+
+    assert torch.equal(result.require_tensor(), torch.tensor([True, False, True]))
 
 
 def test_physical_plan_executes_join_group_order_limit_query():

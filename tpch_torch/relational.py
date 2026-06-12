@@ -19,6 +19,7 @@ from tpch_torch.operators import (
     grouped_sum,
     grouped_sum_bincount,
     low_cardinality_group_ids,
+    membership_mask,
 )
 from tpch_torch.storage import DATE_COLUMNS, STRING_COLUMNS, TensorTable
 
@@ -392,7 +393,4 @@ def _date_to_yyyymmdd(value: Any) -> int:
 
 
 def _isin_ids(values: torch.Tensor, ids: Sequence[int]) -> torch.Tensor:
-    if not ids:
-        return torch.zeros(values.shape, dtype=torch.bool, device=values.device)
-    accepted = torch.tensor(tuple(ids), dtype=values.dtype, device=values.device)
-    return torch.isin(values, accepted)
+    return membership_mask(values, ids)

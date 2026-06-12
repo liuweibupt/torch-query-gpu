@@ -89,7 +89,7 @@ class PhysicalTable:
             raise ValueError("physical filter mask must match row count")
         return PhysicalTable(
             name or self.name,
-            {column: value.filter(mask) for column, value in self.columns.items()},
+            _transform_unique_values(self.columns, lambda value: value.filter(mask)),
             self.order,
             int(mask.sum().cpu().item()),
         )
@@ -99,7 +99,7 @@ class PhysicalTable:
             indices = indices.to(dtype=torch.int64)
         return PhysicalTable(
             name or self.name,
-            {column: value.gather(indices) for column, value in self.columns.items()},
+            _transform_unique_values(self.columns, lambda value: value.gather(indices)),
             self.order,
             int(indices.numel()),
         )
@@ -143,6 +143,20 @@ def table_device(table: PhysicalTable) -> torch.device:
         if value.tensor is not None:
             return value.tensor.device
     return torch.device("cpu")
+
+
+def _transform_unique_values(
+    columns: Mapping[str, PhysicalValue],
+    transform,
+) -> dict[str, PhysicalValue]:
+    transformed: dict[int, PhysicalValue] = {}
+    result: dict[str, PhysicalValue] = {}
+    for name, value in columns.items():
+        key = id(value)
+        if key not in transformed:
+            transformed[key] = transform(value)
+        result[name] = transformed[key]
+    return result
 
 
 def _name_candidates(name: str) -> tuple[str, ...]:

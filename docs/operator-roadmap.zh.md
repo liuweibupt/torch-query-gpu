@@ -74,16 +74,22 @@
 ## 5. TQP 优化 TODO
 
 - [x] Generic grouped aggregate 使用 tensor group id + grouped reductions，避免 Python row-group loops。
+- [x] DuckDB physical inner equi-join 移除 Python key row loop，使用 tensor `searchsorted` 产生 row-index pairs。
+- [x] Physical join sorted/unique build-side fast path：跳过 `argsort` 与重复展开。
 - [ ] 移除剩余 hot path 中的数据相关 Python row loops；保留 schema/operator 级循环。
-- [ ] 保持 columnar late materialization：join 先产生 row-index pairs，再物化 payload columns。
+- [x] 保持 columnar late materialization：physical join 先产生 row-index pairs，再物化 payload columns。
 - [ ] row-level work 优先用 tensor ops，不用 Python control flow。
 - [ ] 编译执行路径：TorchScript / TVM / `torch.compile` / Antares / codegen / CSE / fusion / Python dependency removal。
 - [x] `LookupIndex`：复用 pre-sorted dimension-key lookup probes。
-- [ ] optimizer 感知 sorted/unique columns，避免冗余 `sort` / `unique` / `unique_consecutive`。
+- [x] 第一批 sorted/unique 感知：已排序唯一 build-side join key 跳过冗余 sort。
+- [ ] optimizer 感知更多 sorted/unique columns，避免冗余 `sort` / `unique` / `unique_consecutive`。
 - [ ] 基于 collision degree、key cardinality、device 选择 hash join 或 sort join。
 - [ ] 跟踪 backend bottlenecks：`unique`、indexing、`masked_select`、`scatter_add`、`nonzero` 同步、sort 成本。
 - [ ] 分离 pipeline/capture 中的数据移动与查询执行。
 - [ ] 缓存 frontend compilation 和 tensor operator plans。
+- [x] Table-aware static dictionary encoding for TPC-H low-cardinality strings，减少大列 `numpy.unique`。
+- [x] Singleton / literal-list membership mask：单元素走 equality，同列 literal `OR` 折叠为一次 membership。
+- [x] `PhysicalTable.filter/gather` 对共享 alias value 去重，避免 `col` 与 `table.col` 重复 selection。
 - [ ] 显式 operator graph 完成后再加入 inter-operator parallelism 和 distributed/data-parallel execution。
 
 ## 6. 压缩数据执行 TODO（verified）
@@ -243,6 +249,7 @@
 - [x] DuckDB physical `HASH_JOIN` correctness-first generic inner equi-join。
 - [ ] PK/FK lookup join fast path 作为优化版 generic join。
 - [x] Physical-plan inner equi-join 先产生 tensor row-index pairs，再物化 payload columns。
+- [x] Sorted unique build-side physical join fast path。
 - [ ] GPU hash equi-join fast path：buckets / probe / collision handling。
 - [ ] Semi/anti joins。
 - [ ] TPC-H 形状所需的 mark/delimiter-style subquery patterns。

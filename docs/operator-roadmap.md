@@ -94,16 +94,22 @@ until a readable full paper/appendix is available.
 - [x] First generic grouped aggregate path avoids Python row-group loops and uses
       tensor group ids plus grouped reductions. Non-aggregate projection
       materialization still decodes result rows explicitly.
+- [x] DuckDB physical inner equi-join no longer materializes keys through Python
+      row loops; it produces tensor row-index pairs via `searchsorted`.
+- [x] First sorted/unique build-side join fast path skips redundant sort and
+      duplicate expansion.
 - [ ] Keep remaining data-dependent loops out of hot paths; loops over
       schema/operators are acceptable, loops over rows are not.
-- [ ] Preserve columnar late materialization: joins produce row-index pairs before
+- [x] Preserve columnar late materialization for physical joins: joins produce row-index pairs before
       materializing payload columns.
 - [ ] Prefer tensor operations over Python control flow for row-level work.
 - [ ] Use compiled execution where possible: TorchScript/TVM/torch compile paths,
       common sub-expression elimination, operator fusion, code generation, and
       Python dependency removal.
 - [x] Add reusable `LookupIndex` for pre-sorted dimension-key lookup probes.
-- [ ] Add optimizer awareness for sorted/unique columns to avoid redundant `sort`,
+- [x] First optimizer awareness for sorted/unique columns: sorted unique physical
+      join build keys avoid redundant sorting.
+- [ ] Add broader optimizer awareness for sorted/unique columns to avoid redundant `sort`,
       `unique`, and `unique_consecutive` across whole query plans.
 - [ ] Add join strategy selection between hash and sort joins based on collision
       degree, key cardinality, and device.
@@ -111,6 +117,10 @@ until a readable full paper/appendix is available.
       `scatter_add`, `nonzero` synchronization, and sort cost.
 - [ ] Pipeline/capture data movement separately from query execution.
 - [ ] Cache frontend compilation and tensor operator plans.
+- [x] Table-aware static dictionary encoding for bounded TPC-H string domains.
+- [x] Membership-mask fast paths: singleton equality and same-column literal `OR`
+      folding.
+- [x] Deduplicate `PhysicalTable.filter/gather` work for shared alias values.
 - [ ] Add inter-operator parallelism and distributed/data-parallel execution once
       the single-GPU operator graph is explicit.
 
@@ -323,6 +333,7 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [x] Correctness-first generic inner equi-join through DuckDB physical `HASH_JOIN`.
 - [ ] PK/FK lookup join fast path as an optimized generic join variant.
 - [x] Physical-plan inner equi-join produces tensor row-index pairs before payload materialization.
+- [x] Sorted unique build-side physical join fast path.
 - [ ] GPU hash equi-join producing late-materialized index pairs.
 - [ ] Semi/anti joins.
 - [ ] Mark/delimiter-style subquery patterns needed by TPC-H shapes.

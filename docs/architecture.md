@@ -61,7 +61,7 @@ flowchart LR
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | Export DuckDB textual/JSON plans and lower JSON nodes to `TQPOperatorGraph`. |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | Immutable frontend/backend boundary. |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q6 primitives, Q12/Q14/Q19 physical interpretation, remaining recipes, and generic SQL. |
-| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_sql.py`, `physical_types.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions. |
+| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_expr_folding.py`, `physical_join.py`, `physical_sql.py`, `physical_types.py`, `static_dictionaries.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions; includes tensor join-index generation, membership folding, static dictionary encoding, and alias-deduplicated selection. |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan, filter, lookup join, semi/anti join, scalar subquery, grouped scalar subquery, CTE materialization, aggregate, sort/limit helpers. |
 | TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | Query-specific graph recipes for shapes not yet moved to the physical interpreter; do not call old `tpch_torch.queries.qXX` templates. |
 | Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | Grouped reductions, low-cardinality group ids, top-k, Plain/RLE/Index mask primitives. |
@@ -105,6 +105,30 @@ if node.kind == OperatorKind.AGGREGATE:
 
 The physical interpreter is deliberately explicit: unsupported DuckDB physical
 nodes still raise `UnsupportedPlanError` instead of falling back to DuckDB rows.
+
+The current physical operator optimizations keep the same frontend/backend
+boundary and replace hot implementations only:
+
+```python
+# tpch_torch/backend/physical_join.py
+right_order, sorted_right_values = _sorted_build_keys(right_values)
+starts = torch.searchsorted(sorted_right_values, left_values, right=False)
+ends = torch.searchsorted(sorted_right_values, left_values, right=True)
+if _is_strictly_increasing(sorted_right_values):
+    return _unique_build_join_indices(starts, ends - starts, right_order)
+```
+
+```python
+# tpch_torch/backend/physical_expr.py
+folded = fold_same_column_literal_or(...)
+if folded is not None:
+    return folded
+```
+
+```python
+# tpch_torch/backend/physical_types.py
+_transform_unique_values(self.columns, lambda value: value.gather(indices))
+```
 
 Common graph nodes expose reusable relational patterns:
 

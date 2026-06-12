@@ -363,7 +363,12 @@ def _fetch_graph_tensor_table(
     tensors: dict[str, torch.Tensor] = {}
     dictionaries: dict[str, tuple[str, ...]] = {}
     for column, values in columnar.items():
-        tensor, vocabulary = _encode_generic_column(values, device)
+        tensor, vocabulary = _encode_generic_column(
+            values,
+            device,
+            column_name=column,
+            table_name=table_name,
+        )
         tensors[column] = tensor
         if vocabulary is not None:
             dictionaries[column] = vocabulary

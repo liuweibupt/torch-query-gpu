@@ -8,6 +8,7 @@ from tpch_torch.operators import (
     grouped_min,
     logical_and_all,
     logical_or_all,
+    membership_mask,
     topk_indices,
 )
 
@@ -38,6 +39,17 @@ def test_logical_mask_helpers_reject_empty_or_non_boolean_masks():
         logical_and_all(())
     with pytest.raises(TypeError, match="boolean"):
         logical_or_all((torch.tensor([1, 0]),))
+
+
+def test_membership_mask_uses_equality_for_singleton_sets(monkeypatch):
+    def fail_isin(*_args, **_kwargs):
+        raise AssertionError("singleton membership should not call torch.isin")
+
+    monkeypatch.setattr(torch, "isin", fail_isin)
+
+    result = membership_mask(torch.tensor([1, 2, 1, 3]), (1,))
+
+    assert result.tolist() == [True, False, True, False]
 
 
 def test_gather_by_mask_selects_rows_from_first_dimension():
