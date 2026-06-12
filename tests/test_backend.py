@@ -144,3 +144,31 @@ def test_q1_graph_execution_does_not_call_template(monkeypatch):
     rows = PyTorchBackend().execute(con, plan, device="cpu")
 
     assert [row["l_returnflag"] for row in rows] == ["A", "N"]
+
+
+def test_q1_graph_execution_uses_physical_plan_interpreter(monkeypatch):
+    import tpch_torch.backend.graph as graph_backend
+    from tpch_torch.frontend import compile_sirius_plan
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
+    calls = []
+    execute_physical_plan = graph_backend.execute_physical_plan
+
+    def tracked_execute_physical_plan(con_arg, graph, *, device="cpu"):
+        calls.append((graph.query_id, graph.root.kind, device))
+        return execute_physical_plan(con_arg, graph, device=device)
+
+    monkeypatch.setattr(graph_backend, "execute_physical_plan", tracked_execute_physical_plan)
+    monkeypatch.setattr(
+        graph_backend,
+        "_execute_q1_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("q1 direct primitive path used")),
+        raising=False,
+    )
+
+    rows = PyTorchBackend().execute(con, plan, device="cpu")
+
+    assert calls == [(1, OperatorKind.PROJECT, "cpu")]
+    assert [row["l_returnflag"] for row in rows] == ["A", "N"]

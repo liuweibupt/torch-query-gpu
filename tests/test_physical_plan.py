@@ -168,6 +168,29 @@ def test_physical_plan_executes_final_aggregate_expression():
     assert result.pytorch_rows == [{"ratio": 60.0}]
 
 
+def test_physical_plan_accepts_sum_no_overflow_aggregate_alias():
+    from tpch_torch.backend.physical import _aggregate_specs
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+    from tpch_torch.operator_graph import OperatorKind, TQPOperatorNode
+
+    node = TQPOperatorNode(
+        node_id="agg",
+        kind=OperatorKind.AGGREGATE,
+        name="PERFECT_HASH_GROUP_BY",
+        metadata={"Aggregates": ["sum_no_overflow(#0)"]},
+    )
+    child = PhysicalTable(
+        "input",
+        {"amount": PhysicalValue(torch.tensor([1, 2], dtype=torch.int64))},
+        ("amount",),
+        2,
+    )
+
+    specs = _aggregate_specs(node, child)
+
+    assert [(spec.function, spec.argument) for spec in specs] == [("sum", "#0")]
+
+
 @pytest.fixture(scope="module")
 def tpch_con_physical():
     con = duckdb.connect()

@@ -25,6 +25,7 @@ from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.relational import DATE_COLUMNS_EXTENDED
 
 _ROW_ID = "__rowid__"
+_AGGREGATE_FUNCTION_ALIASES = {"sum_no_overflow": "sum"}
 
 
 @dataclass(frozen=True)
@@ -350,14 +351,19 @@ def _aggregate_specs(node: TQPOperatorNode, child: PhysicalTable) -> tuple[_Aggr
         if raw.lower() == "count_star()":
             specs.append(_AggregateSpec("count_star", None, ("count_star()", "count(*)")))
             continue
-        match = re.fullmatch(r"(sum|avg|min|max|count)\((.*)\)", raw.strip(), re.I)
+        match = re.fullmatch(r"(sum_no_overflow|sum|avg|min|max|count)\((.*)\)", raw.strip(), re.I)
         if match is None:
             raise UnsupportedPlanError(f"unsupported aggregate expression: {raw}")
-        function = match.group(1).lower()
+        function = _canonical_aggregate_function(match.group(1))
         argument = match.group(2).strip()
         child_name = _child_name(child, argument)
         specs.append(_AggregateSpec(function, argument, aggregate_output_aliases(function, argument, child_name)))
     return tuple(specs)
+
+
+def _canonical_aggregate_function(function: str) -> str:
+    lowered = function.lower()
+    return _AGGREGATE_FUNCTION_ALIASES.get(lowered, lowered)
 
 
 def _child_name(child: PhysicalTable, argument: str) -> str | None:

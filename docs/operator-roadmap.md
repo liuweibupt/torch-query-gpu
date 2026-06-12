@@ -26,7 +26,7 @@ until a readable full paper/appendix is available.
 - Experimental strict frontend: original SQL → DuckDB native Substrait JSON →
   `TQPPlan`; no fabricated JSON and no frontend fallback.
 - Backend path: `TQPPlan` → PyTorch operators on CPU/CUDA.
-- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6 execute with direct graph primitives; Q12/Q14/Q19 now execute through a DuckDB physical-plan interpreter; the remaining complex Q2-Q22 shapes execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
+- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q12/Q14/Q19 execute through a DuckDB physical-plan interpreter; Q6 still uses a direct graph primitive; the remaining complex Q2-Q22 shapes execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
 - Current generic SQL status: single-table projection/filter/aggregate subset.
 
 ## Operator inventory from TQP (**verified**)
@@ -357,7 +357,7 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 - [x] First explicit operator graph inside `TQPPlan`.
 - [x] Replace Q2-Q22 compatibility execution with graph recipes built from common Join/Subquery/CTE/Aggregate nodes.
-- [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q12/Q14/Q19.
+- [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q1/Q12/Q14/Q19.
 - [ ] Replace remaining query-id graph recipes with physical-plan interpreter coverage for delimiter/mark/nested-loop/subquery/CTE nodes.
 - [ ] Fusion passes for map-reduce and projection/filter/aggregate chains.
 - [ ] Device/data-movement scheduler and metrics.

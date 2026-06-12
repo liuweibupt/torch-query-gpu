@@ -22,8 +22,8 @@ flowchart LR
     Graph --> Plan
     Plan --> Backend["PyTorchBackend"]
     Backend --> GraphExec["PyTorchGraphExecutor"]
-    GraphExec -->|Q1/Q6| Prim["direct graph primitives"]
-    GraphExec -->|Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter"]
+    GraphExec -->|Q1/Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter"]
+    GraphExec -->|Q6| Prim["Q6 direct primitive"]
     GraphExec -->|remaining Q2-Q22| Recipes["TPC-H graph recipes"]
     Recipes --> Nodes["common graph_nodes"]
     GraphExec -->|single-table generic subset| Generic["generic.py"]
@@ -42,9 +42,8 @@ flowchart LR
   from DuckDB `EXPLAIN (FORMAT JSON)`.
 - `OperatorKind.COMPILED_TPCH` roots are rejected; there is no compiled-template
   fallback path.
-- Q1/Q6 execute direct primitives in `tpch_torch/backend/graph.py`.
-- Q12/Q14/Q19 now execute through `tpch_torch/backend/physical*.py`, a
-  correctness-first interpreter for DuckDB JSON physical plan nodes.
+- Q1/Q12/Q14/Q19 execute through `tpch_torch/backend/physical*.py`, a correctness-first interpreter for DuckDB JSON physical plan nodes.
+- Q6 still uses a direct graph primitive in `tpch_torch/backend/graph.py`, including the optional compressed-mask path.
 - The remaining complex Q2-Q22 shapes execute `tpch_torch/backend/tpch_graph_qXX.py`
   graph recipes composed from reusable nodes in `tpch_torch/backend/graph_nodes.py`.
 - Non-TPC-H SQL first uses the explicit single-table generic subset where it applies;
@@ -60,7 +59,7 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | Compile original SQL into `TQPPlan`. |
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | Export DuckDB textual/JSON plans and lower JSON nodes to `TQPOperatorGraph`. |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | Immutable frontend/backend boundary. |
-| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q6 primitives, Q12/Q14/Q19 physical interpretation, remaining recipes, and generic SQL. |
+| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q12/Q14/Q19 physical interpretation, Q6 primitive execution, remaining recipes, and generic SQL. |
 | Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_expr_folding.py`, `physical_join.py`, `physical_sql.py`, `physical_types.py`, `static_dictionaries.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions; includes tensor join-index generation, membership folding, static dictionary encoding, and alias-deduplicated selection. |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan, filter, lookup join, semi/anti join, scalar subquery, grouped scalar subquery, CTE materialization, aggregate, sort/limit helpers. |
 | TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | Query-specific graph recipes for shapes not yet moved to the physical interpreter; do not call old `tpch_torch.queries.qXX` templates. |
@@ -91,7 +90,7 @@ DuckDB physical-plan interpretation is now a separate backend layer:
 
 ```python
 # tpch_torch/backend/graph.py
-if plan.query_id in {12, 14, 19}:
+if plan.query_id in {1, 12, 14, 19}:
     return execute_physical_plan(con, graph, device=device)
 ```
 
@@ -169,23 +168,21 @@ qualifying_suppkeys = torch.unique(partsupp.columns["ps_suppkey"][
 ])
 ```
 
-## Q1 graph primitive layering
+## Q1 physical interpreter layering
 
 ```mermaid
 flowchart TD
     Q1SQL["TPC-H Q1 SQL"] --> Frontend["DuckDB/Sirius-like frontend"]
     Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
-    Graph --> Fetch["fetch_lineitem_tensor_table"]
-    Fetch --> Filter["l_shipdate <= cutoff"]
-    Filter --> GroupID["dense group id"]
-    GroupID --> Reduce["torch.bincount sums/counts"]
-    Reduce --> Decode["decode low-cardinality keys"]
-    Decode --> Sort["ORDER BY returnflag, linestatus"]
+    Graph --> Physical["execute_physical_plan()"]
+    Physical --> Scan["SEQ_SCAN + scan filter"]
+    Scan --> Project["PROJECTION arithmetic exprs"]
+    Project --> Aggregate["PERFECT_HASH_GROUP_BY"]
+    Aggregate --> Sort["ORDER_BY returnflag, linestatus"]
     Sort --> Rows["result rows"]
 ```
 
-Q1 keeps the heavy scan/filter/group/reduce work in tensors. Only final grouped
-rows are decoded and materialized on the host.
+Q1 now uses the same physical interpreter boundary as migrated generic joins: DuckDB supplies the physical node graph, and `physical.py` executes scan/filter/project/group/sort with PyTorch tensors. Only final grouped rows are decoded and materialized on the host.
 
 ## SQL support boundary
 
@@ -194,7 +191,7 @@ PyTorch backend currently executes:
 
 ```text
 TPC-H Q1-Q22 via TQPOperatorGraph + PyTorch graph nodes
-Q12/Q14/Q19 via DuckDB physical-plan interpreter v1
+Q1/Q12/Q14/Q19 via DuckDB physical-plan interpreter v1
 generic equi-join and join+aggregate via DuckDB physical-plan interpreter v1
 single-table generic SELECT/WHERE/projection/aggregate/GROUP BY/ORDER BY/LIMIT
 ```
@@ -209,8 +206,8 @@ interpretation for those complex nodes.
 
 | Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | Backend shape |
 | --- | --- | --- | --- | --- |
-| Q1, Q6 | yes | yes | yes | direct graph primitives |
-| Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 |
+| Q1, Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 |
+| Q6 | yes | yes | yes | direct graph primitive with optional compressed masks |
 | Q3, Q5, Q7, Q8, Q9, Q10, Q11, Q13, Q15, Q18 | yes | yes | yes | graph recipes |
 | Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | blocked in DuckDB 1.2.x Substrait export | yes | graph recipes |
 
