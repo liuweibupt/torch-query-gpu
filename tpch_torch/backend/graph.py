@@ -8,6 +8,7 @@ import duckdb
 import torch
 
 from tpch_torch.backend.generic import execute_generic_sql_plan
+from tpch_torch.backend.physical import execute_physical_plan
 from tpch_torch.compressed import PlainMask, RLEMask, mask_and, mask_to_index, plain_to_rle
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.ir import TQPPlan
@@ -47,10 +48,12 @@ class PyTorchGraphExecutor:
         plan: TQPPlan,
         device: str,
     ) -> list[dict[str, Any]]:
-        if plan.generic_plan is None:
-            detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
-            raise UnsupportedPlanError(f"generic SQL is not executable by PyTorch backend: {detail}")
-        return execute_generic_sql_plan(con, plan.generic_plan, device=device)
+        if plan.generic_plan is not None:
+            return execute_generic_sql_plan(con, plan.generic_plan, device=device)
+        if plan.operator_graph is not None:
+            return execute_physical_plan(con, plan.operator_graph, device=device)
+        detail = plan.generic_error or "generic SQL plan is missing executable operator plan"
+        raise UnsupportedPlanError(f"generic SQL is not executable by PyTorch backend: {detail}")
 
     def _execute_tpch_graph(
         self,
@@ -67,6 +70,8 @@ class PyTorchGraphExecutor:
             return _execute_q1_graph(con, plan, device)
         if plan.query_id == 6:
             return _execute_q6_graph(con, device, use_compressed_masks)
+        if plan.query_id in {12, 14, 19}:
+            return execute_physical_plan(con, graph, device=device)
         return _execute_tpch_graph_query(con, plan, device)
 
 

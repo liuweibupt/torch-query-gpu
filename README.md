@@ -16,9 +16,10 @@
 - ✅ Generic SQL subset 已支持单表 projection/filter/aggregate/order/limit。
 - ✅ Q1/Q6 已迁到真实 graph primitive root：预编码低基数字符串列、dense group id、`torch.bincount`、Plain/RLE/Index mask。
 - ✅ Q2-Q22 已从旧 `queries/qXX` 模板调用迁到 `backend/tpch_graph_qXX` graph recipes，并组合通用 `graph_nodes`：Scan、LookupJoin、SemiJoin、AntiJoin、ScalarSubquery、GroupedScalarSubquery、MaterializedCTE、Aggregate。
+- ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q12/Q14/Q19 已迁到该通用 interpreter，不再走 query-id recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
-- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；TPC-H Q1-Q22 都会先 lowering 成显式 graph 并进入 PyTorch graph-node path。任意 SQL join/subquery 的 DuckDB physical-plan interpreter 仍在 Roadmap。
+- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes，但复杂 subquery/CTE/window/set operation/HAVING 仍显式失败。
 
 ## 一图看懂架构
 
@@ -34,11 +35,14 @@ flowchart LR
     IR --> Backend["PyTorchBackend"]
     Backend --> GraphExec["PyTorchGraphExecutor.forward-like execute"]
     GraphExec -->|Q1/Q6| Primitives["Scan / Filter / Aggregate / Sort primitives"]
-    GraphExec -->|Q2-Q22| Recipes["TPC-H graph recipes<br/>backend/tpch_graph_qXX.py"]
-    GraphExec -->|Generic SQL subset| Generic["tpch_torch/backend/generic.py"]
-    Recipes --> Nodes["Common graph_nodes<br/>LookupJoin · Semi/AntiJoin · ScalarSubquery · CTE · Aggregate"]
+    GraphExec -->|Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter<br/>backend/physical*.py"]
+    GraphExec -->|remaining Q2-Q22| Recipes["TPC-H graph recipes<br/>backend/tpch_graph_qXX.py"]
+    GraphExec -->|single-table generic subset| Generic["tpch_torch/backend/generic.py"]
+    Physical --> Nodes["Physical tensor nodes<br/>Scan · Filter · Project · Join · Aggregate · Sort/TopN"]
+    Recipes --> Nodes2["Common graph_nodes<br/>LookupJoin · Semi/AntiJoin · ScalarSubquery · CTE · Aggregate"]
     Primitives --> Torch["PyTorch Tensor Operators<br/>CPU / CUDA"]
     Nodes --> Torch
+    Nodes2 --> Torch
     Generic --> Torch
     Torch --> Rows["Result Rows"]
     Rows -. correctness only .-> DuckDB["DuckDB baseline validation<br/>not a fallback"]
@@ -52,9 +56,9 @@ flowchart LR
 | Runner | `tpch_torch/runner.py` | 读取 SQL，编译 `TQPPlan`，调用后端，validation 时比较 DuckDB baseline。 |
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
 | IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
-| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；不执行 compiled TPC-H fallback root。 |
-| TPC-H graph recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | Q2-Q22 的显式 graph recipe；不调用旧 `tpch_torch.queries.qXX`，只组合通用 graph nodes 与 tensor ops。 |
-| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/operators.py`, `tpch_torch/compressed.py` | Scan、filter、lookup/hash join、semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、top-k、Plain/RLE/Index mask 原型。 |
+| Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py`, `tpch_torch/backend/physical*.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q12/Q14/Q19 与 generic joins 可由 DuckDB physical-plan interpreter 执行；不执行 compiled TPC-H fallback root。 |
+| TPC-H graph recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | 尚未迁入 physical interpreter 的 TPC-H 显式 graph recipe；不调用旧 `tpch_torch.queries.qXX`，只组合通用 graph nodes 与 tensor ops。 |
+| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed.py` | Scan、filter、project、lookup/hash/equi join、semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask 原型。 |
 
 ## Q1 是怎么实现的
 
@@ -162,7 +166,12 @@ tpch-torch-run \
   --device cuda
 ```
 
-当前 generic SQL subset：
+当前 generic SQL 支持分两层：
+
+1. `backend/generic.py`：单表 SQL parser/executor。
+2. `backend/physical.py`：DuckDB JSON physical-plan interpreter v1，直接解释 DuckDB plan nodes。
+
+已支持：
 
 ```text
 single-table SELECT
@@ -172,6 +181,11 @@ COUNT(*), COUNT(col), SUM, MIN, MAX, AVG
 simple GROUP BY
 ORDER BY output columns ASC / DESC
 LIMIT
+DuckDB physical SEQ_SCAN / FILTER / PROJECTION
+DuckDB physical HASH_JOIN inner equi-join（correctness-first）
+DuckDB physical HASH_GROUP_BY / PERFECT_HASH_GROUP_BY / UNGROUPED_AGGREGATE
+DuckDB physical ORDER_BY / TOP_N / LIMIT
+final aggregate expression alias，例如 100 * sum(x) / sum(y)
 ```
 
 ### 验证全部 TPC-H
@@ -258,12 +272,27 @@ tpch-torch-benchmark \
 - **CUDA**：每个样本前后调用 `torch.cuda.synchronize()`，报告 wall-clock ms，因此包含 CPU 侧 frontend/fetch/materialization 与 GPU work。
 - Benchmark 不做 DuckDB validation；正确性请单独运行 `tpch-torch-validate`。
 
+### 最近一次 Q1 性能对比（SF=1）
+
+同一台机器（CPU + RTX 4090），命令均为 `--cold-runs 3 --warmup-runs 3 --hot-runs 10 --frontend sirius`。计时为端到端 wall-clock，包含 DuckDB frontend、tensor fetch/encoding、PyTorch 执行和结果 materialization；未刷新 OS page cache。
+
+| 版本 | device | cold median | hot median | 变化（hot median） |
+| --- | --- | ---: | ---: | ---: |
+| `c8b3bd9`（full graph recipes merge 前） | CPU | 794.123 ms | 794.571 ms | baseline |
+| 当前 physical-interpreter 分支 | CPU | 973.831 ms | 904.851 ms | +13.9% |
+| `c8b3bd9`（full graph recipes merge 前） | CUDA | 675.461 ms | 650.313 ms | baseline |
+| 当前 physical-interpreter 分支 | CUDA | 745.996 ms | 703.522 ms | +8.2% |
+
+Q1 本轮没有改主算子路径；差异主要来自本次端到端重复测量的系统噪声、frontend/导入开销和同机负载，需用更多 repeats 或固定 CPU/GPU 状态做更严格的 micro-benchmark。
+
 ## TPC-H 支持矩阵
 
-| Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend |
-| --- | --- | --- | --- |
-| Q1, Q3, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15, Q18, Q19 | yes | yes | yes |
-| Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | DuckDB 1.2.x exporter blocked | yes |
+| Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
+| --- | --- | --- | --- | --- |
+| Q1, Q6 | yes | yes | yes | direct graph primitives |
+| Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 |
+| Q3, Q5, Q7, Q8, Q9, Q10, Q11, Q13, Q15, Q18 | yes | yes | yes | TPC-H graph recipes |
+| Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | DuckDB 1.2.x exporter blocked | yes | TPC-H graph recipes |
 
 说明：strict Substrait 的 blocked 是 DuckDB 原生 exporter 覆盖限制，不代表 PyTorch backend 没有这些查询的 executor。默认 Sirius-like 路径下 Q1-Q22 都先 lowering 到 `TQPOperatorGraph` 再进入 PyTorch backend。
 
@@ -281,11 +310,13 @@ tpch-torch-benchmark \
 - [x] Batch 1 primitives：grouped min/max/mean、mask helpers、top-k、首批 RLE mask primitives。
 - [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
 - [x] Q1/Q6 已迁出 backend 模板分发，使用真实 graph primitive root + columnar fetch / dense grouped reductions / compressed mask 原型。
-- [ ] Generic joins、subquery lowering、`HAVING`、`CASE`。
+- [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
+- [ ] Generic subquery lowering、`HAVING`、window、set operations。
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
 - [x] 第一版显式 `TQPOperatorGraph` 与 DuckDB JSON lowering。
 - [x] Q2-Q22 graph recipes 已组合通用 Join/Subquery/CTE/Aggregate graph nodes，不再调用旧查询模板。
-- [ ] 将 query-id recipe dispatch 进一步替换为 DuckDB physical-plan interpreter，支持任意 SQL join/subquery 自动 lowering。
+- [x] Q12/Q14/Q19 已从 query-id recipe 迁到 DuckDB physical-plan interpreter。
+- [ ] 继续将剩余 Q2-Q22 recipes 迁到 DuckDB physical-plan interpreter，覆盖 subquery/CTE/delim/mark/nested-loop 等节点。
 - [ ] fusion、scheduling、compiler lowering。
 
 ## 文档导航

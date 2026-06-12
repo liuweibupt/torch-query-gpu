@@ -26,7 +26,7 @@ until a readable full paper/appendix is available.
 - Experimental strict frontend: original SQL → DuckDB native Substrait JSON →
   `TQPPlan`; no fabricated JSON and no frontend fallback.
 - Backend path: `TQPPlan` → PyTorch operators on CPU/CUDA.
-- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6 execute with direct graph primitives; Q2-Q22 execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
+- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6 execute with direct graph primitives; Q12/Q14/Q19 now execute through a DuckDB physical-plan interpreter; the remaining complex Q2-Q22 shapes execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
 - Current generic SQL status: single-table projection/filter/aggregate subset.
 
 ## Operator inventory from TQP (**verified**)
@@ -71,11 +71,13 @@ until a readable full paper/appendix is available.
 - [x] Bitmap-style filter masks for current TPC-H executors.
 - [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
 - [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
-- [ ] Generic projection operator with expression-tree lowering.
+- [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, internal compress/decompress wrappers.
+- [ ] Full generic projection operator with SQL parser-level expression-tree lowering.
 - [x] First Batch 2 step: generic stable multi-key `ORDER BY` with `ASC`/`DESC`.
 - [ ] Generic sort-based equi-join using sort, histograms, prefix sums,
       `bucketize`, quotient/remainder output-index generation.
-- [ ] Generic hash equi-join using hash buckets, scatter, probe, collision
+- [x] Correctness-first generic inner equi-join through DuckDB physical `HASH_JOIN`.
+- [ ] Generic hash equi-join fast path using hash buckets, scatter, probe, collision
       iteration, and duplicate accumulation.
 - [ ] Join variants: non-equi, left outer, left semi, left anti.
 - [ ] Sort-based group-by aggregation using concatenated keys, sort,
@@ -318,8 +320,10 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 ### Batch 3: generic joins and subquery lowering
 
-- [ ] PK/FK lookup join as the first generic join.
-- [ ] Hash equi-join producing late-materialized index pairs.
+- [x] Correctness-first generic inner equi-join through DuckDB physical `HASH_JOIN`.
+- [ ] PK/FK lookup join fast path as an optimized generic join variant.
+- [x] Physical-plan inner equi-join produces tensor row-index pairs before payload materialization.
+- [ ] GPU hash equi-join producing late-materialized index pairs.
 - [ ] Semi/anti joins.
 - [ ] Mark/delimiter-style subquery patterns needed by TPC-H shapes.
 
@@ -342,7 +346,8 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 - [x] First explicit operator graph inside `TQPPlan`.
 - [x] Replace Q2-Q22 compatibility execution with graph recipes built from common Join/Subquery/CTE/Aggregate nodes.
-- [ ] Replace query-id graph recipes with a DuckDB physical-plan interpreter for arbitrary supported joins/subqueries.
+- [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q12/Q14/Q19.
+- [ ] Replace remaining query-id graph recipes with physical-plan interpreter coverage for delimiter/mark/nested-loop/subquery/CTE nodes.
 - [ ] Fusion passes for map-reduce and projection/filter/aggregate chains.
 - [ ] Device/data-movement scheduler and metrics.
 - [ ] Torch compile / Antares / alternative compiler experiments.

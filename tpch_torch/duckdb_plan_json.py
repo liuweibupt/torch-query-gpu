@@ -17,6 +17,7 @@ def export_duckdb_physical_plan_json(con: duckdb.DuckDBPyConnection, sql: str) -
     """Return DuckDB's structured physical plan for the original SQL."""
 
     try:
+        con.execute("PRAGMA explain_output='physical_only'")
         rows = con.execute(f"EXPLAIN (FORMAT JSON) {sql}").fetchall()
     except duckdb.Error as exc:
         raise DuckDBPlannerError(f"DuckDB JSON EXPLAIN failed: {exc}") from exc
