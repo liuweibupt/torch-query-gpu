@@ -58,9 +58,9 @@ class PyTorchGraphExecutor:
         root = graph.root
         if root.kind == OperatorKind.COMPILED_TPCH:
             raise UnsupportedPlanError("compiled TPC-H compatibility roots are no longer executable")
-        if plan.query_id == 6:
+        if plan.query_id == 6 and use_compressed_masks:
             return _execute_q6_graph(con, device, use_compressed_masks)
-        if plan.query_id in {1, 12, 14, 19}:
+        if plan.query_id in {1, 6, 12, 14, 19}:
             return execute_physical_plan(con, graph, device=device)
         return _execute_tpch_graph_query(con, plan, device)
 

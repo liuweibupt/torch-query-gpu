@@ -22,8 +22,8 @@ flowchart LR
     Graph --> Plan
     Plan --> Backend["PyTorchBackend"]
     Backend --> GraphExec["PyTorchGraphExecutor"]
-    GraphExec -->|Q1/Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter"]
-    GraphExec -->|Q6| Prim["Q6 direct primitive"]
+    GraphExec -->|Q1/Q6/Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter"]
+    GraphExec -->|Q6 --compressed-masks| Prim["Q6 compressed mask experiment"]
     GraphExec -->|remaining Q2-Q22| Recipes["TPC-H graph recipes"]
     Recipes --> Nodes["common graph_nodes"]
     GraphExec -->|single-table generic subset| Generic["generic.py"]
@@ -42,8 +42,8 @@ flowchart LR
   from DuckDB `EXPLAIN (FORMAT JSON)`.
 - `OperatorKind.COMPILED_TPCH` roots are rejected; there is no compiled-template
   fallback path.
-- Q1/Q12/Q14/Q19 execute through `tpch_torch/backend/physical*.py`, a correctness-first interpreter for DuckDB JSON physical plan nodes.
-- Q6 still uses a direct graph primitive in `tpch_torch/backend/graph.py`, including the optional compressed-mask path.
+- Q1/Q6/Q12/Q14/Q19 execute through `tpch_torch/backend/physical*.py`, a correctness-first interpreter for DuckDB JSON physical plan nodes.
+- Q6 defaults to the physical interpreter; `--compressed-masks` remains an explicit compressed-mask primitive experiment in `tpch_torch/backend/graph.py`.
 - The remaining complex Q2-Q22 shapes execute `tpch_torch/backend/tpch_graph_qXX.py`
   graph recipes composed from reusable nodes in `tpch_torch/backend/graph_nodes.py`.
 - Non-TPC-H SQL first uses the explicit single-table generic subset where it applies;
@@ -59,7 +59,7 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | Compile original SQL into `TQPPlan`. |
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | Export DuckDB textual/JSON plans and lower JSON nodes to `TQPOperatorGraph`. |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | Immutable frontend/backend boundary. |
-| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q12/Q14/Q19 physical interpretation, Q6 primitive execution, remaining recipes, and generic SQL. |
+| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1/Q6/Q12/Q14/Q19 physical interpretation, Q6 compressed-mask primitive experiment, remaining recipes, and generic SQL. |
 | Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_expr_folding.py`, `physical_join.py`, `physical_sql.py`, `physical_types.py`, `static_dictionaries.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions; includes tensor join-index generation, membership folding, static dictionary encoding, and alias-deduplicated selection. |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan, filter, lookup join, semi/anti join, scalar subquery, grouped scalar subquery, CTE materialization, aggregate, sort/limit helpers. |
 | TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | Query-specific graph recipes for shapes not yet moved to the physical interpreter; do not call old `tpch_torch.queries.qXX` templates. |
@@ -191,7 +191,7 @@ PyTorch backend currently executes:
 
 ```text
 TPC-H Q1-Q22 via TQPOperatorGraph + PyTorch graph nodes
-Q1/Q12/Q14/Q19 via DuckDB physical-plan interpreter v1
+Q1/Q6/Q12/Q14/Q19 via DuckDB physical-plan interpreter v1
 generic equi-join and join+aggregate via DuckDB physical-plan interpreter v1
 single-table generic SELECT/WHERE/projection/aggregate/GROUP BY/ORDER BY/LIMIT
 ```
@@ -206,8 +206,8 @@ interpretation for those complex nodes.
 
 | Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | Backend shape |
 | --- | --- | --- | --- | --- |
-| Q1, Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 |
-| Q6 | yes | yes | yes | direct graph primitive with optional compressed masks |
+| Q1, Q6, Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 by default |
+| Q6 `--compressed-masks` | yes | yes | yes | explicit compressed-mask primitive experiment |
 | Q3, Q5, Q7, Q8, Q9, Q10, Q11, Q13, Q15, Q18 | yes | yes | yes | graph recipes |
 | Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | blocked in DuckDB 1.2.x Substrait export | yes | graph recipes |
 

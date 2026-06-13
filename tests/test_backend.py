@@ -17,6 +17,22 @@ FIXTURE_ROWS = [
     ("A", "F", 5.0, 50.0, 0.00, 0.08, "1998-01-01"),
 ]
 
+Q6_FIXTURE_ROWS = [
+    ("N", "O", 10.0, 100.0, 0.05, 0.10, "1994-01-01"),
+    ("N", "O", 23.0, 200.0, 0.07, 0.20, "1994-12-31"),
+    ("A", "F", 24.0, 300.0, 0.06, 0.08, "1994-06-01"),
+]
+
+TPC_H_Q6_SQL = """
+select
+    sum(l_extendedprice * l_discount) as revenue
+from lineitem
+where l_shipdate >= date '1994-01-01'
+  and l_shipdate < date '1995-01-01'
+  and l_discount between 0.05 and 0.07
+  and l_quantity < 24
+""".strip()
+
 
 def _compiled_tpch_graph(query_id: int, sql: str) -> TQPOperatorGraph:
     node = TQPOperatorNode(
@@ -97,6 +113,33 @@ def test_pytorch_backend_passes_compressed_mask_option_to_q6(monkeypatch):
 
     assert rows == [{"revenue": 6.0}]
     assert calls == [("l_discount", "l_extendedprice", "l_quantity", "l_shipdate")]
+
+
+def test_q6_default_graph_execution_uses_physical_plan_interpreter(monkeypatch):
+    import tpch_torch.backend.graph as graph_backend
+    from tpch_torch.frontend import compile_sirius_plan
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, Q6_FIXTURE_ROWS)
+    plan = compile_sirius_plan(con, TPC_H_Q6_SQL)
+    calls = []
+    execute_physical_plan = graph_backend.execute_physical_plan
+
+    def tracked_execute_physical_plan(con_arg, graph, *, device="cpu"):
+        calls.append((graph.query_id, graph.root.kind, device))
+        return execute_physical_plan(con_arg, graph, device=device)
+
+    monkeypatch.setattr(graph_backend, "execute_physical_plan", tracked_execute_physical_plan)
+    monkeypatch.setattr(
+        graph_backend,
+        "_execute_q6_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("q6 direct primitive path used")),
+    )
+
+    rows = PyTorchBackend().execute(con, plan, device="cpu")
+
+    assert calls == [(6, OperatorKind.AGGREGATE, "cpu")]
+    assert rows == [{"revenue": 19.0}]
 
 
 def test_pytorch_backend_executes_tpch_through_operator_graph(monkeypatch):
