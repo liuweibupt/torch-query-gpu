@@ -220,6 +220,22 @@ def test_q1_physical_plan_uses_graph_lowered_fusion(monkeypatch):
     assert calls == [(1, plan.operator_graph.root.kind, "cpu")]
 
 
+def test_q1_fused_physical_plan_matches_duckdb_fixture_without_generic_unique(monkeypatch):
+    con = duckdb.connect()
+    create_lineitem_fixture(con, Q1_FIXTURE_ROWS)
+
+    def fail_unique(*_args, **_kwargs):
+        raise AssertionError("Q1 fused grouping should use dense ids, not generic torch.unique")
+
+    monkeypatch.setattr(torch, "unique", fail_unique)
+
+    result = validate_sql_with_frontend(con, TPC_H_Q1_SQL, device="cpu", frontend="sirius")
+
+    assert result.query_id == 1
+    assert result.max_abs_error == 0.0
+    assert [row["l_returnflag"] for row in result.pytorch_rows] == ["A", "N"]
+
+
 @pytest.fixture(scope="module")
 def tpch_con_physical():
     con = duckdb.connect()
