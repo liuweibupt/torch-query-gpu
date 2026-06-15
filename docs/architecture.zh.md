@@ -15,14 +15,11 @@ flowchart LR
     Graph --> Plan
     Plan --> Backend["PyTorchBackend"]
     Backend --> GraphExec["PyTorchGraphExecutor"]
-    GraphExec -->|Q1/Q6/Q12/Q14/Q19 + generic joins| Physical["DuckDB physical-plan interpreter"]
+    GraphExec -->|Q1-Q22 + generic joins| Physical["DuckDB physical-plan interpreter"]
     GraphExec -->|Q6 --compressed-masks| Prim["Q6 compressed mask 实验"]
-    GraphExec -->|剩余 Q2-Q22| Recipes["TPC-H graph recipes"]
-    Recipes --> Nodes["通用 graph_nodes"]
     GraphExec -->|单表 generic subset| Generic["generic.py"]
     Physical --> PhysNodes["physical tensor nodes"]
     Prim --> Torch["PyTorch tensor ops<br/>CPU / CUDA"]
-    Nodes --> Torch
     PhysNodes --> Torch
     Generic --> Torch
     Torch --> Rows["结果 rows"]
@@ -33,9 +30,9 @@ flowchart LR
 
 - TPC-H Q1-Q22 都必须携带 DuckDB JSON lowering 出来的真实 `TQPOperatorGraph` root。
 - `OperatorKind.COMPILED_TPCH` root 会被拒绝；不再有 compiled/template fallback。
-- Q1/Q6/Q12/Q14/Q19 已迁入 `tpch_torch/backend/physical*.py`，由 DuckDB JSON physical-plan interpreter 直接解释执行。
+- Q1-Q22 已迁入 `tpch_torch/backend/physical*.py`，由 DuckDB JSON physical-plan interpreter 直接解释执行。
 - Q6 默认也走 physical interpreter；`--compressed-masks` 在 `tpch_torch/backend/graph.py` 中保留为显式 compressed-mask primitive 实验路径。
-- 剩余复杂 Q2-Q22 仍在 `tpch_torch/backend/tpch_graph_qXX.py` 中作为显式 graph recipe 执行，并组合 `tpch_torch/backend/graph_nodes.py` 的通用节点。
+- Q1-Q22 现在均由 DuckDB JSON physical-plan interpreter 执行；`tpch_graph_qXX` 模块保留作历史对照，不再是默认执行路径。
 - 非 TPC-H SQL 先使用显式单表 generic SQL subset；join 和 join+aggregate 形状由 physical-plan interpreter 执行。不支持的 SQL shape 抛出 `UnsupportedPlanError`。
 
 ## 3. 模块分层
@@ -47,10 +44,9 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`。 |
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 `TQPOperatorGraph`。 |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | 不可变前后端边界。 |
-| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1/Q6/Q12/Q14/Q19 physical interpreter、Q6 compressed-mask primitive 实验、剩余 recipes、generic SQL。 |
-| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_expr_folding.py`, `physical_join.py`, `physical_sql.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、membership folding、static dictionary encoding 和 alias 去重 selection。 |
+| Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1-Q22 physical interpreter、显式 Q6 compressed-mask primitive 实验和 generic SQL。 |
+| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner 与 multi-column equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、membership folding、static dictionary encoding 和 alias 去重 selection。 |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan、filter、lookup join、semi/anti join、scalar subquery、grouped scalar subquery、CTE materialization、aggregate、sort/limit helpers。 |
-| TPC-H recipes | `tpch_torch/backend/tpch_graph_q02.py` ... `q22.py` | 尚未迁入 physical interpreter 的 query-specific graph recipe；不调用旧 `tpch_torch.queries.qXX` 模板。 |
 | Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | grouped reductions、dense group id、top-k、Plain/RLE/Index mask 原型。 |
 
 ## 4. 关键代码片段
@@ -78,7 +74,7 @@ DuckDB physical-plan interpreter 已成为独立后端层：
 
 ```python
 # tpch_torch/backend/graph.py
-if plan.query_id in {1, 6, 12, 14, 19}:
+if plan.query_id in _PHYSICAL_TPCH_QUERIES:  # Q1-Q22
     return execute_physical_plan(con, graph, device=device)
 ```
 
@@ -175,21 +171,19 @@ Sirius-like 前端能接收 DuckDB 可解析和计划的 SQL；PyTorch 后端当
 
 ```text
 TPC-H Q1-Q22：TQPOperatorGraph + PyTorch graph nodes
-Q1/Q6/Q12/Q14/Q19：DuckDB physical-plan interpreter v1
+Q1-Q22：DuckDB physical-plan interpreter v1
 generic equi-join 与 join+aggregate：DuckDB physical-plan interpreter v1
 generic SQL：single-table SELECT / WHERE / projection / aggregate / GROUP BY / ORDER BY / LIMIT
 ```
 
-Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。Generic subqueries、windows、set operations、HAVING，以及复杂 DuckDB delimiter/mark/nested-loop subquery plans 仍显式失败。下一步架构目标是继续用 physical-plan interpreter 替换剩余 query-id recipes。
+Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。TPC-H 所需的 delimiter/mark/nested-loop/subquery/CTE 形状已经覆盖到 correctness-first 级别；更一般的 generic subqueries、windows、set operations、HAVING 仍显式失败。
 
 ## 7. TPC-H 支持矩阵
 
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
 | --- | --- | --- | --- | --- |
-| Q1, Q6, Q12, Q14, Q19 | yes | yes | yes | DuckDB physical-plan interpreter v1 by default |
+| Q1-Q22 | yes | 部分；DuckDB 1.2.x exporter 仍阻塞若干复杂查询 | yes | DuckDB physical-plan interpreter v1 by default |
 | Q6 `--compressed-masks` | yes | yes | yes | explicit compressed-mask primitive experiment |
-| Q3, Q5, Q7, Q8, Q9, Q10, Q11, Q13, Q15, Q18 | yes | yes | yes | graph recipes |
-| Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | DuckDB 1.2.x exporter blocked | yes | graph recipes |
 
 Strict Substrait 的 blocked 是 DuckDB exporter 覆盖限制，不是 PyTorch backend fallback。
 

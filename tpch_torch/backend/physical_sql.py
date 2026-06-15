@@ -10,12 +10,12 @@ _AGGREGATE_NAMES = frozenset({"sum", "avg", "min", "max", "count"})
 def select_expressions_by_alias(sql: str) -> dict[str, str]:
     """Map SELECT aliases to their source expressions without executing SQL."""
 
-    select_body = _select_body(sql)
     mapping: dict[str, str] = {}
-    for item in _split_csv(select_body):
-        expression, alias = _split_alias(item)
-        if alias is not None:
-            mapping[alias] = expression
+    for select_body in _select_bodies(sql):
+        for item in _split_csv(select_body):
+            expression, alias = _split_alias(item)
+            if alias is not None:
+                mapping[alias] = expression
     return mapping
 
 
@@ -46,6 +46,22 @@ def _select_body(sql: str) -> str:
     start = match.end()
     end = _find_top_level_keyword(normalized, "FROM", start)
     return normalized[start:end].strip() if end >= 0 else normalized[start:].strip()
+
+
+def _select_bodies(sql: str) -> tuple[str, ...]:
+    bodies = []
+    normalized = sql.strip().rstrip(";")
+    for start in _keyword_positions(normalized, "SELECT"):
+        end = _find_top_level_keyword(normalized, "FROM", start + len("SELECT"))
+        if end >= 0:
+            bodies.append(normalized[start + len("SELECT") : end].strip())
+    return tuple(bodies) or (_select_body(sql),)
+
+
+def _keyword_positions(sql: str, keyword: str):
+    for index in range(len(sql)):
+        if _keyword_at(sql, keyword, index):
+            yield index
 
 
 def _split_alias(item: str) -> tuple[str, str | None]:

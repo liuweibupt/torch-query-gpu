@@ -21,7 +21,7 @@
 
 - 默认链路：原始 SQL → DuckDB/Sirius-like planner admission → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
-- TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1/Q6/Q12/Q14/Q19 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；剩余复杂 Q2-Q22 仍由通用 Join/Subquery/CTE/Aggregate graph nodes 组合的 graph recipes 执行。
+- TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1-Q22 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；历史 graph recipes 不再是默认执行路径。
 - Generic SQL：单表 projection/filter/aggregate/order/limit 子集。
 - 压缩执行：已有 Plain/RLE/Index mask 原型，Q6 可通过 `--compressed-masks` 显式开启。
 
@@ -58,7 +58,7 @@
 - [x] 当前 TPC-H executor 的 bitmap-style filter masks。
 - [x] Generic SQL boolean filter tree：`AND` / `OR` / `NOT`。
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
-- [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、`CASE`、`prefix`/`contains`/`suffix`、internal compress/decompress wrappers。
+- [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、`CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。
@@ -250,6 +250,8 @@
 - [ ] PK/FK lookup join fast path 作为优化版 generic join。
 - [x] Physical-plan inner equi-join 先产生 tensor row-index pairs，再物化 payload columns。
 - [x] Sorted unique build-side physical join fast path。
+- [x] Multi-column physical equi-join：通过 composite tensor key 执行多列等值连接。
+- [x] Parent-required join-key retention：为后续 physical join 保留仍会被父节点引用的 join key。
 - [ ] GPU hash equi-join fast path：buckets / probe / collision handling。
 - [ ] Semi/anti joins。
 - [ ] TPC-H 形状所需的 mark/delimiter-style subquery patterns。
@@ -273,9 +275,10 @@
 
 - [x] 第一版 `TQPPlan.operator_graph` 与 DuckDB JSON physical plan lowering。
 - [x] 将 Q2-Q22 兼容执行器拆成由通用 Join/Subquery/CTE/Aggregate nodes 组合的 graph recipes。
-- [x] DuckDB physical-plan interpreter v1：generic joins/aggregates 与 TPC-H Q1/Q6/Q12/Q14/Q19。
-- [x] 新增 physical-only TPC-H coverage probe，用于跟踪自动算子迁移进度。
-- [ ] 继续用 physical-plan interpreter 替换剩余 query-id recipes，覆盖 delimiter/mark/nested-loop/subquery/CTE nodes。
+- [x] DuckDB physical-plan interpreter v1：generic joins/aggregates 与 TPC-H Q1-Q22。
+- [x] 覆盖 TPC-H Q2-Q22 所需 delimiter/mark/nested-loop/subquery/CTE physical nodes。
+- [x] nested SELECT alias 与 aggregate ORDER BY alias normalization，用于 physical projection lowering。
+- [x] 新增 physical-only TPC-H coverage probe，用于跟踪自动算子迁移进度；当前 Q1-Q22 全部 supported。
 - [x] 第一批 graph-lowered fusion：Q1 scan/filter/project/group/order fused dense grouped reductions。
 - [ ] 更多 projection/filter/aggregate/map-reduce chains 的 fusion passes。
 - [ ] Device/data-movement scheduler and metrics。

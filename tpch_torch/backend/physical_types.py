@@ -19,6 +19,7 @@ class PhysicalValue:
     dictionary: tuple[str, ...] | None = None
     is_date: bool = False
     literal: int | float | str | bool | None = None
+    valid: torch.Tensor | None = None
 
     @property
     def is_literal(self) -> bool:
@@ -30,20 +31,38 @@ class PhysicalValue:
         return self.tensor
 
     def gather(self, indices: torch.Tensor) -> "PhysicalValue":
+        valid = None if self.valid is None else self.valid.index_select(0, indices)
         return PhysicalValue(
             tensor=self.require_tensor().index_select(0, indices),
             dictionary=self.dictionary,
             is_date=self.is_date,
+            valid=valid,
+        )
+
+    def gather_optional(self, indices: torch.Tensor, valid: torch.Tensor) -> "PhysicalValue":
+        if valid.dtype is not torch.bool:
+            raise TypeError("optional gather validity mask must be boolean")
+        safe_indices = torch.where(valid, indices, torch.zeros_like(indices))
+        base_valid = self.valid.index_select(0, safe_indices) if self.valid is not None else valid
+        return PhysicalValue(
+            tensor=self.require_tensor().index_select(0, safe_indices),
+            dictionary=self.dictionary,
+            is_date=self.is_date,
+            valid=base_valid & valid,
         )
 
     def filter(self, mask: torch.Tensor) -> "PhysicalValue":
+        valid = None if self.valid is None else self.valid[mask]
         return PhysicalValue(
             tensor=self.require_tensor()[mask],
             dictionary=self.dictionary,
             is_date=self.is_date,
+            valid=valid,
         )
 
     def cell(self, index: int) -> Any:
+        if self.valid is not None and not bool(self.valid[index].cpu().item()):
+            return None
         raw = self.require_tensor()[index].cpu().item()
         if self.dictionary is not None:
             return self.dictionary[int(raw)]
@@ -80,6 +99,9 @@ class PhysicalTable:
         for candidate in candidates:
             if candidate in self.columns:
                 return self.columns[candidate]
+        unique_match = _unique_base_match(self.columns, candidates)
+        if unique_match is not None:
+            return self.columns[unique_match]
         raise KeyError(f"unknown physical column: {name}")
 
     def filter(self, mask: torch.Tensor, name: str | None = None) -> "PhysicalTable":
@@ -118,7 +140,10 @@ class PhysicalTable:
             columns[column_name] = value
             order.append(column_name)
             for alias in aliases:
-                columns.setdefault(alias, value)
+                if _is_projection_position(alias):
+                    columns[alias] = value
+                else:
+                    columns.setdefault(alias, value)
         return cls(name, columns, tuple(order), row_count)
 
 
@@ -172,3 +197,25 @@ def _unique_name(name: str, columns: Mapping[str, PhysicalValue], index: int) ->
     if name not in columns:
         return name
     return f"{name}__{index}"
+
+
+def _unique_base_match(columns: Mapping[str, PhysicalValue], candidates: tuple[str, ...]) -> str | None:
+    matches = [
+        name
+        for name in columns
+        if any(_base_name(name) == _base_name(candidate) for candidate in candidates)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _base_name(name: str) -> str:
+    return _strip_unique_suffix(name.replace('"', "").strip().rsplit(".", 1)[-1])
+
+
+def _strip_unique_suffix(name: str) -> str:
+    base, separator, suffix = name.rpartition("__")
+    return base if separator and suffix.isdigit() else name
+
+
+def _is_projection_position(name: str) -> bool:
+    return name.startswith("#") and name[1:].isdigit()

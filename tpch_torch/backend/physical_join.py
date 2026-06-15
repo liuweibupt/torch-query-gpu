@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+import re
+from typing import Sequence
+
 import torch
+
+from tpch_torch.backend.physical_aliases import qualified_aliases_for_join_side
+from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_projection import matching_aggregate_alias
+from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+from tpch_torch.backend.physical_sql_regions import output_requires_column
+from tpch_torch.errors import UnsupportedPlanError
 
 
 def inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -34,6 +44,120 @@ def inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple
     return left_rows, right_rows
 
 
+def join_indices_for_conditions(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    conditions: Sequence[tuple[str, str]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return matching row indices for one or more equi-join conditions."""
+
+    if len(conditions) == 1:
+        left_expr, right_expr = conditions[0]
+        return inner_join_indices(
+            evaluate_expression(left, left_expr).require_tensor(),
+            evaluate_expression(right, right_expr).require_tensor(),
+        )
+    left_key, right_key = _composite_join_keys(
+        left,
+        right,
+        tuple(pair[0] for pair in conditions),
+        tuple(pair[1] for pair in conditions),
+    )
+    return inner_join_indices(left_key, right_key)
+
+
+def semi_join_indices(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    conditions: Sequence[tuple[str, str]],
+) -> torch.Tensor:
+    """Return left row indices that have at least one match on the right side."""
+
+    left_rows, _ = join_indices_for_conditions(left, right, conditions)
+    if left_rows.numel() == 0:
+        return left_rows
+    return torch.unique(left_rows, sorted=True)
+
+
+def anti_join_indices(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    conditions: Sequence[tuple[str, str]],
+) -> torch.Tensor:
+    """Return left row indices that have no match on the right side."""
+
+    left_rows, _ = join_indices_for_conditions(left, right, conditions)
+    matched = _matched_preserved_mask(left.row_count, left_rows, left_rows.device)
+    return torch.nonzero(~matched).flatten().to(dtype=torch.int64)
+
+
+def semi_join_table(
+    table: PhysicalTable,
+    rows: torch.Tensor,
+    keys: Sequence[str],
+    source_sql: str,
+    required_columns: Sequence[str],
+) -> PhysicalTable:
+    """Return SEMI/ANTI preserved rows with DuckDB-style key pruning."""
+
+    items = []
+    for name in table.order:
+        if _drop_semi_key(table, name, keys, source_sql, required_columns):
+            continue
+        value = table.columns[name]
+        items.append((name, value.gather(rows), _existing_aliases(table, value)))
+    return PhysicalTable.projected("semi_join", items, int(rows.numel()))
+
+
+def outer_join_indices(
+    preserved_row_count: int,
+    preserved_rows: torch.Tensor,
+    optional_rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Append unmatched preserved rows and mark optional-side validity."""
+
+    device = preserved_rows.device
+    matched = _matched_preserved_mask(preserved_row_count, preserved_rows, device)
+    unmatched_rows = torch.nonzero(~matched).flatten().to(dtype=torch.int64)
+    if unmatched_rows.numel() == 0:
+        return preserved_rows, optional_rows, torch.ones_like(preserved_rows, dtype=torch.bool)
+    combined_preserved = torch.cat((preserved_rows, unmatched_rows))
+    filler_optional = torch.zeros_like(unmatched_rows)
+    combined_optional = torch.cat((optional_rows, filler_optional))
+    optional_valid = torch.cat(
+        (
+            torch.ones_like(preserved_rows, dtype=torch.bool),
+            torch.zeros_like(unmatched_rows, dtype=torch.bool),
+        )
+    )
+    return combined_preserved, combined_optional, optional_valid
+
+
+def try_execute_scalar_nested_loop_join(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    condition: str,
+) -> PhysicalTable | None:
+    """Execute DuckDB scalar-subquery nested-loop joins as a left-side filter."""
+
+    comparison = _split_scalar_subquery_condition(condition)
+    if comparison is None:
+        return None
+    left_expr, operator = comparison
+    if right.row_count != 1 or len(right.order) != 1:
+        raise UnsupportedPlanError("scalar SUBQUERY join expects one row and one column")
+    left_tensor = _scalar_left_value(left, left_expr).require_tensor()
+    scalar = right.value_at(0).require_tensor()[0].to(dtype=left_tensor.dtype, device=left_tensor.device)
+    return left.filter(_compare_with_scalar(left_tensor, operator, scalar))
+
+
+def _scalar_left_value(table: PhysicalTable, expression: str) -> PhysicalValue:
+    alias = matching_aggregate_alias(table, expression)
+    if alias is not None:
+        return table.value_named(alias)
+    return evaluate_expression(table, expression)
+
+
 def _unique_build_join_indices(
     starts: torch.Tensor,
     match_counts: torch.Tensor,
@@ -48,9 +172,9 @@ def _unique_build_join_indices(
 
 def _sorted_build_keys(right_values: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor]:
     if _is_sorted_non_decreasing(right_values):
-        return None, right_values
+        return None, right_values.contiguous()
     right_order = torch.argsort(right_values, stable=True)
-    return right_order, right_values[right_order]
+    return right_order, right_values[right_order].contiguous()
 
 
 def _is_sorted_non_decreasing(values: torch.Tensor) -> bool:
@@ -87,3 +211,246 @@ def _validate_join_keys(left_key: torch.Tensor, right_key: torch.Tensor) -> None
 def _empty_indices(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     empty = torch.empty(0, dtype=torch.int64, device=device)
     return empty, empty.clone()
+
+
+def combine_join_tables(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    left_rows: torch.Tensor,
+    right_rows: torch.Tensor,
+    left_keys: Sequence[str],
+    right_keys: Sequence[str],
+    source_sql: str,
+    required_columns: Sequence[str] = (),
+    left_valid: torch.Tensor | None = None,
+    right_valid: torch.Tensor | None = None,
+    right_optional_order: str = "default",
+) -> PhysicalTable:
+    """Build the physical join output while preserving DuckDB's pruned column order."""
+
+    items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
+    delayed: list[tuple[str, PhysicalValue, Sequence[str]]] = []
+    equivalent_keys = left_valid is None and right_valid is None
+    left_items = _join_side_items(
+        left,
+        left_rows,
+        left_keys,
+        right_keys,
+        source_sql,
+        required_columns,
+        left_valid,
+        equivalent_keys,
+    )
+    right_items = _join_side_items(
+        right,
+        right_rows,
+        right_keys,
+        left_keys,
+        source_sql,
+        required_columns,
+        right_valid,
+        equivalent_keys,
+    )
+    if left_valid is None and right_optional_order == "outer_first":
+        items.extend(left_items[0])
+        items.extend(left_items[1])
+        items.extend(right_items[0])
+    else:
+        items.extend(left_items[0])
+        items.extend(right_items[0])
+    if left_valid is None and right_optional_order == "outer_first":
+        delayed.extend(right_items[1])
+    elif left_valid is None:
+        delayed.extend(left_items[1])
+        delayed.extend(right_items[1])
+    else:
+        delayed.extend(right_items[1])
+        delayed.extend(left_items[1])
+    items.extend(delayed)
+    table = PhysicalTable.projected("join", items, int(left_rows.numel()))
+    if left_valid is None and right_valid is None:
+        return _refresh_inner_join_key_aliases(table, left_keys, right_keys)
+    return table
+
+
+def right_join_has_no_unmatched_rows(right_rows: torch.Tensor, right_row_count: int) -> bool:
+    """Return whether an inner match vector covers every preserved right row."""
+
+    if right_row_count == 0:
+        return True
+    if right_rows.numel() == 0:
+        return False
+    counts = torch.bincount(right_rows.to(dtype=torch.int64), minlength=right_row_count)
+    return bool(torch.all(counts[:right_row_count] > 0).cpu().item())
+
+
+def _matched_preserved_mask(row_count: int, rows: torch.Tensor, device: torch.device) -> torch.Tensor:
+    matched = torch.zeros(row_count, dtype=torch.bool, device=device)
+    if rows.numel() > 0:
+        matched[rows.to(dtype=torch.int64)] = True
+    return matched
+
+
+def _split_scalar_subquery_condition(condition: str) -> tuple[str, str] | None:
+    for operator in (">=", "<=", "!=", "<>", ">", "<"):
+        suffix = f" {operator} SUBQUERY"
+        if condition.endswith(suffix):
+            return condition[: -len(suffix)].strip(), operator
+    return None
+
+
+def _compare_with_scalar(values: torch.Tensor, operator: str, scalar: torch.Tensor) -> torch.Tensor:
+    if operator == ">":
+        return values > scalar
+    if operator == ">=":
+        return values >= scalar
+    if operator == "<":
+        return values < scalar
+    if operator == "<=":
+        return values <= scalar
+    if operator in {"!=", "<>"}:
+        return values != scalar
+    raise UnsupportedPlanError(f"unsupported scalar SUBQUERY comparison: {operator}")
+
+
+def _join_side_items(
+    table: PhysicalTable,
+    rows: torch.Tensor,
+    own_keys: Sequence[str],
+    other_keys: Sequence[str],
+    source_sql: str,
+    required_columns: Sequence[str],
+    valid: torch.Tensor | None = None,
+    equivalent_keys: bool = True,
+) -> tuple[list[tuple[str, PhysicalValue, Sequence[str]]], list[tuple[str, PhysicalValue, Sequence[str]]]]:
+    items = []
+    delayed = []
+    needs_internal_keys = _has_positional_reference(required_columns)
+    for name in table.order:
+        output_key = output_requires_column(source_sql, table, name)
+        keep_key = output_key or needs_internal_keys or _matches_any_key(name, required_columns)
+        if _matches_any_key(name, own_keys) and not keep_key:
+            continue
+        source_value = table.columns[name]
+        value = source_value.gather(rows) if valid is None else source_value.gather_optional(rows, valid)
+        aliases = (
+            *_existing_aliases(table, source_value),
+            *_join_aliases(table, name, own_keys, other_keys, source_sql, equivalent_keys),
+        )
+        item = (name, value, aliases)
+        if _matches_any_key(name, own_keys) and not output_key:
+            delayed.append(item)
+        else:
+            items.append(item)
+    return items, delayed
+
+
+def _drop_semi_key(
+    table: PhysicalTable,
+    name: str,
+    keys: Sequence[str],
+    source_sql: str,
+    required_columns: Sequence[str],
+) -> bool:
+    if not _matches_any_key(name, keys):
+        return False
+    if output_requires_column(source_sql, table, name):
+        return False
+    return not _matches_any_key(name, required_columns)
+
+
+def _refresh_inner_join_key_aliases(
+    table: PhysicalTable,
+    left_keys: Sequence[str],
+    right_keys: Sequence[str],
+) -> PhysicalTable:
+    columns = dict(table.columns)
+    for left_key, right_key in zip(left_keys, right_keys):
+        _assign_equivalent_key_alias(columns, table, left_key, right_key)
+        _assign_equivalent_key_alias(columns, table, right_key, left_key)
+    return PhysicalTable(table.name, columns, table.order, table.row_count)
+
+
+def _assign_equivalent_key_alias(
+    columns: dict[str, PhysicalValue],
+    table: PhysicalTable,
+    source_key: str,
+    alias_key: str,
+) -> None:
+    source_name = _matching_order_name(table, source_key)
+    if source_name is None:
+        return
+    columns[_unqualified(alias_key)] = table.columns[source_name]
+
+
+def _matching_order_name(table: PhysicalTable, key: str) -> str | None:
+    for name in table.order:
+        if _same_column(name, key):
+            return name
+    return None
+
+
+def _composite_join_keys(
+    left: PhysicalTable,
+    right: PhysicalTable,
+    left_expressions: tuple[str, ...],
+    right_expressions: tuple[str, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    left_stacked = _stack_join_key_columns(left, left_expressions)
+    right_stacked = _stack_join_key_columns(right, right_expressions)
+    _, inverse = torch.unique(torch.cat((left_stacked, right_stacked), dim=0), dim=0, sorted=True, return_inverse=True)
+    return inverse[: left.row_count], inverse[left.row_count :]
+
+
+def _stack_join_key_columns(table: PhysicalTable, expressions: tuple[str, ...]) -> torch.Tensor:
+    columns = [
+        evaluate_expression(table, expression).require_tensor().to(dtype=torch.int64)
+        for expression in expressions
+    ]
+    return torch.stack(columns, dim=1)
+
+
+def _join_aliases(
+    table: PhysicalTable,
+    column: str,
+    own_keys: Sequence[str],
+    other_keys: Sequence[str],
+    source_sql: str = "",
+    equivalent_keys: bool = True,
+) -> tuple[str, ...]:
+    aliases = [column, f"{table.name}.{column}"]
+    if equivalent_keys:
+        aliases.extend(other for own, other in zip(own_keys, other_keys) if _same_column(column, own))
+    aliases.extend(qualified_aliases_for_join_side(source_sql, table.name, column, own_keys, other_keys))
+    return tuple(dict.fromkeys(aliases))
+
+
+def _existing_aliases(table: PhysicalTable, value: PhysicalValue) -> tuple[str, ...]:
+    return tuple(name for name, candidate in table.columns.items() if candidate is value)
+
+
+def _matches_any_key(column: str, keys: Sequence[str]) -> bool:
+    return any(_same_column(column, key) for key in keys)
+
+
+def _same_column(left: str, right: str) -> bool:
+    left_name = _strip_unique_suffix(_unqualified(left))
+    right_name = _strip_unique_suffix(_unqualified(right))
+    return left == right or left_name == right_name or left_name in _identifier_tokens(right)
+
+
+def _unqualified(expression: str) -> str:
+    return expression.replace('"', "").strip().rsplit(".", 1)[-1]
+
+
+def _strip_unique_suffix(name: str) -> str:
+    base, separator, suffix = name.rpartition("__")
+    return base if separator and suffix.isdigit() else name
+
+
+def _identifier_tokens(expression: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[A-Za-z_][\w]*", expression.replace('"', "")))
+
+
+def _has_positional_reference(expressions: Sequence[str]) -> bool:
+    return any(re.search(r"#\d+", expression) is not None for expression in expressions)

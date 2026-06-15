@@ -15,6 +15,8 @@ from tpch_torch.ir import TQPPlan
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph
 from tpch_torch.storage import TensorTable
 
+_PHYSICAL_TPCH_QUERIES = frozenset(range(1, 23))
+
 
 class PyTorchGraphExecutor:
     """Execute a frontend-lowered TQP operator graph with PyTorch tensors."""
@@ -29,9 +31,11 @@ class PyTorchGraphExecutor:
     ) -> list[dict[str, Any]]:
         graph = plan.operator_graph
         if graph is None:
+            if plan.generic_plan is not None:
+                return execute_generic_sql_plan(con, plan.generic_plan, device=device)
             raise UnsupportedPlanError("TQP operator graph is required for PyTorch graph execution")
         if plan.query_id is None:
-            return self._execute_generic_plan(con, plan, device)
+            return execute_physical_plan(con, graph, device=device)
         return self._execute_tpch_graph(con, plan, graph, device, use_compressed_masks)
 
     def _execute_generic_plan(
@@ -60,7 +64,7 @@ class PyTorchGraphExecutor:
             raise UnsupportedPlanError("compiled TPC-H compatibility roots are no longer executable")
         if plan.query_id == 6 and use_compressed_masks:
             return _execute_q6_graph(con, device, use_compressed_masks)
-        if plan.query_id in {1, 6, 12, 14, 19}:
+        if plan.query_id in _PHYSICAL_TPCH_QUERIES:
             return execute_physical_plan(con, graph, device=device)
         return _execute_tpch_graph_query(con, plan, device)
 

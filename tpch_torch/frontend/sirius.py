@@ -24,8 +24,8 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
         query_id = None
         try:
             generic_plan = parse_generic_sql(sql)
-        except UnsupportedPlanError as exc:
-            generic_error = str(exc)
+        except (UnsupportedPlanError, ValueError, TypeError) as exc:
+            generic_error = f"{type(exc).__name__}: {exc}"
     physical_plan_json = export_duckdb_physical_plan_json(con, sql)
     operator_graph = lower_duckdb_json_to_operator_graph(sql, query_id, physical_plan_json)
     return TQPPlan(

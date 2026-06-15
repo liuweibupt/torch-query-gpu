@@ -9,11 +9,29 @@ from typing import Any, Sequence
 import torch
 
 from tpch_torch.backend.physical_expr_folding import fold_same_column_literal_or
+from tpch_torch.backend.physical_expr_parse import (
+    _NO_LITERAL,
+    balanced as _balanced,
+    is_projection_ref as _is_projection_ref,
+    parse_call as _parse_call,
+    parse_case as _parse_case,
+    parse_cast as _parse_cast,
+    parse_in as _parse_in,
+    parse_literal as _parse_literal,
+    split_args as _split_args,
+    split_top_level_arithmetic as _split_top_level_arithmetic,
+    split_top_level_comparison as _split_top_level_comparison,
+    split_top_level_keyword as _split_top_level_keyword,
+    strip_wrapping_parentheses as _strip_wrapping_parentheses,
+)
+from tpch_torch.backend.physical_duplicate_expr import evaluate_duplicate_symmetric_filter
+from tpch_torch.backend.physical_date_expr import parse_extract_year, parse_scalar_subquery_guard
+from tpch_torch.backend.physical_like import like_matches
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operators import membership_mask
 
-_COMPARISON_OPERATORS = (">=", "<=", "!=", "<>", "=", ">", "<")
+_COMPARISON_OPERATORS = ("!~~", "~~", ">=", "<=", "!=", "<>", "=", ">", "<")
 _INTERNAL_PREFIXES = ("__internal_compress", "__internal_decompress")
 
 
@@ -28,9 +46,26 @@ def evaluate_expression(table: PhysicalTable, expression: str) -> PhysicalValue:
         return PhysicalValue(literal=literal)
     if _is_projection_ref(expr):
         return table.value_at(int(expr[1:]))
+    if expr.upper() == "IN (...)":
+        return table.value_named("SUBQUERY")
+    if (guard_expr := parse_scalar_subquery_guard(expr)) is not None:
+        return evaluate_expression(table, guard_expr)
+    cast_expr = _parse_cast(expr)
+    if cast_expr is not None:
+        return evaluate_expression(table, cast_expr)
+    try:
+        return table.value_named(expr)
+    except KeyError:
+        pass
+    duplicate_filter = evaluate_duplicate_symmetric_filter(table, expr)
+    if duplicate_filter is not None:
+        return duplicate_filter
     case_parts = _parse_case(expr)
     if case_parts is not None:
         return _evaluate_case(table, case_parts)
+    extract_expr = parse_extract_year(expr)
+    if extract_expr is not None:
+        return PhysicalValue(tensor=evaluate_expression(table, extract_expr).require_tensor() // 10000)
     call = _parse_call(expr)
     if call is not None:
         return _evaluate_call(table, call[0], call[1])
@@ -66,10 +101,7 @@ def evaluate_expression(table: PhysicalTable, expression: str) -> PhysicalValue:
             return _arithmetic(evaluate_expression(table, left), operator, evaluate_expression(table, right))
         except UnsupportedPlanError:
             pass
-    try:
-        return table.value_named(expr)
-    except KeyError as exc:
-        raise UnsupportedPlanError(f"unsupported physical expression: {expression}") from exc
+    raise UnsupportedPlanError(f"unsupported physical expression: {expression}")
 
 
 def projection_name(table: PhysicalTable, expression: str, index: int) -> tuple[str, tuple[str, ...]]:
@@ -112,8 +144,8 @@ def expression_sort_key_name(expression: str) -> str:
         return _unqualified(expr)
     name, args = call
     if name.lower() in {"sum", "avg", "min", "max", "count"}:
-        inner = _strip_wrapping_parentheses(args)
-        return f"{name.lower()}({_unqualified(inner)})"
+        inner = _strip_wrapping_parentheses(_unqualify_column_references(args.strip()))
+        return f"{name.lower()}({inner})"
     return expr
 
 
@@ -126,7 +158,8 @@ def _evaluate_case(table: PhysicalTable, parts: tuple[str, str, str]) -> Physica
     then_value = evaluate_expression(table, parts[1])
     else_value = evaluate_expression(table, parts[2])
     then_tensor, else_tensor = _coerce_binary_tensors(then_value, else_value)
-    return PhysicalValue(tensor=torch.where(condition, then_tensor, else_tensor))
+    valid = _combine_validity(then_value, else_value, then_tensor)
+    return PhysicalValue(tensor=torch.where(condition, then_tensor, else_tensor), valid=valid)
 
 
 def _evaluate_call(table: PhysicalTable, name: str, raw_args: str) -> PhysicalValue:
@@ -140,6 +173,10 @@ def _evaluate_call(table: PhysicalTable, name: str, raw_args: str) -> PhysicalVa
         value = evaluate_expression(table, args[0])
         literal = _literal_string(evaluate_expression(table, args[1]))
         return PhysicalValue(tensor=_string_function(value, literal, lowered))
+    if lowered == "substring" and len(args) == 3:
+        return _evaluate_substring(table, args)
+    if lowered == "substring" and len(args) == 1:
+        return _evaluate_substring(table, _parse_substring_from_args(args[0]))
     if lowered == "constant_or_null" and args:
         return evaluate_expression(table, args[0])
     raise UnsupportedPlanError(f"unsupported physical function: {name}")
@@ -167,170 +204,40 @@ def _logical_reduce(table: PhysicalTable, parts: Sequence[str], reducer) -> Phys
 
 def _compare(left: PhysicalValue, operator: str, right: PhysicalValue) -> PhysicalValue:
     if left.dictionary is not None and isinstance(right.literal, str):
+        if operator in {"~~", "!~~"}:
+            return PhysicalValue(tensor=_compare_like_literal(left, operator, right.literal))
         return PhysicalValue(tensor=_compare_string_literal(left, operator, right.literal))
     if right.dictionary is not None and isinstance(left.literal, str):
         return PhysicalValue(tensor=_reverse_compare(_compare_string_literal(right, operator, left.literal), operator))
     left_tensor, right_tensor = _coerce_binary_tensors(left, right)
+    valid = _combine_validity(left, right, left_tensor)
     if operator == "=":
-        return PhysicalValue(tensor=left_tensor == right_tensor)
+        return PhysicalValue(tensor=left_tensor == right_tensor, valid=valid)
     if operator in {"!=", "<>"}:
-        return PhysicalValue(tensor=left_tensor != right_tensor)
+        return PhysicalValue(tensor=left_tensor != right_tensor, valid=valid)
     if operator == ">":
-        return PhysicalValue(tensor=left_tensor > right_tensor)
+        return PhysicalValue(tensor=left_tensor > right_tensor, valid=valid)
     if operator == ">=":
-        return PhysicalValue(tensor=left_tensor >= right_tensor)
+        return PhysicalValue(tensor=left_tensor >= right_tensor, valid=valid)
     if operator == "<":
-        return PhysicalValue(tensor=left_tensor < right_tensor)
+        return PhysicalValue(tensor=left_tensor < right_tensor, valid=valid)
     if operator == "<=":
-        return PhysicalValue(tensor=left_tensor <= right_tensor)
+        return PhysicalValue(tensor=left_tensor <= right_tensor, valid=valid)
     raise UnsupportedPlanError(f"unsupported comparison operator: {operator}")
 
 
 def _arithmetic(left: PhysicalValue, operator: str, right: PhysicalValue) -> PhysicalValue:
     left_tensor, right_tensor = _coerce_binary_tensors(left, right)
+    valid = _combine_validity(left, right, left_tensor)
     if operator == "+":
-        return PhysicalValue(tensor=left_tensor + right_tensor)
+        return PhysicalValue(tensor=left_tensor + right_tensor, valid=valid)
     if operator == "-":
-        return PhysicalValue(tensor=left_tensor - right_tensor)
+        return PhysicalValue(tensor=left_tensor - right_tensor, valid=valid)
     if operator == "*":
-        return PhysicalValue(tensor=left_tensor * right_tensor)
+        return PhysicalValue(tensor=left_tensor * right_tensor, valid=valid)
     if operator == "/":
-        return PhysicalValue(tensor=left_tensor / right_tensor)
+        return PhysicalValue(tensor=left_tensor / right_tensor, valid=valid)
     raise UnsupportedPlanError(f"unsupported arithmetic operator: {operator}")
-
-
-_NO_LITERAL = object()
-
-
-def _parse_literal(expr: str) -> Any:
-    date_match = re.fullmatch(r"(?:DATE\s*)?'(?P<value>\d{4}-\d{2}-\d{2})'(?:::DATE)?", expr, re.I)
-    if date_match:
-        return int(date_match.group("value").replace("-", ""))
-    if re.fullmatch(r"'[^']*'", expr):
-        return expr[1:-1]
-    if re.fullmatch(r"-?\d+", expr):
-        return int(expr)
-    if re.fullmatch(r"-?\d+\.\d+", expr):
-        return float(expr)
-    if expr.upper() == "TRUE":
-        return True
-    if expr.upper() == "FALSE":
-        return False
-    return _NO_LITERAL
-
-
-def _parse_case(expr: str) -> tuple[str, str, str] | None:
-    match = re.fullmatch(r"CASE\s+WHEN\s+(.+)\s+THEN\s+(.+)\s+ELSE\s+(.+)\s+END", expr, re.I)
-    if match is None:
-        return None
-    return match.group(1).strip(), match.group(2).strip(), match.group(3).strip()
-
-
-def _parse_call(expr: str) -> tuple[str, str] | None:
-    match = re.fullmatch(r"([A-Za-z_][\w]*)\s*\((.*)\)", expr, re.S)
-    if match is None or not _balanced(match.group(2)):
-        return None
-    return match.group(1), match.group(2)
-
-
-def _parse_in(expr: str) -> tuple[str, str] | None:
-    index = _find_top_level_keyword(expr, "IN")
-    if index < 0:
-        return None
-    left = expr[:index].strip()
-    right = expr[index + len(" IN "):].strip()
-    if not right.startswith("(") or not right.endswith(")"):
-        return None
-    return left, right[1:-1]
-
-
-def _split_top_level_comparison(expr: str) -> tuple[str, str, str] | None:
-    for index, operator in _top_level_operator_positions(expr, _COMPARISON_OPERATORS):
-        return expr[:index].strip(), operator, expr[index + len(operator):].strip()
-    return None
-
-
-def _split_top_level_arithmetic(expr: str) -> tuple[str, str, str] | None:
-    for ops in (("+", "-"), ("*", "/")):
-        positions = list(_top_level_operator_positions(expr, ops))
-        for index, operator in reversed(positions):
-            if operator in {"+", "-"} and _is_unary(expr, index):
-                continue
-            return expr[:index].strip(), operator, expr[index + 1:].strip()
-    return None
-
-
-def _top_level_operator_positions(expr: str, operators: Sequence[str]):
-    depth = 0
-    in_quote = False
-    index = 0
-    while index < len(expr):
-        char = expr[index]
-        if char == "'":
-            in_quote = not in_quote
-        elif not in_quote and char == "(":
-            depth += 1
-        elif not in_quote and char == ")":
-            depth -= 1
-        if not in_quote and depth == 0:
-            for operator in operators:
-                if expr.startswith(operator, index):
-                    yield index, operator
-                    index += len(operator) - 1
-                    break
-        index += 1
-
-
-def _split_top_level_keyword(expr: str, keyword: str) -> tuple[str, ...]:
-    parts: list[str] = []
-    start = 0
-    search_from = 0
-    while True:
-        index = _find_top_level_keyword(expr[search_from:], keyword)
-        if index < 0:
-            break
-        absolute = search_from + index
-        parts.append(expr[start:absolute].strip())
-        search_from = absolute + len(keyword) + 2
-        start = search_from
-    parts.append(expr[start:].strip())
-    return tuple(part for part in parts if part)
-
-
-def _find_top_level_keyword(expr: str, keyword: str) -> int:
-    depth = 0
-    in_quote = False
-    needle = f" {keyword.upper()} "
-    upper = expr.upper()
-    for index, char in enumerate(expr):
-        if char == "'":
-            in_quote = not in_quote
-        elif not in_quote and char == "(":
-            depth += 1
-        elif not in_quote and char == ")":
-            depth -= 1
-        if not in_quote and depth == 0 and upper.startswith(needle, index):
-            return index
-    return -1
-
-
-def _split_args(raw: str) -> tuple[str, ...]:
-    parts: list[str] = []
-    start = 0
-    depth = 0
-    in_quote = False
-    for index, char in enumerate(raw):
-        if char == "'":
-            in_quote = not in_quote
-        elif not in_quote and char == "(":
-            depth += 1
-        elif not in_quote and char == ")":
-            depth -= 1
-        elif not in_quote and depth == 0 and char == ",":
-            parts.append(raw[start:index].strip())
-            start = index + 1
-    parts.append(raw[start:].strip())
-    return tuple(part for part in parts if part)
 
 
 def _coerce_binary_tensors(left: PhysicalValue, right: PhysicalValue) -> tuple[torch.Tensor, torch.Tensor]:
@@ -342,6 +249,17 @@ def _coerce_binary_tensors(left: PhysicalValue, right: PhysicalValue) -> tuple[t
         return _literal_tensor(left.literal, right.tensor), right.tensor
     tensor = torch.tensor(left.literal, dtype=torch.float64)
     return tensor, torch.tensor(right.literal, dtype=tensor.dtype)
+
+
+def _combine_validity(left: PhysicalValue, right: PhysicalValue, like: torch.Tensor) -> torch.Tensor | None:
+    valid = None
+    if left.valid is not None:
+        valid = left.valid
+    if right.valid is not None:
+        valid = right.valid if valid is None else valid & right.valid
+    if valid is None:
+        return None
+    return valid.to(device=like.device)
 
 
 def _literal_tensor(value: Any, like: torch.Tensor) -> torch.Tensor:
@@ -381,6 +299,34 @@ def _string_function(value: PhysicalValue, literal: str, function: str) -> torch
     return _isin_ids(tensor, ids)
 
 
+def _evaluate_substring(table: PhysicalTable, args: Sequence[str]) -> PhysicalValue:
+    value = evaluate_expression(table, args[0])
+    if value.dictionary is None:
+        raise UnsupportedPlanError("substring requires an encoded string column")
+    start = _literal_int(evaluate_expression(table, args[1]))
+    length = _literal_int(evaluate_expression(table, args[2]))
+    offset = start - 1
+    substrings = tuple(item[offset : offset + length] for item in value.dictionary)
+    vocabulary = tuple(sorted(set(substrings)))
+    ids = {item: index for index, item in enumerate(vocabulary)}
+    remapped = [ids[substrings[int(index)]] for index in value.require_tensor().cpu().tolist()]
+    tensor = torch.tensor(remapped, dtype=torch.int64, device=value.require_tensor().device)
+    return PhysicalValue(tensor=tensor, dictionary=vocabulary, valid=value.valid)
+
+
+def _parse_substring_from_args(raw_args: str) -> tuple[str, str, str]:
+    match = re.fullmatch(r"(.+)\s+FROM\s+(\d+)\s+FOR\s+(\d+)", raw_args.strip(), re.I | re.S)
+    if match is None:
+        raise UnsupportedPlanError(f"unsupported substring arguments: {raw_args}")
+    return match.group(1).strip(), match.group(2), match.group(3)
+
+
+def _literal_int(value: PhysicalValue) -> int:
+    if not isinstance(value.literal, int):
+        raise UnsupportedPlanError("substring bounds must be integer literals")
+    return value.literal
+
+
 def _compare_string_literal(value: PhysicalValue, operator: str, literal: str) -> torch.Tensor:
     tensor = value.require_tensor()
     vocabulary = value.dictionary or ()
@@ -399,6 +345,12 @@ def _compare_string_literal(value: PhysicalValue, operator: str, literal: str) -
     if operator == ">=":
         return tensor >= left
     raise UnsupportedPlanError(f"unsupported string comparison operator: {operator}")
+
+
+def _compare_like_literal(value: PhysicalValue, operator: str, pattern: str) -> torch.Tensor:
+    ids = [index for index, item in enumerate(value.dictionary or ()) if like_matches(item, pattern)]
+    matched = _isin_ids(value.require_tensor(), ids)
+    return torch.logical_not(matched) if operator == "!~~" else matched
 
 
 def _reverse_compare(mask: torch.Tensor, operator: str) -> torch.Tensor:
@@ -458,6 +410,11 @@ def _unqualified(expr: str) -> str:
 
 def _qualified_wildcard(child_name: str) -> str:
     return f"*.{child_name}"
+
+
+def _unqualify_column_references(expr: str) -> str:
+    pattern = re.compile(r'(?:(?:[A-Za-z_][\w]*|"[^"]+")\.)+(?:([A-Za-z_][\w]*)|"([^"]+)")')
+    return pattern.sub(lambda match: match.group(1) or match.group(2), expr)
 
 
 def _is_unary(expr: str, index: int) -> bool:

@@ -26,7 +26,7 @@ until a readable full paper/appendix is available.
 - Experimental strict frontend: original SQL → DuckDB native Substrait JSON →
   `TQPPlan`; no fabricated JSON and no frontend fallback.
 - Backend path: `TQPPlan` → PyTorch operators on CPU/CUDA.
-- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1/Q6/Q12/Q14/Q19 execute through a DuckDB physical-plan interpreter by default; Q6 `--compressed-masks` remains an explicit primitive experiment; the remaining complex Q2-Q22 shapes execute graph recipes composed from common Join/Subquery/CTE/Aggregate graph nodes. DuckDB native Substrait remains limited by exporter coverage for several queries.
+- Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1-Q22 execute through a DuckDB physical-plan interpreter by default; Q6 `--compressed-masks` remains an explicit primitive experiment; historical graph recipes are no longer the default execution path. DuckDB native Substrait remains limited by exporter coverage for several queries.
 - Current generic SQL status: single-table projection/filter/aggregate subset.
 
 ## Operator inventory from TQP (**verified**)
@@ -71,7 +71,7 @@ until a readable full paper/appendix is available.
 - [x] Bitmap-style filter masks for current TPC-H executors.
 - [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
 - [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
-- [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, internal compress/decompress wrappers.
+- [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, `NOT LIKE`/`!~~`, `CAST`, `EXTRACT(year FROM date)`, internal compress/decompress wrappers.
 - [ ] Full generic projection operator with SQL parser-level expression-tree lowering.
 - [x] First Batch 2 step: generic stable multi-key `ORDER BY` with `ASC`/`DESC`.
 - [ ] Generic sort-based equi-join using sort, histograms, prefix sums,
@@ -334,6 +334,8 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [ ] PK/FK lookup join fast path as an optimized generic join variant.
 - [x] Physical-plan inner equi-join produces tensor row-index pairs before payload materialization.
 - [x] Sorted unique build-side physical join fast path.
+- [x] Multi-column physical equi-join via composite tensor keys.
+- [x] Parent-required join-key retention for later physical joins.
 - [ ] GPU hash equi-join producing late-materialized index pairs.
 - [ ] Semi/anti joins.
 - [ ] Mark/delimiter-style subquery patterns needed by TPC-H shapes.
@@ -357,9 +359,10 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 - [x] First explicit operator graph inside `TQPPlan`.
 - [x] Replace Q2-Q22 compatibility execution with graph recipes built from common Join/Subquery/CTE/Aggregate nodes.
-- [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q1/Q6/Q12/Q14/Q19.
-- [x] Add physical-only TPC-H coverage probe for automatic operator migration tracking.
-- [ ] Replace remaining query-id graph recipes with physical-plan interpreter coverage for delimiter/mark/nested-loop/subquery/CTE nodes.
+- [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q1-Q22.
+- [x] Add delimiter/mark/nested-loop/subquery/CTE physical coverage required by TPC-H Q2-Q22.
+- [x] Add nested SELECT alias and aggregate ORDER BY alias normalization for physical projection lowering.
+- [x] Add physical-only TPC-H coverage probe for automatic operator migration tracking; Q1-Q22 are currently supported.
 - [x] First graph-lowered fusion: Q1 scan/filter/project/group/order fused dense grouped reductions.
 - [ ] More fusion passes for map-reduce and projection/filter/aggregate chains.
 - [ ] Device/data-movement scheduler and metrics.

@@ -62,25 +62,35 @@ def test_pytorch_backend_rejects_tpch_without_operator_graph():
         PyTorchBackend().execute(duckdb.connect(), plan, device="cpu")
 
 
-def test_pytorch_backend_executes_generic_tqp_plan():
+def test_pytorch_backend_executes_legacy_generic_tqp_plan_without_operator_graph():
     from tpch_torch.generic_sql import parse_generic_sql
 
     con = duckdb.connect()
     con.execute("create table t(a integer)")
     con.execute("insert into t values (1), (2)")
     sql = "select count(*) as n from t"
-    graph = TQPOperatorGraph(
-        source_sql=sql,
-        query_id=None,
-        root_id="n0",
-        nodes=(TQPOperatorNode(node_id="n0", kind=OperatorKind.SCAN, name="SEQ_SCAN"),),
-    )
     plan = TQPPlan(
         query_id=None,
         source_sql=sql,
         frontend="sirius",
         generic_plan=parse_generic_sql(sql),
-        operator_graph=graph,
+    )
+
+    assert PyTorchBackend().execute(con, plan, device="cpu") == [{"n": 2}]
+
+
+def test_pytorch_backend_prefers_physical_graph_over_legacy_generic_parser(monkeypatch):
+    import tpch_torch.backend.graph as graph_backend
+
+    con = duckdb.connect()
+    con.execute("create table t(a integer)")
+    con.execute("insert into t values (1), (2)")
+    sql = "select count(*) as n from t"
+    plan = compile_sirius_plan(con, sql)
+    monkeypatch.setattr(
+        graph_backend,
+        "execute_generic_sql_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy generic parser path used")),
     )
 
     assert PyTorchBackend().execute(con, plan, device="cpu") == [{"n": 2}]

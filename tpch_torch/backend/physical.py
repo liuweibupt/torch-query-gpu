@@ -3,22 +3,35 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 import duckdb
 import torch
 
 from tpch_torch.backend.physical_expr import (
-    aggregate_output_aliases,
     evaluate_expression,
     expression_sort_key_name,
-    projection_name,
     strip_order_direction,
 )
 from tpch_torch.backend import physical_fusion
-from tpch_torch.backend.physical_join import inner_join_indices
-from tpch_torch.backend.physical_sql import replace_aggregate_calls_with_refs, select_expressions_by_alias
+from tpch_torch.backend.physical_aggregate import aggregate_specs, execute_grouped_aggregate, execute_ungrouped_aggregate
+from tpch_torch.backend.physical_delim import build_delim_table, execute_delim_join_result
+from tpch_torch.backend.physical_join import (
+    inner_join_indices as _inner_join_indices,
+    try_execute_scalar_nested_loop_join,
+)
+from tpch_torch.backend.physical_join_exec import execute_join_node as _execute_join_node, join_conditions
+from tpch_torch.backend.physical_mark import execute_literal_mark_join, execute_mark_join
+from tpch_torch.backend.physical_projection import (
+    aggregate_order_alias,
+    normalize_projection_expressions,
+    order_alias_value,
+    projection_output_name,
+    projection_value_expression,
+    resolve_alias_projections,
+)
+from tpch_torch.backend.physical_required import parents_by_child, required_columns_from_parents
+from tpch_torch.backend.physical_sql import select_expressions_by_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
@@ -26,14 +39,7 @@ from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.relational import DATE_COLUMNS_EXTENDED
 
 _ROW_ID = "__rowid__"
-_AGGREGATE_FUNCTION_ALIASES = {"sum_no_overflow": "sum"}
-
-
-@dataclass(frozen=True)
-class _AggregateSpec:
-    function: str
-    argument: str | None
-    aliases: tuple[str, ...]
+_aggregate_specs = aggregate_specs
 
 
 class PhysicalPlanExecutor:
@@ -44,6 +50,9 @@ class PhysicalPlanExecutor:
         self._graph = graph
         self._device = device
         self._select_aliases = select_expressions_by_alias(graph.source_sql)
+        self._parents = parents_by_child(graph)
+        self._delim_tables: dict[str, PhysicalTable] = {}
+        self._cte_tables: dict[str, PhysicalTable] = {}
 
     def execute(self) -> list[dict[str, Any]]:
         fused_rows = physical_fusion.try_execute_fused_physical_plan(self._con, self._graph, self._device)
@@ -51,6 +60,7 @@ class PhysicalPlanExecutor:
             return fused_rows
         table = self._execute_node(self._graph.root_id)
         aliases = _describe_aliases(self._con, self._graph.source_sql)
+        table = _trim_to_output_arity(table, len(aliases))
         return _rows_from_table(_rename_for_output(table, aliases))
 
     def _execute_node(self, node_id: str) -> PhysicalTable:
@@ -63,6 +73,8 @@ class PhysicalPlanExecutor:
         if node.kind == OperatorKind.PROJECT:
             return self._execute_projection(node)
         if node.kind == OperatorKind.JOIN:
+            if normalized == "RIGHT_DELIM_JOIN":
+                return self._execute_delim_join(node)
             return self._execute_join(node)
         if node.kind == OperatorKind.AGGREGATE:
             return self._execute_aggregate(node)
@@ -70,6 +82,10 @@ class PhysicalPlanExecutor:
             return self._execute_sort(node)
         if node.kind == OperatorKind.LIMIT or normalized == "LIMIT":
             return self._execute_limit(node)
+        if node.kind == OperatorKind.DELIM:
+            return self._execute_delim_scan(node)
+        if node.kind == OperatorKind.CTE:
+            return self._execute_cte(node)
         if normalized == "EMPTY_RESULT":
             return PhysicalTable("empty", {}, (), 0)
         raise UnsupportedPlanError(f"unsupported DuckDB physical node: {node.name}")
@@ -84,6 +100,8 @@ class PhysicalPlanExecutor:
             raise UnsupportedPlanError(f"scan node is missing table metadata: {node.name}")
         projected_columns = _metadata_list(node, "Projections")
         filters = _metadata_list(node, "Filters")
+        if not projected_columns:
+            projected_columns = _required_scan_columns(self._con, table_name, self._graph, self._parents, node.node_id)
         fetched_columns = tuple(
             dict.fromkeys((*projected_columns, *_filter_columns(self._con, table_name, filters)))
         )
@@ -105,51 +123,101 @@ class PhysicalPlanExecutor:
         expression = _metadata_string(node, "Expression")
         if expression is None:
             raise UnsupportedPlanError("filter node is missing Expression metadata")
-        return child.filter(evaluate_expression(child, expression).require_tensor())
+        return child.filter(self._filter_mask(evaluate_expression(child, expression)))
 
     def _execute_projection(self, node: TQPOperatorNode) -> PhysicalTable:
         child = self._single_child(node)
-        expressions = _metadata_list(node, "Projections")
+        expressions = normalize_projection_expressions(_metadata_list(node, "Projections"))
         if not expressions:
             return child
-        expressions = _resolve_alias_projections(self._select_aliases, expressions)
+        expressions = resolve_alias_projections(self._select_aliases, child, expressions)
         items = []
         for index, expression in enumerate(expressions):
-            value = evaluate_expression(child, expression)
+            value_expression = projection_value_expression(self._select_aliases, child, expression)
+            value = evaluate_expression(child, value_expression)
             if value.is_literal:
                 value = _materialize_literal(value, child)
-            name, aliases = projection_name(child, expression, index)
+            name, aliases = projection_output_name(child, expression, index, value, self._select_aliases)
+            if _is_scalar_subquery_guard_projection(expression):
+                aliases = tuple(dict.fromkeys((*aliases, "SUBQUERY")))
             items.append((name, value, aliases))
         return PhysicalTable.projected("projection", items, child.row_count)
 
     def _execute_join(self, node: TQPOperatorNode) -> PhysicalTable:
-        join_type = (_metadata_string(node, "Join Type") or "").upper()
-        if join_type != "INNER":
-            raise UnsupportedPlanError(f"physical join type is not supported yet: {join_type}")
         if len(node.children) != 2:
             raise UnsupportedPlanError("physical hash join expects two children")
         left = self._execute_node(node.children[0])
+        if (_metadata_string(node, "Join Type") or "").upper() == "MARK":
+            right_node = self._graph.node_by_id(node.children[1])
+            if right_node.name.strip().upper() == "COLUMN_DATA_SCAN":
+                return execute_literal_mark_join(node, left, self._graph.source_sql)
+            return execute_mark_join(node, left, self._execute_node(node.children[1]))
         right = self._execute_node(node.children[1])
-        left_expr, right_expr = _join_condition(node)
-        left_key = evaluate_expression(left, left_expr).require_tensor()
-        right_key = evaluate_expression(right, right_expr).require_tensor()
-        left_rows, right_rows = _inner_join_indices(left_key, right_key)
-        return _combine_join_tables(left, right, left_rows, right_rows, left_expr, right_expr)
+        if node.name.strip().upper() == "NESTED_LOOP_JOIN":
+            scalar_join = try_execute_scalar_nested_loop_join(left, right, _metadata_string(node, "Conditions") or "")
+            if scalar_join is not None:
+                return scalar_join
+        return _execute_join_node(
+            node,
+            left,
+            right,
+            self._graph.source_sql,
+            required_columns_from_parents(self._graph, self._parents, node.node_id, _metadata_list),
+        )
+
+    def _execute_delim_join(self, node: TQPOperatorNode) -> PhysicalTable:
+        if len(node.children) != 3:
+            raise UnsupportedPlanError("RIGHT_DELIM_JOIN expects three children")
+        outer = self._execute_node(node.children[0])
+        delim_index = _metadata_string(node, "Delim Index")
+        if delim_index is not None:
+            self._delim_tables[delim_index] = build_delim_table(outer, join_conditions(node))
+        subquery = self._execute_node(node.children[1])
+        return execute_delim_join_result(
+            node,
+            outer,
+            subquery,
+            self._graph.source_sql,
+            required_columns_from_parents(self._graph, self._parents, node.node_id, _metadata_list),
+        )
+
+    def _execute_delim_scan(self, node: TQPOperatorNode) -> PhysicalTable:
+        delim_index = _metadata_string(node, "Delim Index")
+        if delim_index is None or delim_index not in self._delim_tables:
+            raise UnsupportedPlanError(f"DELIM_SCAN has no materialized delimiter table: {delim_index}")
+        return self._delim_tables[delim_index]
+
+    def _execute_cte(self, node: TQPOperatorNode) -> PhysicalTable:
+        normalized = node.name.strip().upper()
+        if normalized == "CTE_SCAN":
+            cte_index = _metadata_string(node, "CTE Index")
+            if cte_index is None or cte_index not in self._cte_tables:
+                raise UnsupportedPlanError(f"CTE_SCAN has no materialized table: {cte_index}")
+            return self._cte_tables[cte_index]
+        if normalized == "CTE":
+            if len(node.children) != 2:
+                raise UnsupportedPlanError("CTE expects materializer and consumer children")
+            cte_index = _metadata_string(node, "Table Index")
+            if cte_index is None:
+                raise UnsupportedPlanError("CTE node is missing Table Index metadata")
+            self._cte_tables[cte_index] = self._execute_node(node.children[0])
+            return self._execute_node(node.children[1])
+        raise UnsupportedPlanError(f"unsupported DuckDB CTE node: {node.name}")
 
     def _execute_aggregate(self, node: TQPOperatorNode) -> PhysicalTable:
         child = self._single_child(node)
-        specs = _aggregate_specs(node, child)
+        specs = aggregate_specs(node, child)
         group_exprs = _metadata_list(node, "Groups")
         if group_exprs:
-            return _execute_grouped_aggregate(child, group_exprs, specs)
-        return _execute_ungrouped_aggregate(child, specs)
+            return execute_grouped_aggregate(child, group_exprs, specs)
+        return execute_ungrouped_aggregate(child, specs)
 
     def _execute_sort(self, node: TQPOperatorNode) -> PhysicalTable:
         child = self._single_child(node)
         order_items = _metadata_list(node, "Order By")
         if not order_items:
             return child
-        return _sort_table(child, order_items)
+        return self._sort_table(child, order_items)
 
     def _execute_limit(self, node: TQPOperatorNode) -> PhysicalTable:
         child = self._single_child(node)
@@ -158,14 +226,43 @@ class PhysicalPlanExecutor:
             return child
         limit = int(top)
         order_items = _metadata_list(node, "Order By")
-        table = _sort_table(child, order_items) if order_items else child
+        table = self._sort_table(child, order_items) if order_items else child
         indices = torch.arange(min(limit, table.row_count), dtype=torch.int64, device=table_device(table))
         return table.gather(indices)
+
+    def _sort_table(self, table: PhysicalTable, order_items: Sequence[str]) -> PhysicalTable:
+        result = table
+        for raw_item in reversed(tuple(order_items)):
+            expr, descending = strip_order_direction(raw_item)
+            key_name = expression_sort_key_name(expr)
+            key = self._sort_value(result, expr, key_name).require_tensor()
+            order = torch.argsort(key, descending=descending, stable=True)
+            result = result.gather(order)
+        return result
+
+    def _sort_value(self, table: PhysicalTable, expression: str, key_name: str) -> PhysicalValue:
+        try:
+            return table.value_named(key_name)
+        except KeyError:
+            alias = aggregate_order_alias(self._select_aliases, table, expression)
+            if alias is not None:
+                return table.value_named(alias)
+            alias_value = order_alias_value(self._select_aliases, table, key_name)
+            if alias_value is not None:
+                return evaluate_expression(table, alias_value)
+            return evaluate_expression(table, expression)
 
     def _single_child(self, node: TQPOperatorNode) -> PhysicalTable:
         if len(node.children) != 1:
             raise UnsupportedPlanError(f"{node.name} expects one child")
         return self._execute_node(node.children[0])
+
+    @staticmethod
+    def _filter_mask(value: PhysicalValue) -> torch.Tensor:
+        mask = value.require_tensor()
+        if value.valid is None:
+            return mask
+        return mask & value.valid.to(device=mask.device)
 
 
 def execute_physical_plan(
@@ -211,203 +308,8 @@ def _apply_scan_filters(table: PhysicalTable, filters: Sequence[str]) -> Physica
         filter_text = raw_filter.strip()
         if filter_text.lower().startswith("optional:"):
             continue
-        result = result.filter(evaluate_expression(result, filter_text).require_tensor())
+        result = result.filter(PhysicalPlanExecutor._filter_mask(evaluate_expression(result, filter_text)))
     return result
-
-
-def _execute_grouped_aggregate(
-    child: PhysicalTable,
-    group_exprs: Sequence[str],
-    specs: Sequence[_AggregateSpec],
-) -> PhysicalTable:
-    key_values = [evaluate_expression(child, expression) for expression in group_exprs]
-    key_tensors = [value.require_tensor().to(dtype=torch.int64) for value in key_values]
-    stacked = torch.stack(key_tensors, dim=1)
-    unique_keys, inverse = torch.unique(stacked, dim=0, sorted=True, return_inverse=True)
-    row_count = int(unique_keys.shape[0])
-    items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
-    for index, (expression, value) in enumerate(zip(group_exprs, key_values)):
-        name, aliases = projection_name(child, expression, index)
-        key_tensor = unique_keys[:, index].to(dtype=value.require_tensor().dtype)
-        items.append((name, PhysicalValue(key_tensor, value.dictionary, value.is_date), aliases))
-    for spec in specs:
-        value = _evaluate_group_aggregate(child, inverse, row_count, spec)
-        items.append((spec.aliases[0], value, spec.aliases))
-    return PhysicalTable.projected("aggregate", items, row_count)
-
-
-def _execute_ungrouped_aggregate(child: PhysicalTable, specs: Sequence[_AggregateSpec]) -> PhysicalTable:
-    items = [(spec.aliases[0], _evaluate_scalar_aggregate(child, spec), spec.aliases) for spec in specs]
-    return PhysicalTable.projected("aggregate", items, 1)
-
-
-def _evaluate_group_aggregate(
-    child: PhysicalTable,
-    group_ids: torch.Tensor,
-    group_count: int,
-    spec: _AggregateSpec,
-) -> PhysicalValue:
-    if spec.function == "count_star":
-        ones = torch.ones(group_ids.numel(), dtype=torch.int64, device=group_ids.device)
-        return PhysicalValue(_scatter_sum(ones, group_ids, group_count))
-    values = _aggregate_argument(child, spec).require_tensor()
-    if spec.function == "sum":
-        return PhysicalValue(_scatter_sum(values, group_ids, group_count))
-    if spec.function == "min":
-        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amin"))
-    if spec.function == "max":
-        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amax"))
-    if spec.function == "avg":
-        sums = _scatter_sum(values.to(dtype=torch.float64), group_ids, group_count)
-        counts = _scatter_sum(torch.ones_like(values, dtype=torch.float64), group_ids, group_count)
-        return PhysicalValue(sums / counts)
-    raise UnsupportedPlanError(f"unsupported grouped aggregate: {spec.function}")
-
-
-def _evaluate_scalar_aggregate(child: PhysicalTable, spec: _AggregateSpec) -> PhysicalValue:
-    if spec.function == "count_star":
-        tensor = torch.tensor([child.row_count], dtype=torch.int64, device=table_device(child))
-        return PhysicalValue(tensor)
-    values = _aggregate_argument(child, spec).require_tensor()
-    if values.numel() == 0:
-        tensor = torch.tensor([float("nan")], dtype=torch.float64, device=table_device(child))
-    elif spec.function == "sum":
-        tensor = values.sum().reshape(1)
-    elif spec.function == "min":
-        tensor = values.min().reshape(1)
-    elif spec.function == "max":
-        tensor = values.max().reshape(1)
-    elif spec.function == "avg":
-        tensor = values.to(dtype=torch.float64).mean().reshape(1)
-    else:
-        raise UnsupportedPlanError(f"unsupported scalar aggregate: {spec.function}")
-    return PhysicalValue(tensor)
-
-
-def _aggregate_argument(child: PhysicalTable, spec: _AggregateSpec) -> PhysicalValue:
-    if spec.argument is None:
-        raise UnsupportedPlanError(f"aggregate requires an argument: {spec.function}")
-    return evaluate_expression(child, spec.argument)
-
-
-def _sort_table(table: PhysicalTable, order_items: Sequence[str]) -> PhysicalTable:
-    result = table
-    for raw_item in reversed(tuple(order_items)):
-        expr, descending = strip_order_direction(raw_item)
-        key_name = expression_sort_key_name(expr)
-        key = _sort_value(result, expr, key_name).require_tensor()
-        order = torch.argsort(key, descending=descending, stable=True)
-        result = result.gather(order)
-    return result
-
-
-def _sort_value(table: PhysicalTable, expression: str, key_name: str) -> PhysicalValue:
-    try:
-        return table.value_named(key_name)
-    except KeyError:
-        return evaluate_expression(table, expression)
-
-
-def _resolve_alias_projections(
-    select_aliases: dict[str, str],
-    expressions: Sequence[str],
-) -> tuple[str, ...]:
-    resolved = []
-    for expression in expressions:
-        source = select_aliases.get(expression)
-        resolved.append(
-            replace_aggregate_calls_with_refs(source)
-            if source is not None
-            else expression
-        )
-    return tuple(resolved)
-
-
-def _inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return inner_join_indices(left_key, right_key)
-
-
-def _combine_join_tables(
-    left: PhysicalTable,
-    right: PhysicalTable,
-    left_rows: torch.Tensor,
-    right_rows: torch.Tensor,
-    left_key: str,
-    right_key: str,
-) -> PhysicalTable:
-    items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
-    for name in left.order:
-        if _same_column(name, left_key):
-            continue
-        value = left.columns[name].gather(left_rows)
-        items.append((name, value, _join_aliases(left, name, left_key, right_key)))
-    for name in right.order:
-        if _same_column(name, right_key):
-            continue
-        value = right.columns[name].gather(right_rows)
-        items.append((name, value, _join_aliases(right, name, right_key, left_key)))
-    return PhysicalTable.projected("join", items, int(left_rows.numel()))
-
-
-def _aggregate_specs(node: TQPOperatorNode, child: PhysicalTable) -> tuple[_AggregateSpec, ...]:
-    specs = []
-    for raw in _metadata_list(node, "Aggregates"):
-        if raw.lower() == "count_star()":
-            specs.append(_AggregateSpec("count_star", None, ("count_star()", "count(*)")))
-            continue
-        match = re.fullmatch(r"(sum_no_overflow|sum|avg|min|max|count)\((.*)\)", raw.strip(), re.I)
-        if match is None:
-            raise UnsupportedPlanError(f"unsupported aggregate expression: {raw}")
-        function = _canonical_aggregate_function(match.group(1))
-        argument = match.group(2).strip()
-        child_name = _child_name(child, argument)
-        specs.append(_AggregateSpec(function, argument, aggregate_output_aliases(function, argument, child_name)))
-    return tuple(specs)
-
-
-def _canonical_aggregate_function(function: str) -> str:
-    lowered = function.lower()
-    return _AGGREGATE_FUNCTION_ALIASES.get(lowered, lowered)
-
-
-def _child_name(child: PhysicalTable, argument: str) -> str | None:
-    stripped = argument.strip()
-    if not stripped.startswith("#"):
-        return stripped
-    index = int(stripped[1:])
-    if index >= len(child.order):
-        return None
-    return child.order[index]
-
-
-def _join_condition(node: TQPOperatorNode) -> tuple[str, str]:
-    conditions = _metadata_list(node, "Conditions")
-    if len(conditions) != 1 or "=" not in conditions[0]:
-        raise UnsupportedPlanError(f"unsupported join condition: {conditions}")
-    left, right = conditions[0].split("=", 1)
-    return left.strip(), right.strip()
-
-
-def _join_aliases(table: PhysicalTable, column: str, own_key: str, other_key: str) -> tuple[str, ...]:
-    aliases = [column, f"{table.name}.{column}"]
-    if column == own_key:
-        aliases.append(other_key)
-    return tuple(dict.fromkeys(aliases))
-
-
-def _same_column(left: str, right: str) -> bool:
-    return left == right or left.rsplit(".", 1)[-1] == right.rsplit(".", 1)[-1]
-
-
-def _scatter_sum(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
-    result = torch.zeros(group_count, dtype=values.dtype, device=values.device)
-    return result.index_add(0, group_ids.to(dtype=torch.int64), values)
-
-
-def _scatter_reduce(values: torch.Tensor, group_ids: torch.Tensor, group_count: int, reduce: str) -> torch.Tensor:
-    fill_value = float("inf") if reduce == "amin" else float("-inf")
-    result = torch.full((group_count,), fill_value, dtype=values.dtype, device=values.device)
-    return result.scatter_reduce(0, group_ids.to(dtype=torch.int64), values, reduce=reduce, include_self=True)
 
 
 def _materialize_literal(value: PhysicalValue, table: PhysicalTable) -> PhysicalValue:
@@ -429,6 +331,13 @@ def _rename_for_output(table: PhysicalTable, aliases: Sequence[str]) -> Physical
         return table
     items = [(alias, table.columns[name], (name, alias)) for alias, name in zip(aliases, table.order)]
     return PhysicalTable.projected("output", items, table.row_count)
+
+
+def _trim_to_output_arity(table: PhysicalTable, output_arity: int) -> PhysicalTable:
+    if output_arity >= len(table.order):
+        return table
+    items = [(name, table.columns[name], (name,)) for name in table.order[:output_arity]]
+    return PhysicalTable.projected(table.name, items, table.row_count)
 
 
 def _rows_from_table(table: PhysicalTable) -> list[dict[str, Any]]:
@@ -467,6 +376,21 @@ def _filter_columns(
     return tuple(dict.fromkeys(referenced))
 
 
+def _required_scan_columns(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    graph: TQPOperatorGraph,
+    parents: dict[str, tuple[str, ...]],
+    node_id: str,
+) -> tuple[str, ...]:
+    available = _table_columns(con, table_name)
+    required = required_columns_from_parents(graph, parents, node_id, _metadata_list)
+    tokens = set()
+    for expression in required:
+        tokens.update(re.findall(r"[A-Za-z_][\w]*", expression))
+    return tuple(column for column in available if column in tokens)
+
+
 def _table_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> tuple[str, ...]:
     return tuple(str(row[1]) for row in con.execute(f"pragma table_info('{table_name}')").fetchall())
 
@@ -483,3 +407,7 @@ def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
 def _metadata_string(node: TQPOperatorNode, key: str) -> str | None:
     values = _metadata_list(node, key)
     return values[0] if values else None
+
+
+def _is_scalar_subquery_guard_projection(expression: str) -> bool:
+    return "scalar subqueries can only return a single row" in expression
