@@ -16,6 +16,7 @@ from tpch_torch.backend.physical_expr import (
     projection_name,
     strip_order_direction,
 )
+from tpch_torch.backend import physical_fusion
 from tpch_torch.backend.physical_join import inner_join_indices
 from tpch_torch.backend.physical_sql import replace_aggregate_calls_with_refs, select_expressions_by_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
@@ -45,6 +46,9 @@ class PhysicalPlanExecutor:
         self._select_aliases = select_expressions_by_alias(graph.source_sql)
 
     def execute(self) -> list[dict[str, Any]]:
+        fused_rows = physical_fusion.try_execute_fused_physical_plan(self._con, self._graph, self._device)
+        if fused_rows is not None:
+            return fused_rows
         table = self._execute_node(self._graph.root_id)
         aliases = _describe_aliases(self._con, self._graph.source_sql)
         return _rows_from_table(_rename_for_output(table, aliases))

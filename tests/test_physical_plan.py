@@ -2,9 +2,16 @@ import duckdb
 import pytest
 import torch
 
-from tpch_torch.duckdb_bridge import generate_tpch
+from tpch_torch.duckdb_bridge import create_lineitem_fixture, generate_tpch
+from tpch_torch.frontend import compile_sirius_plan
 from tpch_torch.runner import run_sql, validate_sql, validate_sql_with_frontend
-from tpch_torch.sql import get_tpch_query
+from tpch_torch.sql import TPC_H_Q1_SQL, get_tpch_query
+
+
+Q1_FIXTURE_ROWS = [
+    ("N", "O", 10.0, 100.0, 0.05, 0.10, "1998-09-02"),
+    ("A", "F", 5.0, 50.0, 0.00, 0.08, "1998-01-01"),
+]
 
 
 def _join_con():
@@ -189,6 +196,28 @@ def test_physical_plan_accepts_sum_no_overflow_aggregate_alias():
     specs = _aggregate_specs(node, child)
 
     assert [(spec.function, spec.argument) for spec in specs] == [("sum", "#0")]
+
+
+def test_q1_physical_plan_uses_graph_lowered_fusion(monkeypatch):
+    from tpch_torch.backend.physical import execute_physical_plan
+    import tpch_torch.backend.physical_fusion as physical_fusion
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, Q1_FIXTURE_ROWS)
+    plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
+    calls = []
+    sentinel = [{"ok": 1}]
+
+    def fused(con_arg, graph, device):
+        calls.append((graph.query_id, graph.root.kind, device))
+        return sentinel
+
+    monkeypatch.setattr(physical_fusion, "try_execute_fused_physical_plan", fused)
+
+    rows = execute_physical_plan(con, plan.operator_graph, device="cpu")
+
+    assert rows == sentinel
+    assert calls == [(1, plan.operator_graph.root.kind, "cpu")]
 
 
 @pytest.fixture(scope="module")
