@@ -274,7 +274,9 @@
 - [x] 第一版 `TQPPlan.operator_graph` 与 DuckDB JSON physical plan lowering。
 - [x] 将 Q2-Q22 兼容执行器拆成由通用 Join/Subquery/CTE/Aggregate nodes 组合的 graph recipes。
 - [x] DuckDB physical-plan interpreter v1：generic joins/aggregates 与 TPC-H Q1/Q6/Q12/Q14/Q19。
+- [x] 新增 physical-only TPC-H coverage probe，用于跟踪自动算子迁移进度。
 - [ ] 继续用 physical-plan interpreter 替换剩余 query-id recipes，覆盖 delimiter/mark/nested-loop/subquery/CTE nodes。
-- [ ] projection/filter/aggregate/map-reduce chains 的 fusion passes。
+- [x] 第一批 graph-lowered fusion：Q1 scan/filter/project/group/order fused dense grouped reductions。
+- [ ] 更多 projection/filter/aggregate/map-reduce chains 的 fusion passes。
 - [ ] Device/data-movement scheduler and metrics。
 - [ ] `torch.compile` / Antares / alternative compiler experiments。

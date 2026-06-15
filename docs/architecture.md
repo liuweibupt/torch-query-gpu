@@ -90,7 +90,7 @@ DuckDB physical-plan interpretation is now a separate backend layer:
 
 ```python
 # tpch_torch/backend/graph.py
-if plan.query_id in {1, 12, 14, 19}:
+if plan.query_id in {1, 6, 12, 14, 19}:
     return execute_physical_plan(con, graph, device=device)
 ```
 
@@ -175,14 +175,14 @@ flowchart TD
     Q1SQL["TPC-H Q1 SQL"] --> Frontend["DuckDB/Sirius-like frontend"]
     Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
     Graph --> Physical["execute_physical_plan()"]
-    Physical --> Scan["SEQ_SCAN + scan filter"]
-    Scan --> Project["PROJECTION arithmetic exprs"]
-    Project --> Aggregate["PERFECT_HASH_GROUP_BY"]
-    Aggregate --> Sort["ORDER_BY returnflag, linestatus"]
-    Sort --> Rows["result rows"]
+    Physical --> Fusion["physical_fusion hook"]
+    Fusion --> Scan["fetch tensors + scan filter once"]
+    Scan --> Project["fused arithmetic exprs"]
+    Project --> Aggregate["dense group id + torch.bincount"]
+    Aggregate --> Rows["decoded result rows"]
 ```
 
-Q1 now uses the same physical interpreter boundary as migrated generic joins: DuckDB supplies the physical node graph, and `physical.py` executes scan/filter/project/group/sort with PyTorch tensors. Only final grouped rows are decoded and materialized on the host.
+Q1 now uses the same physical interpreter boundary as migrated generic joins, plus a graph-lowered fusion hook: DuckDB supplies the physical node graph, `physical.py` enters the fusion hook, and `physical_fusion.py` executes canonical Q1 with dense-id grouped tensor reductions. Only final grouped rows are decoded and materialized on the host.
 
 ## SQL support boundary
 
@@ -213,6 +213,8 @@ interpretation for those complex nodes.
 
 The strict Substrait failures are DuckDB exporter coverage limits. They are not
 PyTorch backend fallbacks.
+
+A physical-only coverage probe in `tpch_torch/physical_coverage.py` calls `execute_physical_plan()` directly for TPC-H queries, so migration progress is measured without graph recipe dispatch.
 
 ## Verification commands
 

@@ -17,6 +17,7 @@
 - ✅ Q1/Q6 默认路径已迁入 DuckDB physical-plan interpreter：SQL → DuckDB JSON physical plan → `TQPOperatorGraph` → `execute_physical_plan()` → PyTorch tensor operators。
 - ✅ Q2-Q22 已从旧 `queries/qXX` 模板调用迁到 `backend/tpch_graph_qXX` graph recipes，并组合通用 `graph_nodes`：Scan、LookupJoin、SemiJoin、AntiJoin、ScalarSubquery、GroupedScalarSubquery、MaterializedCTE、Aggregate。
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1/Q6/Q12/Q14/Q19 已迁到该通用 interpreter，不再走 query-id recipe。
+- ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
 - ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes，但复杂 subquery/CTE/window/set operation/HAVING 仍显式失败。
@@ -62,7 +63,7 @@ flowchart LR
 
 ## Q1 是怎么实现的
 
-Q1 当前已经从 query-id direct primitive 迁到通用 DuckDB physical-plan interpreter：DuckDB JSON physical plan 被 lowering 成 `TQPOperatorGraph`，backend 在 `PyTorchGraphExecutor` 中调用 `execute_physical_plan()`，再由 `physical.py` 解释 `SEQ_SCAN` / `PROJECTION` / `PERFECT_HASH_GROUP_BY` / `ORDER_BY` 等节点并落到 PyTorch tensor operators。
+Q1 当前走 graph-lowered fused physical primitive：DuckDB JSON physical plan 先被 lowering 成 `TQPOperatorGraph`，backend 进入 `execute_physical_plan()` 后由 `physical_fusion.py` 识别 canonical Q1 graph shape，并把 scan/filter/project/group/order 的重计算段融合为 dense-id grouped tensor reductions。未识别的 graph 仍显式走普通 physical interpreter。
 
 ```mermaid
 flowchart TD
@@ -71,19 +72,20 @@ flowchart TD
     Graph --> Plan["TQPPlan.operator_graph"]
     Plan --> Backend["PyTorchGraphExecutor"]
     Backend --> Physical["execute_physical_plan()"]
-    Physical --> Scan["SEQ_SCAN lineitem<br/>scan filter: l_shipdate <= cutoff"]
-    Scan --> Project["PROJECTION<br/>discounted price / charge exprs"]
-    Project --> Group["PERFECT_HASH_GROUP_BY<br/>sum / avg / count_star"]
-    Group --> Order["ORDER_BY<br/>returnflag, linestatus"]
-    Order --> Rows["Q1 rows"]
+    Physical --> Fusion["physical_fusion.try_execute_fused_physical_plan"]
+    Fusion --> Scan["fetch lineitem tensors<br/>scan filter once"]
+    Scan --> Project["fused expressions<br/>discounted price / charge"]
+    Project --> Group["dense group id + torch.bincount<br/>sum / avg / count_star"]
+    Group --> Rows["decode tiny grouped result"]
 ```
 
 关键代码位置：
 
 - `tpch_torch/duckdb_plan_json.py`：DuckDB `EXPLAIN (FORMAT JSON)` lowering 到 `TQPOperatorGraph`。
 - `tpch_torch/backend/graph.py`：`PyTorchGraphExecutor` 将 Q1/Q6/Q12/Q14/Q19 分发到 `execute_physical_plan()`。
-- `tpch_torch/backend/physical.py`：解释 DuckDB physical nodes，scan/filter/project/group/order 都由 PyTorch tensor 算子完成。
-- `tpch_torch/backend/physical_expr.py`：解释 Q1 中的 arithmetic / internal compress-decompress / projection ref 表达式。
+- `tpch_torch/backend/physical.py`：解释 DuckDB physical nodes，并在入口调用 graph-lowered fusion hook。
+- `tpch_torch/backend/physical_fusion.py`：识别 canonical Q1 graph shape，执行 fused dense-id grouped reductions。
+- `tpch_torch/backend/physical_expr.py`：解释普通 physical path 中的 arithmetic / internal compress-decompress / projection ref 表达式。
 
 ```python
 # tpch_torch/backend/pytorch.py
@@ -95,8 +97,13 @@ if plan.operator_graph is not None:
 
 ```python
 # tpch_torch/backend/graph.py
-if plan.query_id in {1, 12, 14, 19}:
+if plan.query_id in {1, 6, 12, 14, 19}:
     return execute_physical_plan(con, graph, device=device)
+
+# tpch_torch/backend/physical.py
+fused_rows = physical_fusion.try_execute_fused_physical_plan(...)
+if fused_rows is not None:
+    return fused_rows
 ```
 
 ## 安装
@@ -297,6 +304,18 @@ tpch-torch-benchmark \
 
 Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke benchmark 主要覆盖 Q12/Q14/Q19 和 generic physical-plan 算子优化。
 
+### Q1 graph-lowered fusion smoke benchmark（SF=1）
+
+命令均为 `--query 1 --frontend sirius --device cpu --cold-runs 1 --warmup-runs 1 --hot-runs 3`，计时端到端且样本很短，仅用于确认优化方向：
+
+| 版本 | cold median | hot median | 说明 |
+| --- | ---: | ---: | --- |
+| `357b1c8` main（普通 physical interpreter） | 8969.746 ms | 9345.923 ms | generic projection/groupby path |
+| 当前 Q1 fusion 分支 | 1515.715 ms | 1114.154 ms | graph-lowered Q1 fused dense grouped reductions |
+
+该优化没有绕过 SQL lowering：Q1 仍从 DuckDB JSON physical plan 进入 `TQPOperatorGraph`，只是 physical backend 在 graph shape 上选择 fused primitive。
+
+
 ## TPC-H 支持矩阵
 
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
@@ -321,7 +340,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 - [x] Strict DuckDB Substrait path：覆盖 DuckDB exporter 能导出的查询。
 - [x] Batch 1 primitives：grouped min/max/mean、mask helpers、top-k、首批 RLE mask primitives。
 - [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
-- [x] Q1 已迁到 DuckDB physical-plan interpreter：由 SQL-lowered physical graph 自动调用 PyTorch tensor operators。
+- [x] Q1 已增加 graph-lowered fused physical primitive：仍由 SQL/DuckDB graph 触发，但 dense grouped reductions 走融合 tensor path。
 - [x] Q6 默认路径已迁到 DuckDB physical-plan interpreter；`--compressed-masks` 保留显式 compressed mask primitive 实验。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
 - [x] Physical-plan 算子热路径优化：tensor join index、sorted-unique build fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
@@ -329,9 +348,11 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
 - [x] 第一版显式 `TQPOperatorGraph` 与 DuckDB JSON lowering。
 - [x] Q2-Q22 graph recipes 已组合通用 Join/Subquery/CTE/Aggregate graph nodes，不再调用旧查询模板。
-- [x] Q1/Q6/Q12/Q14/Q19 默认路径已从 query-id recipe/direct primitive 迁到 DuckDB physical-plan interpreter。
+- [x] Q1/Q6/Q12/Q14/Q19 默认路径已从旧 query-id dispatch 迁到 DuckDB physical-plan interpreter。
+- [x] 新增 `tpch_torch.physical_coverage`，用于探测 TPC-H physical-only 自动算子覆盖。
 - [ ] 继续将剩余 Q2-Q22 recipes 迁到 DuckDB physical-plan interpreter，覆盖 subquery/CTE/delim/mark/nested-loop 等节点。
-- [ ] fusion、scheduling、compiler lowering。
+- [x] 第一批 graph-lowered fusion：Q1 scan/filter/project/group/order fused dense grouped reductions。
+- [ ] 更多 fusion、scheduling、compiler lowering。
 
 ## 文档导航
 

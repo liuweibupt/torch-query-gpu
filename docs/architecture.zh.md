@@ -78,7 +78,7 @@ DuckDB physical-plan interpreter 已成为独立后端层：
 
 ```python
 # tpch_torch/backend/graph.py
-if plan.query_id in {1, 12, 14, 19}:
+if plan.query_id in {1, 6, 12, 14, 19}:
     return execute_physical_plan(con, graph, device=device)
 ```
 
@@ -160,14 +160,14 @@ flowchart TD
     Q1SQL["TPC-H Q1 SQL"] --> Frontend["DuckDB/Sirius-like frontend"]
     Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
     Graph --> Physical["execute_physical_plan()"]
-    Physical --> Scan["SEQ_SCAN + scan filter"]
-    Scan --> Project["PROJECTION arithmetic exprs"]
-    Project --> Aggregate["PERFECT_HASH_GROUP_BY"]
-    Aggregate --> Sort["ORDER_BY returnflag, linestatus"]
-    Sort --> Rows["result rows"]
+    Physical --> Fusion["physical_fusion hook"]
+    Fusion --> Scan["fetch tensors + scan filter once"]
+    Scan --> Project["fused arithmetic exprs"]
+    Project --> Aggregate["dense group id + torch.bincount"]
+    Aggregate --> Rows["decoded result rows"]
 ```
 
-Q1 现在和已迁移的 generic joins 共用 physical interpreter 边界：DuckDB 输出 physical node graph，`physical.py` 用 PyTorch tensor 执行 scan/filter/project/group/sort；host 侧只做最终 grouped rows 的 decode/materialization。
+Q1 现在和已迁移的 generic joins 共用 physical interpreter 边界，并增加 graph-lowered fusion hook：DuckDB 输出 physical node graph，`physical.py` 进入 fusion hook，`physical_fusion.py` 用 dense-id grouped tensor reductions 执行 canonical Q1；host 侧只做最终 grouped rows 的 decode/materialization。
 
 ## 6. SQL 支持边界
 
@@ -192,6 +192,8 @@ Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。Generic 
 | Q2, Q4, Q16, Q17, Q20, Q21, Q22 | yes | DuckDB 1.2.x exporter blocked | yes | graph recipes |
 
 Strict Substrait 的 blocked 是 DuckDB exporter 覆盖限制，不是 PyTorch backend fallback。
+
+`tpch_torch/physical_coverage.py` 提供 physical-only coverage probe：对 TPC-H 直接调用 `execute_physical_plan()`，因此可以在不经过 graph recipe dispatch 的情况下衡量迁移进度。
 
 ## 8. 冷/热计时方法
 

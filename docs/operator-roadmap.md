@@ -358,7 +358,9 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [x] First explicit operator graph inside `TQPPlan`.
 - [x] Replace Q2-Q22 compatibility execution with graph recipes built from common Join/Subquery/CTE/Aggregate nodes.
 - [x] Add DuckDB physical-plan interpreter v1 for generic joins/aggregates and TPC-H Q1/Q6/Q12/Q14/Q19.
+- [x] Add physical-only TPC-H coverage probe for automatic operator migration tracking.
 - [ ] Replace remaining query-id graph recipes with physical-plan interpreter coverage for delimiter/mark/nested-loop/subquery/CTE nodes.
-- [ ] Fusion passes for map-reduce and projection/filter/aggregate chains.
+- [x] First graph-lowered fusion: Q1 scan/filter/project/group/order fused dense grouped reductions.
+- [ ] More fusion passes for map-reduce and projection/filter/aggregate chains.
 - [ ] Device/data-movement scheduler and metrics.
 - [ ] Torch compile / Antares / alternative compiler experiments.
