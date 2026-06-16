@@ -80,7 +80,8 @@ until a readable full paper/appendix is available.
 - [ ] Generic hash equi-join fast path using hash buckets, scatter, probe, collision
       iteration, and duplicate accumulation.
 - [ ] Join variants: non-equi, left outer, left semi, left anti.
-- [ ] Sort-based group-by aggregation using concatenated keys, sort,
+- [x] First sorted-input group-by fast path using `unique_consecutive`, inverse ids, and scatter reductions.
+- [ ] Full sort-based group-by aggregation using concatenated keys, sort,
       `unique_consecutive`, inverse ids, and scatter reductions.
 - [x] Sum/count group reductions for current query templates.
 - [x] First batch: min/max/mean group reductions as reusable primitives.
@@ -98,6 +99,7 @@ until a readable full paper/appendix is available.
       row loops; it produces tensor row-index pairs via `searchsorted`.
 - [x] First sorted/unique build-side join fast path skips redundant sort and
       duplicate expansion.
+- [x] Physical SEMI/ANTI joins now use membership probes without pair expansion.
 - [ ] Keep remaining data-dependent loops out of hot paths; loops over
       schema/operators are acceptable, loops over rows are not.
 - [x] Preserve columnar late materialization for physical joins: joins produce row-index pairs before
@@ -154,14 +156,14 @@ until a readable full paper/appendix is available.
 - [x] `idx_in_idx` for index/index intersection.
 - [x] First batch: `range_union` for RLE/RLE union.
 - [x] `merge_sorted_idx` for index/index union.
-- [ ] `compact_rle` to remove gaps between RLE runs after filtering.
+- [x] `compact_rle` to remove gaps between RLE runs after filtering.
 - [ ] `compact_rle_index` for RLE+Index compaction.
 - [x] First batch: `complement_rle` from Appendix A.1.
 - [x] `complement_index` from Appendix A.1.
 - [x] `rle_to_plain`.
 - [ ] `plain_to_rle_index` for Plain → RLE+Index.
 - [ ] `plain_to_plain_index` for Plain → Plain+Index.
-- [ ] `range_arange` helper used to generate positions/runs in range algorithms
+- [x] `range_arange` helper used to generate positions/runs in range algorithms
       and RLE join-index expansion.
 
 ### Logical operators on encoded masks
@@ -208,10 +210,10 @@ until a readable full paper/appendix is available.
 - [ ] Grouping phase over aligned group-by columns using unique values and
       inverse ids.
 - [ ] Aggregation phase using scatter operations over inverse ids.
-- [ ] RLE `COUNT`: sum run lengths.
-- [ ] RLE `SUM`: sum value × run length.
-- [ ] RLE `MIN`/`MAX`: reduce value tensors only.
-- [ ] `AVG`: post-process `SUM / COUNT`.
+- [x] RLE `COUNT`: sum run lengths.
+- [x] RLE `SUM`: sum value × run length.
+- [x] RLE `MIN`/`MAX`: reduce value tensors only.
+- [x] `AVG`: post-process `SUM / COUNT`.
 - [ ] `STD`/`VAR`: use sum of squared values plus sum/count post-processing.
 - [ ] Appendix A.2 group-by walkthrough converted into regression tests.
 - [ ] Avoid redundant filtering of aggregate columns when RLE group-by columns
@@ -337,7 +339,7 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [x] Multi-column physical equi-join via composite tensor keys.
 - [x] Parent-required join-key retention for later physical joins.
 - [ ] GPU hash equi-join producing late-materialized index pairs.
-- [ ] Semi/anti joins.
+- [x] Semi/anti joins use membership-only probes for physical joins.
 - [ ] Mark/delimiter-style subquery patterns needed by TPC-H shapes.
 
 ### Batch 4: compressed storage and mask execution
@@ -351,7 +353,7 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 
 ### Batch 5: compressed aggregate and join execution
 
-- [ ] RLE-aware aggregation.
+- [x] First RLE-aware scalar aggregation primitives (`COUNT`, `SUM`, `MIN`, `MAX`, `AVG`).
 - [ ] Compressed Join Index generation and application.
 - [ ] Compression-aware join ordering and filter/group-by optimizations.
 

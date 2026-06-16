@@ -63,7 +63,8 @@
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。
 - [ ] Join variants：non-equi、left outer、left semi、left anti。
-- [ ] Sort-based group-by aggregation：concatenated keys、sort、`unique_consecutive`、inverse ids、scatter reductions。
+- [x] 第一版 sorted-input group-by fast path：`unique_consecutive`、inverse ids、scatter reductions。
+- [ ] 完整 sort-based group-by aggregation：concatenated keys、sort、`unique_consecutive`、inverse ids、scatter reductions。
 - [x] 当前 query templates 的 sum/count group reductions。
 - [x] 可复用 min/max/mean group reductions。
 - [ ] Count-distinct aggregation。
@@ -76,6 +77,7 @@
 - [x] Generic grouped aggregate 使用 tensor group id + grouped reductions，避免 Python row-group loops。
 - [x] DuckDB physical inner equi-join 移除 Python key row loop，使用 tensor `searchsorted` 产生 row-index pairs。
 - [x] Physical join sorted/unique build-side fast path：跳过 `argsort` 与重复展开。
+- [x] Physical SEMI/ANTI joins 使用 membership probe，不再先展开 join pairs。
 - [ ] 移除剩余 hot path 中的数据相关 Python row loops；保留 schema/operator 级循环。
 - [x] 保持 columnar late materialization：physical join 先产生 row-index pairs，再物化 payload columns。
 - [ ] row-level work 优先用 tensor ops，不用 Python control flow。
@@ -116,14 +118,14 @@
 - [x] `idx_in_idx`。
 - [x] `range_union` for RLE/RLE union。
 - [x] `merge_sorted_idx`。
-- [ ] `compact_rle`。
+- [x] `compact_rle`。
 - [ ] `compact_rle_index`。
 - [x] `complement_rle` from Appendix A.1。
 - [x] `complement_index` from Appendix A.1。
 - [x] `rle_to_plain`。
 - [ ] `plain_to_rle_index`。
 - [ ] `plain_to_plain_index`。
-- [ ] `range_arange` helper，用于 range algorithms 和 RLE join-index expansion。
+- [x] `range_arange` helper，用于 range algorithms 和 RLE join-index expansion。
 
 ### Encoded mask logical operators
 
@@ -156,10 +158,10 @@
 
 - [ ] aligned group-by columns 上的 grouping phase。
 - [ ] 使用 scatter over inverse ids 的 aggregation phase。
-- [ ] RLE `COUNT`：sum run lengths。
-- [ ] RLE `SUM`：sum value × run length。
-- [ ] RLE `MIN` / `MAX`：只 reduce value tensors。
-- [ ] `AVG`：`SUM / COUNT` 后处理。
+- [x] RLE `COUNT`：sum run lengths。
+- [x] RLE `SUM`：sum value × run length。
+- [x] RLE `MIN` / `MAX`：只 reduce value tensors。
+- [x] `AVG`：`SUM / COUNT` 后处理。
 - [ ] `STD` / `VAR`：sum of squared values + sum/count 后处理。
 - [ ] Appendix A.2 group-by walkthrough 转回归测试。
 - [ ] RLE group-by columns 已携带 filtered ranges 时，避免重复 filter aggregate columns。
@@ -253,7 +255,7 @@
 - [x] Multi-column physical equi-join：通过 composite tensor key 执行多列等值连接。
 - [x] Parent-required join-key retention：为后续 physical join 保留仍会被父节点引用的 join key。
 - [ ] GPU hash equi-join fast path：buckets / probe / collision handling。
-- [ ] Semi/anti joins。
+- [x] Physical semi/anti joins 使用 membership-only probes。
 - [ ] TPC-H 形状所需的 mark/delimiter-style subquery patterns。
 
 ### Batch 4：Compressed storage / mask execution
@@ -267,7 +269,7 @@
 
 ### Batch 5：Compressed aggregate / join execution
 
-- [ ] RLE-aware aggregation。
+- [x] 第一版 RLE-aware scalar aggregation primitives（`COUNT`, `SUM`, `MIN`, `MAX`, `AVG`）。
 - [ ] Compressed Join Index generation and application。
 - [ ] Compression-aware join ordering 与 filter/group-by optimizations。
 

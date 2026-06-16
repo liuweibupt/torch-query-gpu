@@ -56,9 +56,9 @@ flowchart LR
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | Export DuckDB textual/JSON plans and lower JSON nodes to `TQPOperatorGraph`. |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | Immutable frontend/backend boundary. |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | Require graph execution for TPC-H; route Q1-Q22 physical interpretation, the explicit Q6 compressed-mask primitive experiment, and generic SQL. |
-| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner and multi-column equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions; includes tensor join-index generation, membership folding, static dictionary encoding, and alias-deduplicated selection. |
+| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | Interpret DuckDB `SEQ_SCAN`, `FILTER`, `PROJECTION`, inner and multi-column equi `HASH_JOIN`, grouped/ungrouped aggregate, `ORDER_BY`, `TOP_N`, `LIMIT`, final aggregate expressions; includes tensor join-index generation, SEMI/ANTI membership probes, sorted group-by fast paths, membership folding, static dictionary encoding, and alias-deduplicated selection. |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan, filter, lookup join, semi/anti join, scalar subquery, grouped scalar subquery, CTE materialization, aggregate, sort/limit helpers. |
-| Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | Grouped reductions, low-cardinality group ids, top-k, Plain/RLE/Index mask primitives. |
+| Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Grouped reductions, low-cardinality group ids, top-k, Plain/RLE/Index mask primitives, public range primitives, and RLE aggregate primitives. |
 
 ## Key code snippets
 
@@ -110,6 +110,18 @@ starts = torch.searchsorted(sorted_right_values, left_values, right=False)
 ends = torch.searchsorted(sorted_right_values, left_values, right=True)
 if _is_strictly_increasing(sorted_right_values):
     return _unique_build_join_indices(starts, ends - starts, right_order)
+```
+
+```python
+# tpch_torch/backend/physical_membership.py
+positions = torch.searchsorted(sorted_right, left_key)
+return in_bounds & (sorted_right[safe_positions] == left_key)
+```
+
+```python
+# tpch_torch/backend/physical_aggregate.py
+if _is_lexicographically_non_decreasing(stacked_keys):
+    return torch.unique_consecutive(stacked_keys, dim=0, return_inverse=True)
 ```
 
 ```python

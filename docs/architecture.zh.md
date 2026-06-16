@@ -45,9 +45,9 @@ flowchart LR
 | DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 `TQPOperatorGraph`。 |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | 不可变前后端边界。 |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1-Q22 physical interpreter、显式 Q6 compressed-mask primitive 实验和 generic SQL。 |
-| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner 与 multi-column equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、membership folding、static dictionary encoding 和 alias 去重 selection。 |
+| Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner 与 multi-column equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、SEMI/ANTI membership probe、sorted group-by fast path、membership folding、static dictionary encoding 和 alias 去重 selection。 |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan、filter、lookup join、semi/anti join、scalar subquery、grouped scalar subquery、CTE materialization、aggregate、sort/limit helpers。 |
-| Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed.py` | grouped reductions、dense group id、top-k、Plain/RLE/Index mask 原型。 |
+| Tensor operators | `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | grouped reductions、dense group id、top-k、Plain/RLE/Index mask、公开 range primitives 与 RLE aggregate primitives。 |
 
 ## 4. 关键代码片段
 
@@ -97,6 +97,18 @@ starts = torch.searchsorted(sorted_right_values, left_values, right=False)
 ends = torch.searchsorted(sorted_right_values, left_values, right=True)
 if _is_strictly_increasing(sorted_right_values):
     return _unique_build_join_indices(starts, ends - starts, right_order)
+```
+
+```python
+# tpch_torch/backend/physical_membership.py
+positions = torch.searchsorted(sorted_right, left_key)
+return in_bounds & (sorted_right[safe_positions] == left_key)
+```
+
+```python
+# tpch_torch/backend/physical_aggregate.py
+if _is_lexicographically_non_decreasing(stacked_keys):
+    return torch.unique_consecutive(stacked_keys, dim=0, return_inverse=True)
 ```
 
 ```python
