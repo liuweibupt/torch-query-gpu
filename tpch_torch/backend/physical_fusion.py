@@ -64,20 +64,23 @@ def _is_q1_physical_graph(graph: TQPOperatorGraph) -> bool:
 def _execute_q1_fused(con: duckdb.DuckDBPyConnection, device: str) -> list[dict[str, Any]]:
     table = fetch_lineitem_tensor_table(con, device=device)
     table.require_columns(_Q1_REQUIRED_COLUMNS)
-    selected_rows = torch.nonzero(table.columns["l_shipdate"] <= _Q1_CUTOFF_YYYYMMDD).flatten()
-    if selected_rows.numel() == 0:
+    selected_mask = table.columns["l_shipdate"] <= _Q1_CUTOFF_YYYYMMDD
+    if not bool(torch.any(selected_mask).cpu().item()):
         return []
-    columns = _gather_q1_columns(table, selected_rows)
     status_count = len(table.dictionaries["l_linestatus"])
     flag_count = len(table.dictionaries["l_returnflag"])
-    group_ids = (columns["l_returnflag"].to(dtype=torch.int64) * status_count) + columns[
-        "l_linestatus"
-    ].to(dtype=torch.int64)
-    aggregates = _q1_grouped_reductions(columns, group_ids, flag_count * status_count)
+    group_ids = _q1_group_ids(table, status_count)
+    aggregates = _q1_grouped_reductions(table.columns, selected_mask, group_ids, flag_count * status_count)
     non_empty_group_ids = torch.nonzero(aggregates["count_order"] > 0).flatten()
     compacted = {name: tensor[non_empty_group_ids] for name, tensor in aggregates.items()}
     keys = torch.stack((non_empty_group_ids // status_count, non_empty_group_ids % status_count), dim=1)
     return _format_q1_rows(table, keys, compacted)
+
+
+def _q1_group_ids(table: TensorTable, status_count: int) -> torch.Tensor:
+    return (table.columns["l_returnflag"].to(dtype=torch.int64) * status_count) + table.columns[
+        "l_linestatus"
+    ].to(dtype=torch.int64)
 
 
 def _gather_q1_columns(table: TensorTable, selected_rows: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -90,24 +93,26 @@ def _gather_q1_columns(table: TensorTable, selected_rows: torch.Tensor) -> dict[
 
 def _q1_grouped_reductions(
     columns: dict[str, torch.Tensor],
+    selected_mask: torch.Tensor,
     group_ids: torch.Tensor,
     group_count: int,
 ) -> dict[str, torch.Tensor]:
     quantity = columns["l_quantity"]
     extendedprice = columns["l_extendedprice"]
     discount = columns["l_discount"]
+    mask_weights = selected_mask.to(dtype=quantity.dtype)
     discounted_price = extendedprice * (1.0 - discount)
     charge = discounted_price * (1.0 + columns["l_tax"])
-    count_order = torch.bincount(group_ids, minlength=group_count)
+    count_order = torch.bincount(group_ids, weights=mask_weights, minlength=group_count)
     count_as_float = count_order.to(dtype=quantity.dtype)
-    sum_qty = torch.bincount(group_ids, weights=quantity, minlength=group_count)
-    sum_base_price = torch.bincount(group_ids, weights=extendedprice, minlength=group_count)
-    sum_discount = torch.bincount(group_ids, weights=discount, minlength=group_count)
+    sum_qty = torch.bincount(group_ids, weights=quantity * mask_weights, minlength=group_count)
+    sum_base_price = torch.bincount(group_ids, weights=extendedprice * mask_weights, minlength=group_count)
+    sum_discount = torch.bincount(group_ids, weights=discount * mask_weights, minlength=group_count)
     return {
         "sum_qty": sum_qty,
         "sum_base_price": sum_base_price,
-        "sum_disc_price": torch.bincount(group_ids, weights=discounted_price, minlength=group_count),
-        "sum_charge": torch.bincount(group_ids, weights=charge, minlength=group_count),
+        "sum_disc_price": torch.bincount(group_ids, weights=discounted_price * mask_weights, minlength=group_count),
+        "sum_charge": torch.bincount(group_ids, weights=charge * mask_weights, minlength=group_count),
         "avg_qty": sum_qty / count_as_float,
         "avg_price": sum_base_price / count_as_float,
         "avg_disc": sum_discount / count_as_float,
