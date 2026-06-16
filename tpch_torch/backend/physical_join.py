@@ -9,6 +9,7 @@ import torch
 
 from tpch_torch.backend.physical_aliases import qualified_aliases_for_join_side
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_membership import membership_join_indices
 from tpch_torch.backend.physical_projection import matching_aggregate_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.backend.physical_sql_regions import output_requires_column
@@ -73,10 +74,7 @@ def semi_join_indices(
 ) -> torch.Tensor:
     """Return left row indices that have at least one match on the right side."""
 
-    left_rows, _ = join_indices_for_conditions(left, right, conditions)
-    if left_rows.numel() == 0:
-        return left_rows
-    return torch.unique(left_rows, sorted=True)
+    return membership_join_indices(left, right, conditions, matched=True)
 
 
 def anti_join_indices(
@@ -86,9 +84,7 @@ def anti_join_indices(
 ) -> torch.Tensor:
     """Return left row indices that have no match on the right side."""
 
-    left_rows, _ = join_indices_for_conditions(left, right, conditions)
-    matched = _matched_preserved_mask(left.row_count, left_rows, left_rows.device)
-    return torch.nonzero(~matched).flatten().to(dtype=torch.int64)
+    return membership_join_indices(left, right, conditions, matched=False)
 
 
 def semi_join_table(

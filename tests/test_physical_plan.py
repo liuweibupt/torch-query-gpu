@@ -79,6 +79,35 @@ def test_physical_inner_join_indices_uses_sorted_unique_build_fast_path(monkeypa
     assert torch.equal(right_rows, torch.tensor([2, 0, 1, 1], dtype=torch.int64))
 
 
+def test_physical_semi_and_anti_join_use_membership_probe_without_pair_expansion(monkeypatch):
+    import tpch_torch.backend.physical_join as physical_join
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+
+    def fail_pair_expansion(*_args, **_kwargs):
+        raise AssertionError("semi/anti joins should use membership probing, not pair expansion")
+
+    monkeypatch.setattr(physical_join, "join_indices_for_conditions", fail_pair_expansion)
+
+    left = PhysicalTable(
+        "left",
+        {"id": PhysicalValue(torch.tensor([1, 2, 3, 4], dtype=torch.int64))},
+        ("id",),
+        4,
+    )
+    right = PhysicalTable(
+        "right",
+        {"id": PhysicalValue(torch.tensor([2, 2, 4, 5], dtype=torch.int64))},
+        ("id",),
+        4,
+    )
+
+    semi_rows = physical_join.semi_join_indices(left, right, (("id", "id"),))
+    anti_rows = physical_join.anti_join_indices(left, right, (("id", "id"),))
+
+    assert torch.equal(semi_rows, torch.tensor([1, 3], dtype=torch.int64))
+    assert torch.equal(anti_rows, torch.tensor([0, 2], dtype=torch.int64))
+
+
 def test_physical_expression_folds_same_column_literal_or(monkeypatch):
     from tpch_torch.backend.physical_expr import evaluate_expression
     from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
