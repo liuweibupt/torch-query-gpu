@@ -108,6 +108,38 @@ def test_physical_semi_and_anti_join_use_membership_probe_without_pair_expansion
     assert torch.equal(anti_rows, torch.tensor([0, 2], dtype=torch.int64))
 
 
+def test_physical_grouped_aggregate_uses_unique_consecutive_for_sorted_keys(monkeypatch):
+    from tpch_torch.backend.physical_aggregate import AggregateSpec, execute_grouped_aggregate
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+
+    def fail_unique(*_args, **_kwargs):
+        raise AssertionError("sorted grouped aggregate should use unique_consecutive, not generic unique")
+
+    monkeypatch.setattr(torch, "unique", fail_unique)
+
+    child = PhysicalTable(
+        "sorted_input",
+        {
+            "k1": PhysicalValue(torch.tensor([1, 1, 1, 2, 2, 3], dtype=torch.int64)),
+            "k2": PhysicalValue(torch.tensor([1, 1, 2, 1, 1, 1], dtype=torch.int64)),
+            "v": PhysicalValue(torch.tensor([5.0, 7.0, 11.0, 13.0, 17.0, 19.0])),
+        },
+        ("k1", "k2", "v"),
+        6,
+    )
+
+    result = execute_grouped_aggregate(
+        child,
+        ("k1", "k2"),
+        (AggregateSpec("sum", "v", ("sum_v",)), AggregateSpec("count_star", None, ("count_order",))),
+    )
+
+    assert result.value_named("k1").require_tensor().tolist() == [1, 1, 2, 3]
+    assert result.value_named("k2").require_tensor().tolist() == [1, 2, 1, 1]
+    assert result.value_named("sum_v").require_tensor().tolist() == [12.0, 11.0, 30.0, 19.0]
+    assert result.value_named("count_order").require_tensor().tolist() == [2, 1, 2, 1]
+
+
 def test_physical_expression_folds_same_column_literal_or(monkeypatch):
     from tpch_torch.backend.physical_expr import evaluate_expression
     from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue

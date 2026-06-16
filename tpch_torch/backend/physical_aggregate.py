@@ -33,7 +33,7 @@ def execute_grouped_aggregate(
     key_dtype = _group_key_dtype(key_values)
     key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
     stacked = torch.stack(key_tensors, dim=1)
-    unique_keys, inverse = torch.unique(stacked, dim=0, sorted=True, return_inverse=True)
+    unique_keys, inverse = _unique_group_keys(stacked)
     row_count = int(unique_keys.shape[0])
     items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
     for index, (expression, value) in enumerate(zip(group_exprs, key_values)):
@@ -50,6 +50,25 @@ def _group_key_dtype(values: Sequence[PhysicalValue]) -> torch.dtype:
     if any(value.require_tensor().dtype.is_floating_point for value in values):
         return torch.float64
     return torch.int64
+
+
+def _unique_group_keys(stacked_keys: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if _is_lexicographically_non_decreasing(stacked_keys):
+        return torch.unique_consecutive(stacked_keys, dim=0, return_inverse=True)
+    return torch.unique(stacked_keys, dim=0, sorted=True, return_inverse=True)
+
+
+def _is_lexicographically_non_decreasing(stacked_keys: torch.Tensor) -> bool:
+    if stacked_keys.shape[0] <= 1:
+        return True
+    previous = stacked_keys[:-1]
+    current = stacked_keys[1:]
+    changed = current != previous
+    equal_rows = ~torch.any(changed, dim=1)
+    first_changed = changed.to(dtype=torch.int64).argmax(dim=1)
+    current_first = current.gather(1, first_changed.reshape(-1, 1)).flatten()
+    previous_first = previous.gather(1, first_changed.reshape(-1, 1)).flatten()
+    return bool(torch.all(equal_rows | (current_first > previous_first)).cpu().item())
 
 
 def execute_ungrouped_aggregate(child: PhysicalTable, specs: Sequence[AggregateSpec]) -> PhysicalTable:
