@@ -7,7 +7,7 @@
 - Generic SQL 与 DuckDB physical-plan interpreter 当前支持边界。
 - TPC-H Q1-Q22 支持矩阵；其中 Q1-Q22 已迁入 physical-plan interpreter。
 - Q1 SF=1 冷/热性能对比与 benchmark 方法。
-- 当前算子优化状态：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter、RLE aggregate primitives。
+- 当前算子优化状态：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter、Q1 resident tensor hot path、RLE aggregate primitives。
 - 中文 Roadmap/TODO 链接。
 
 文档导航：

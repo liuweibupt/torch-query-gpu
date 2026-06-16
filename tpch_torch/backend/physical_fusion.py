@@ -83,14 +83,6 @@ def _q1_group_ids(table: TensorTable, status_count: int) -> torch.Tensor:
     ].to(dtype=torch.int64)
 
 
-def _gather_q1_columns(table: TensorTable, selected_rows: torch.Tensor) -> dict[str, torch.Tensor]:
-    return {
-        name: table.columns[name].index_select(0, selected_rows)
-        for name in _Q1_REQUIRED_COLUMNS
-        if name != "l_shipdate"
-    }
-
-
 def _q1_grouped_reductions(
     columns: dict[str, torch.Tensor],
     selected_mask: torch.Tensor,

@@ -36,12 +36,13 @@ def test_fetch_lineitem_tensor_table_reads_duckdb_fixture():
 
 
 class _FakeLineitemConnection:
-    def __init__(self):
+    def __init__(self, fail_after: int | None = 1):
         self.execute_count = 0
+        self.fail_after = fail_after
 
     def execute(self, _sql):
         self.execute_count += 1
-        if self.execute_count > 1:
+        if self.fail_after is not None and self.execute_count > self.fail_after:
             raise AssertionError("hot Q1 should reuse resident lineitem tensors")
         return self
 
@@ -77,6 +78,19 @@ def test_fetch_lineitem_tensor_table_cache_normalizes_equivalent_cpu_devices():
 
     assert second is first
     assert con.execute_count == 1
+
+def test_clear_lineitem_tensor_table_cache_forces_refetch():
+    from tpch_torch.duckdb_bridge import clear_lineitem_tensor_table_cache
+
+    con = _FakeLineitemConnection(fail_after=None)
+
+    first = fetch_lineitem_tensor_table(con, device="cpu")
+    clear_lineitem_tensor_table_cache(con)
+    second = fetch_lineitem_tensor_table(con, device="cpu")
+
+    assert second is not first
+    assert con.execute_count == 2
+
 
 def test_fetch_lineitem_tensor_table_uses_preencoded_string_columns(monkeypatch):
     from tpch_torch import duckdb_bridge

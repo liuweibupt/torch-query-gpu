@@ -104,6 +104,7 @@ until a readable full paper/appendix is available.
       schema/operators are acceptable, loops over rows are not.
 - [x] Preserve columnar late materialization for physical joins: joins produce row-index pairs before
       materializing payload columns.
+- [x] Q1 fused hot path uses resident tensors and masked `bincount` instead of selected-row payload gathers.
 - [ ] Prefer tensor operations over Python control flow for row-level work.
 - [ ] Use compiled execution where possible: TorchScript/TVM/torch compile paths,
       common sub-expression elimination, operator fusion, code generation, and

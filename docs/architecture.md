@@ -183,13 +183,13 @@ flowchart TD
     Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
     Graph --> Physical["execute_physical_plan()"]
     Physical --> Fusion["physical_fusion hook"]
-    Fusion --> Scan["fetch tensors + scan filter once"]
+    Fusion --> Scan["resident tensor fetch/cache + scan filter"]
     Scan --> Project["fused arithmetic exprs"]
-    Project --> Aggregate["dense group id + torch.bincount"]
+    Project --> Aggregate["dense group id + masked torch.bincount"]
     Aggregate --> Rows["decoded result rows"]
 ```
 
-Q1 now uses the same physical interpreter boundary as migrated generic joins, plus a graph-lowered fusion hook: DuckDB supplies the physical node graph, `physical.py` enters the fusion hook, and `physical_fusion.py` executes canonical Q1 with dense-id grouped tensor reductions. Only final grouped rows are decoded and materialized on the host.
+Q1 now uses the same physical interpreter boundary as migrated generic joins, plus a graph-lowered fusion hook: DuckDB supplies the physical node graph, `physical.py` enters the fusion hook, and `physical_fusion.py` executes canonical Q1 with dense-id grouped tensor reductions. Hot runs reuse resident lineitem tensors inside the DuckDB connection; only final grouped rows are decoded and materialized on the host.
 
 ## SQL support boundary
 
@@ -218,7 +218,7 @@ set operations, and HAVING still fail explicitly.
 The strict Substrait failures are DuckDB exporter coverage limits. They are not
 PyTorch backend fallbacks.
 
-A physical-only coverage probe in `tpch_torch/physical_coverage.py` calls `execute_physical_plan()` directly for TPC-H queries, so migration progress is measured without graph recipe dispatch.
+A physical-only coverage probe in `tpch_torch/physical_coverage.py` calls `execute_physical_plan()` directly for TPC-H queries, so migration progress is measured without graph recipe dispatch. Q1 uses the same physical boundary but caches converted lineitem tensors per connection/device for hot execution.
 
 ## Verification commands
 

@@ -20,6 +20,7 @@
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
+- ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
 - ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes，但复杂 subquery/CTE/window/set operation/HAVING 仍显式失败。
 
@@ -273,7 +274,7 @@ tpch-torch-benchmark \
 计时语义：
 
 - **cold**：每个样本新建 DuckDB connection，运行完整 frontend + tensor fetch/encoding + PyTorch backend + result materialization，再关闭连接。不刷新 OS page cache，也不重启 Python。
-- **hot**：复用一个 DuckDB connection，先执行 `--warmup-runs`，再记录 `--hot-runs`。
+- **hot**：复用一个 DuckDB connection，先执行 `--warmup-runs`，再记录 `--hot-runs`；Q1 的 lineitem tensor table 会在该连接内常驻复用，更接近 TQP 论文中“数据已转换为 PyTorch tensors 后测 query execution”的口径。
 - **CUDA**：每个样本前后调用 `torch.cuda.synchronize()`，报告 wall-clock ms，因此包含 CPU 侧 frontend/fetch/materialization 与 GPU work。
 - Benchmark 不做 DuckDB validation；正确性请单独运行 `tpch-torch-validate`。
 
@@ -304,14 +305,16 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 
 ### Q1 graph-lowered fusion smoke benchmark（SF=1）
 
-命令均为 `--query 1 --frontend sirius --device cpu --cold-runs 1 --warmup-runs 1 --hot-runs 3`，计时端到端且样本很短，仅用于确认优化方向：
+命令均为 `--query 1 --frontend sirius --cold-runs 1 --warmup-runs 1 --hot-runs 5`，计时端到端且样本很短，仅用于确认优化方向：
 
-| 版本 | cold median | hot median | 说明 |
-| --- | ---: | ---: | --- |
-| `357b1c8` main（普通 physical interpreter） | 8969.746 ms | 9345.923 ms | generic projection/groupby path |
-| 当前 Q1 fusion 分支 | 1515.715 ms | 1114.154 ms | graph-lowered Q1 fused dense grouped reductions |
+| 版本 | device | cold median | hot median | 说明 |
+| --- | --- | ---: | ---: | --- |
+| 普通 physical interpreter | CPU | 8969.746 ms | 9345.923 ms | generic projection/groupby path |
+| Q1 fusion：dense grouped reductions | CPU | 1515.715 ms | 1114.154 ms | 仍每次 DuckDB→tensor fetch |
+| Q1 resident + masked bincount | CPU | 943.278 ms | 198.580 ms | hot 复用 resident tensors，aggregation 不做 payload gather |
+| Q1 resident + masked bincount | CUDA | 719.700 ms | 12.365 ms | hot 接近 TQP 论文 execution-time 口径；cold 仍含首次 DuckDB→GPU tensor conversion |
 
-该优化没有绕过 SQL lowering：Q1 仍从 DuckDB JSON physical plan 进入 `TQPOperatorGraph`，只是 physical backend 在 graph shape 上选择 fused primitive。
+该优化没有绕过 SQL lowering：Q1 仍从 DuckDB JSON physical plan 进入 `TQPOperatorGraph`，只是 physical backend 在 graph shape 上选择 fused primitive。论文中 TQP 报告的是输入列已离线转换为 PyTorch tensors 后的 query execution time；因此应主要看 hot/resident 结果，cold 结果用于暴露 ingestion/transfer 成本。
 
 
 ## TPC-H 支持矩阵
@@ -336,7 +339,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 - [x] Strict DuckDB Substrait path：覆盖 DuckDB exporter 能导出的查询。
 - [x] Batch 1 primitives：grouped min/max/mean、mask helpers、top-k、首批 RLE mask primitives。
 - [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
-- [x] Q1 已增加 graph-lowered fused physical primitive：仍由 SQL/DuckDB graph 触发，但 dense grouped reductions 走融合 tensor path。
+- [x] Q1 已增加 graph-lowered fused physical primitive：仍由 SQL/DuckDB graph 触发；hot path 复用 resident tensors，并用 masked `torch.bincount` 做融合聚合。
 - [x] Q6 默认路径已迁到 DuckDB physical-plan interpreter；`--compressed-masks` 保留显式 compressed mask primitive 实验。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
 - [x] Physical-plan 算子热路径优化：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。

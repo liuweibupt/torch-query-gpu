@@ -169,13 +169,13 @@ flowchart TD
     Frontend --> Graph["DuckDB JSON → TQPOperatorGraph"]
     Graph --> Physical["execute_physical_plan()"]
     Physical --> Fusion["physical_fusion hook"]
-    Fusion --> Scan["fetch tensors + scan filter once"]
+    Fusion --> Scan["resident tensor fetch/cache + scan filter"]
     Scan --> Project["fused arithmetic exprs"]
-    Project --> Aggregate["dense group id + torch.bincount"]
+    Project --> Aggregate["dense group id + masked torch.bincount"]
     Aggregate --> Rows["decoded result rows"]
 ```
 
-Q1 现在和已迁移的 generic joins 共用 physical interpreter 边界，并增加 graph-lowered fusion hook：DuckDB 输出 physical node graph，`physical.py` 进入 fusion hook，`physical_fusion.py` 用 dense-id grouped tensor reductions 执行 canonical Q1；host 侧只做最终 grouped rows 的 decode/materialization。
+Q1 现在和已迁移的 generic joins 共用 physical interpreter 边界，并增加 graph-lowered fusion hook：DuckDB 输出 physical node graph，`physical.py` 进入 fusion hook，`physical_fusion.py` 用 dense-id grouped tensor reductions 执行 canonical Q1；hot runs 会在同一个 DuckDB connection/device 内复用已转换的 lineitem tensors；host 侧只做最终 grouped rows 的 decode/materialization。
 
 ## 6. SQL 支持边界
 
@@ -209,7 +209,7 @@ Strict Substrait 的 blocked 是 DuckDB exporter 覆盖限制，不是 PyTorch b
 SQL text -> run_sql_with_frontend() -> compile_tqp_plan() -> PyTorchBackend.execute() -> tensor executor -> materialized result rows
 ```
 
-冷查询：每个样本新建 DuckDB connection，运行完整 frontend + backend + materialization，然后关闭连接。热查询：复用一个 DuckDB connection，先跑 warmup，再记录 hot samples。CUDA 计时在每个样本前后调用 `torch.cuda.synchronize()`。
+冷查询：每个样本新建 DuckDB connection，运行完整 frontend + DuckDB→tensor conversion + backend + materialization，然后关闭连接。热查询：复用一个 DuckDB connection，先跑 warmup，再记录 hot samples；Q1 在该连接内复用 resident lineitem tensors，因此更接近 TQP 论文的 execution-time 口径。CUDA 计时在每个样本前后调用 `torch.cuda.synchronize()`。
 
 ## 9. 验证命令
 

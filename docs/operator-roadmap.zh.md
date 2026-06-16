@@ -80,6 +80,7 @@
 - [x] Physical SEMI/ANTI joins 使用 membership probe，不再先展开 join pairs。
 - [ ] 移除剩余 hot path 中的数据相关 Python row loops；保留 schema/operator 级循环。
 - [x] 保持 columnar late materialization：physical join 先产生 row-index pairs，再物化 payload columns。
+- [x] Q1 fused hot path 使用 resident tensors 和 masked `bincount`，避免 selected-row payload gather。
 - [ ] row-level work 优先用 tensor ops，不用 Python control flow。
 - [ ] 编译执行路径：TorchScript / TVM / `torch.compile` / Antares / codegen / CSE / fusion / Python dependency removal。
 - [x] `LookupIndex`：复用 pre-sorted dimension-key lookup probes。
