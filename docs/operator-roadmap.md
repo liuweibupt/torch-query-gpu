@@ -27,7 +27,7 @@ until a readable full paper/appendix is available.
   `TQPPlan`; no fabricated JSON and no frontend fallback.
 - Backend path: `TQPPlan` → PyTorch operators on CPU/CUDA.
 - Current TPC-H status: Q1-Q22 are lowered through DuckDB JSON physical plans into `TQPOperatorGraph` on the Sirius-like path. Q1-Q22 execute through a DuckDB physical-plan interpreter by default; Q6 `--compressed-masks` remains an explicit primitive experiment; historical graph recipes are no longer the default execution path. DuckDB native Substrait remains limited by exporter coverage for several queries.
-- Current generic SQL status: single-table projection/filter/aggregate subset.
+- Current generic SQL status: single-table projection/filter/aggregate/order/limit subset; the DuckDB physical interpreter supports basic HAVING, multi-branch/simple CASE, and duplicate-free single-key TOP_N tensor top-k.
 
 ## Operator inventory from TQP (**verified**)
 
@@ -325,11 +325,11 @@ Full CoddSpeed text is not locally available yet. From public metadata/pages:
 - [x] Boolean filter expression tree for comparison/`IN`/`LIKE` with `AND`/`OR`/`NOT`.
 - [ ] Full arithmetic/date/string expression tree beyond filters.
 - [x] Generic `MIN`, `MAX`, `AVG`, and `COUNT(col)`.
-- [ ] Basic `HAVING`.
+- [x] Basic `HAVING` over aggregate aliases / aggregate expressions.
 - [x] Generic `IN`, `LIKE`, `OR`, and `NOT`.
-- [ ] Generic `CASE`.
+- [x] Generic searched/simple `CASE` for supported physical expressions.
 - [x] Multi-key order-by and DESC/ASC handling.
-- [ ] Tensor top-k integration for `ORDER BY ... LIMIT`.
+- [x] Tensor top-k integration for duplicate-free single-key `ORDER BY ... LIMIT` / DuckDB `TOP_N`.
 
 ### Batch 3: generic joins and subquery lowering
 

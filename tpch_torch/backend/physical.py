@@ -24,6 +24,7 @@ from tpch_torch.backend.physical_join_exec import execute_join_node as _execute_
 from tpch_torch.backend.physical_mark import execute_literal_mark_join, execute_mark_join
 from tpch_torch.backend.physical_projection import (
     aggregate_order_alias,
+    matching_expression_alias,
     normalize_projection_expressions,
     order_alias_value,
     projection_output_name,
@@ -39,6 +40,7 @@ from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.relational import DATE_COLUMNS_EXTENDED
 
 _ROW_ID = "__rowid__"
+_DUCKDB_ROW_ID = "rowid"
 _aggregate_specs = aggregate_specs
 
 
@@ -226,8 +228,35 @@ class PhysicalPlanExecutor:
             return child
         limit = int(top)
         order_items = _metadata_list(node, "Order By")
-        table = self._sort_table(child, order_items) if order_items else child
+        table = self._limit_ordered_table(child, order_items, limit) if order_items else child
         indices = torch.arange(min(limit, table.row_count), dtype=torch.int64, device=table_device(table))
+        return table.gather(indices)
+
+    def _limit_ordered_table(
+        self,
+        table: PhysicalTable,
+        order_items: Sequence[str],
+        limit: int,
+    ) -> PhysicalTable:
+        topk_table = self._try_topk_limit(table, order_items, limit)
+        if topk_table is not None:
+            return topk_table
+        return self._sort_table(table, order_items)
+
+    def _try_topk_limit(
+        self,
+        table: PhysicalTable,
+        order_items: Sequence[str],
+        limit: int,
+    ) -> PhysicalTable | None:
+        if len(order_items) != 1 or limit <= 0 or limit >= table.row_count:
+            return None
+        expr, descending = strip_order_direction(order_items[0])
+        key_name = expression_sort_key_name(expr)
+        key = self._sort_value(table, expr, key_name).require_tensor()
+        if _has_duplicate_values(key):
+            return None
+        _, indices = torch.topk(key, k=limit, largest=descending, sorted=True)
         return table.gather(indices)
 
     def _sort_table(self, table: PhysicalTable, order_items: Sequence[str]) -> PhysicalTable:
@@ -247,6 +276,9 @@ class PhysicalPlanExecutor:
             alias = aggregate_order_alias(self._select_aliases, table, expression)
             if alias is not None:
                 return table.value_named(alias)
+            expression_alias = matching_expression_alias(table, expression)
+            if expression_alias is not None:
+                return table.value_named(expression_alias)
             alias_value = order_alias_value(self._select_aliases, table, key_name)
             if alias_value is not None:
                 return evaluate_expression(table, alias_value)
@@ -296,10 +328,29 @@ def _fetch_physical_table(
         values[column] = value
         values[f"{table_name}.{column}"] = value
     row_count = 0 if not fetched_columns else int(next(iter(values.values())).require_tensor().numel())
+    _add_rowid_aliases(values, table_name, row_count, device)
     order = order_columns or (_ROW_ID,)
     if not order_columns:
-        values[_ROW_ID] = PhysicalValue(torch.arange(row_count, dtype=torch.int64, device=device))
+        values[_ROW_ID] = values[_DUCKDB_ROW_ID]
     return PhysicalTable(table_name, values, order, row_count)
+
+
+def _add_rowid_aliases(
+    values: dict[str, PhysicalValue],
+    table_name: str,
+    row_count: int,
+    device: str,
+) -> None:
+    rowids = PhysicalValue(torch.arange(row_count, dtype=torch.int64, device=device))
+    values[_DUCKDB_ROW_ID] = rowids
+    values[f"{table_name}.{_DUCKDB_ROW_ID}"] = rowids
+
+
+def _has_duplicate_values(values: torch.Tensor) -> bool:
+    if values.numel() <= 1:
+        return False
+    sorted_values = torch.sort(values).values
+    return bool(torch.any(sorted_values[1:] == sorted_values[:-1]).cpu().item())
 
 
 def _apply_scan_filters(table: PhysicalTable, filters: Sequence[str]) -> PhysicalTable:

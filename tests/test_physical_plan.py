@@ -234,6 +234,120 @@ def test_physical_projection_keeps_qualified_duplicate_select_aliases_separate()
     assert "cust_nation" not in aliases
 
 
+
+
+def test_physical_plan_executes_multi_branch_searched_case_group_by():
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_quantity double)")
+    con.execute("insert into lineitem values (5.0), (15.0), (25.0), (35.0)")
+
+    result = validate_sql(
+        con,
+        """
+        select case
+                 when l_quantity < 10 then 1
+                 when l_quantity < 30 then 2
+                 else 3
+               end as bucket,
+               count(*) as n
+        from lineitem
+        group by bucket
+        order by bucket
+        """,
+        device="cpu",
+    )
+
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [
+        {"bucket": 1, "n": 1},
+        {"bucket": 2, "n": 2},
+        {"bucket": 3, "n": 1},
+    ]
+
+
+def test_physical_plan_executes_simple_case_group_by():
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_returnflag varchar)")
+    con.execute("insert into lineitem values ('A'), ('A'), ('N'), ('R')")
+
+    result = validate_sql(
+        con,
+        """
+        select case l_returnflag
+                 when 'A' then 1
+                 when 'N' then 2
+                 else 3
+               end as bucket,
+               count(*) as n
+        from lineitem
+        group by bucket
+        order by bucket
+        """,
+        device="cpu",
+    )
+
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [
+        {"bucket": 1, "n": 2},
+        {"bucket": 2, "n": 1},
+        {"bucket": 3, "n": 1},
+    ]
+
+
+def test_physical_plan_executes_order_by_limit_duckdb_topn_rowid_shape():
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_orderkey integer, l_quantity double)")
+    con.execute(
+        "insert into lineitem values (1, 5.0), (2, 35.0), (3, 15.0), (4, 45.0), (5, 25.0)"
+    )
+
+    result = validate_sql(
+        con,
+        """
+        select l_orderkey, l_quantity
+        from lineitem
+        order by l_quantity desc
+        limit 3
+        """,
+        device="cpu",
+    )
+
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [
+        {"l_orderkey": 4, "l_quantity": 45.0},
+        {"l_orderkey": 2, "l_quantity": 35.0},
+        {"l_orderkey": 5, "l_quantity": 25.0},
+    ]
+
+
+
+def test_physical_topn_limit_uses_torch_topk(monkeypatch):
+    original_topk = torch.topk
+    calls = []
+
+    def tracked_topk(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_topk(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", tracked_topk)
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_orderkey integer, l_quantity double)")
+    con.execute("insert into lineitem values (1, 5.0), (2, 35.0), (3, 15.0), (4, 45.0), (5, 25.0)")
+
+    result = validate_sql(
+        con,
+        """
+        select l_orderkey, l_quantity
+        from lineitem
+        order by l_quantity desc
+        limit 3
+        """,
+        device="cpu",
+    )
+
+    assert result.max_abs_error == 0.0
+    assert calls
+
 def test_physical_plan_executes_join_group_order_limit_query():
     sql = """
         select name, sum(amount) as total
@@ -943,6 +1057,30 @@ def test_physical_projection_maps_single_child_column_alias_to_position_ref():
     assert result.max_abs_error == 0.0
     assert result.pytorch_rows == [{"c_count": 0, "custdist": 1}, {"c_count": 1, "custdist": 1}]
 
+
+
+
+def test_physical_plan_executes_having_with_alias_and_count_expression():
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_returnflag varchar, l_quantity double)")
+    con.execute("insert into lineitem values ('A', 10.0), ('A', 30.0), ('N', 100.0), ('R', 5.0)")
+
+    result = validate_sql(
+        con,
+        """
+        select l_returnflag, sum(l_quantity) as total_qty, count(*) as n
+        from lineitem
+        group by l_returnflag
+        having total_qty / count(*) > 20
+        order by l_returnflag
+        """,
+        device="cpu",
+    )
+
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [
+        {"l_returnflag": "N", "total_qty": 100.0, "n": 1},
+    ]
 
 def test_physical_filter_resolves_aggregate_expression_alias():
     con = duckdb.connect()

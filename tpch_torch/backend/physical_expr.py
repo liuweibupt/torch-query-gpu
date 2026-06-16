@@ -10,6 +10,7 @@ import torch
 
 from tpch_torch.backend.physical_expr_folding import fold_same_column_literal_or
 from tpch_torch.backend.physical_expr_parse import (
+    CaseExpression,
     _NO_LITERAL,
     balanced as _balanced,
     is_projection_ref as _is_projection_ref,
@@ -153,13 +154,15 @@ def strip_order_direction(expression: str) -> tuple[str, bool]:
     return _strip_order_direction(expression)
 
 
-def _evaluate_case(table: PhysicalTable, parts: tuple[str, str, str]) -> PhysicalValue:
-    condition = _bool_tensor(evaluate_expression(table, parts[0]))
-    then_value = evaluate_expression(table, parts[1])
-    else_value = evaluate_expression(table, parts[2])
-    then_tensor, else_tensor = _coerce_binary_tensors(then_value, else_value)
-    valid = _combine_validity(then_value, else_value, then_tensor)
-    return PhysicalValue(tensor=torch.where(condition, then_tensor, else_tensor), valid=valid)
+def _evaluate_case(table: PhysicalTable, case_expression: CaseExpression) -> PhysicalValue:
+    result = evaluate_expression(table, case_expression.else_expression)
+    for condition_expression, result_expression in reversed(case_expression.branches):
+        condition = _bool_tensor(evaluate_expression(table, condition_expression))
+        then_value = evaluate_expression(table, result_expression)
+        then_tensor, else_tensor = _coerce_binary_tensors(then_value, result)
+        valid = _combine_validity(then_value, result, then_tensor)
+        result = PhysicalValue(tensor=torch.where(condition, then_tensor, else_tensor), valid=valid)
+    return result
 
 
 def _evaluate_call(table: PhysicalTable, name: str, raw_args: str) -> PhysicalValue:

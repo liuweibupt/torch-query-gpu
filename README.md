@@ -16,13 +16,13 @@
 - ✅ Generic SQL subset 已支持单表 projection/filter/aggregate/order/limit。
 - ✅ Q1-Q22 默认路径已迁入 DuckDB physical-plan interpreter：SQL → DuckDB JSON physical plan → `TQPOperatorGraph` → `execute_physical_plan()` → PyTorch tensor operators。
 - ✅ Q2-Q22 已从早期 graph recipes 继续推进到 DuckDB physical-plan interpreter；旧 `queries/qXX` 模板和 `compiled_tpch` root 均不再作为执行 fallback。
-- ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
+- ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
 - ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
-- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes，但复杂 subquery/CTE/window/set operation/HAVING 仍显式失败。
+- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes；basic HAVING 已支持，复杂 generic subquery/CTE/window/set operation 仍显式失败。
 
 ## 一图看懂架构
 
@@ -174,15 +174,16 @@ tpch-torch-run \
 ```text
 single-table SELECT
 WHERE comparisons / IN / LIKE / NOT LIKE / AND / OR / NOT
-column projection、nested SELECT alias、EXTRACT(year FROM date) 与简单 arithmetic projection
+column projection、nested SELECT alias、EXTRACT(year FROM date)、searched/simple CASE 与简单 arithmetic projection
 COUNT(*), COUNT(col), SUM, MIN, MAX, AVG
 simple GROUP BY
+basic HAVING over aggregate aliases / aggregate expressions
 ORDER BY output columns ASC / DESC
-LIMIT
+LIMIT / duplicate-free single-key TOP_N tensor top-k path
 DuckDB physical SEQ_SCAN / FILTER / PROJECTION
 DuckDB physical HASH_JOIN inner / multi-column equi-join（correctness-first）
 DuckDB physical HASH_GROUP_BY / PERFECT_HASH_GROUP_BY / UNGROUPED_AGGREGATE
-DuckDB physical ORDER_BY / TOP_N / LIMIT
+DuckDB physical ORDER_BY / TOP_N / LIMIT（无重复 key 的单 key TOP_N 使用 torch.topk）
 final aggregate expression alias，例如 100 * sum(x) / sum(y)；支持 aggregate alias/order 归一化
 ```
 
@@ -192,7 +193,7 @@ final aggregate expression alias，例如 100 * sum(x) / sum(y)；支持 aggrega
 - 已知 TPC-H 低基数字符串列使用 table-aware static dictionary encoding，避免大列上反复 `numpy.unique`。
 - `IN` / 同列 literal `OR` 使用 membership mask；singleton membership 直接走 equality。
 - `PhysicalTable.filter/gather` 对共享 alias 的 `PhysicalValue` 只转换一次，减少 physical plan 中 `col` / `table.col` alias 的重复 tensor selection。
-- 本批新增通用 physical lowering：multi-column equi-join、CAST wrapper、NOT LIKE (`!~~`)、nested SELECT alias、EXTRACT(year)、parent-required join key retention、aggregate ORDER BY alias matching。
+- 本批新增通用 physical lowering：multi-column equi-join、CAST wrapper、NOT LIKE (`!~~`)、nested SELECT alias、EXTRACT(year)、parent-required join key retention、aggregate ORDER BY alias matching、basic HAVING、multi-branch/simple CASE、duplicate-free single-key TOP_N tensor top-k。
 
 ### 验证全部 TPC-H
 
@@ -338,12 +339,12 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 - [x] TPC-H Q1-Q22 通过 DuckDB JSON physical plan lowering 到 `TQPOperatorGraph` 后进入 PyTorch graph executor。
 - [x] Strict DuckDB Substrait path：覆盖 DuckDB exporter 能导出的查询。
 - [x] Batch 1 primitives：grouped min/max/mean、mask helpers、top-k、首批 RLE mask primitives。
-- [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、`ORDER BY ASC/DESC`。
+- [x] Batch 2 部分 generic SQL：`MIN`、`MAX`、`AVG`、`COUNT(col)`、boolean filters、`IN`、`LIKE`、basic `HAVING`、generic `CASE`、`ORDER BY ASC/DESC`、duplicate-free single-key top-k `LIMIT`。
 - [x] Q1 已增加 graph-lowered fused physical primitive：仍由 SQL/DuckDB graph 触发；hot path 复用 resident tensors，并用 masked `torch.bincount` 做融合聚合。
 - [x] Q6 默认路径已迁到 DuckDB physical-plan interpreter；`--compressed-masks` 保留显式 compressed mask primitive 实验。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
 - [x] Physical-plan 算子热路径优化：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
-- [ ] Generic subquery lowering、`HAVING`、window、set operations。
+- [ ] Generic subquery lowering、window、set operations；更复杂 `HAVING` / `CASE` SQL shapes 继续扩展。
 - [x] 压缩数据第一批 aggregate primitive：RLE `COUNT` / `SUM` / `MIN` / `MAX` / `AVG` 基于 run lengths 执行，不展开 rows。
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
 - [x] 第一版显式 `TQPOperatorGraph` 与 DuckDB JSON lowering。

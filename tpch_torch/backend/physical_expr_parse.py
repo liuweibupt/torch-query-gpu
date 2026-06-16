@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 _NO_LITERAL = object()
 _COMPARISON_OPERATORS = ("!~~", "~~", ">=", "<=", "!=", "<>", "=", ">", "<")
+
+
+@dataclass(frozen=True)
+class CaseExpression:
+    """Parsed searched CASE expression."""
+
+    branches: tuple[tuple[str, str], ...]
+    else_expression: str
 
 
 def _parse_literal(expr: str) -> Any:
@@ -26,11 +35,68 @@ def _parse_literal(expr: str) -> Any:
     return _NO_LITERAL
 
 
-def _parse_case(expr: str) -> tuple[str, str, str] | None:
-    match = re.fullmatch(r"CASE\s+WHEN\s+(.+)\s+THEN\s+(.+)\s+ELSE\s+(.+)\s+END", expr, re.I)
-    if match is None:
+def _parse_case(expr: str) -> CaseExpression | None:
+    stripped = expr.strip()
+    if not stripped.upper().startswith("CASE "):
         return None
-    return match.group(1).strip(), match.group(2).strip(), match.group(3).strip()
+    if not stripped.upper().endswith(" END"):
+        return None
+    body = stripped[4:-3].strip()
+    try:
+        if not body.upper().startswith("WHEN "):
+            return _parse_simple_case(body)
+        return _parse_searched_case(body)
+    except ValueError:
+        return None
+
+
+def _parse_searched_case(body: str) -> CaseExpression:
+    branches: list[tuple[str, str]] = []
+    remaining = body
+    while remaining.upper().startswith("WHEN "):
+        condition, after_condition = _split_and_consume_keyword(remaining[5:], "THEN")
+        then_expression, remaining = _split_case_result(after_condition)
+        branches.append((condition, then_expression))
+    if not remaining.upper().startswith("ELSE "):
+        raise ValueError(f"CASE expression is missing ELSE: {body}")
+    return CaseExpression(tuple(branches), remaining[5:].strip())
+
+
+def _parse_simple_case(body: str) -> CaseExpression:
+    value_expression, remaining = _split_before_keyword(body, "WHEN")
+    branches: list[tuple[str, str]] = []
+    while remaining.upper().startswith("WHEN "):
+        when_value, after_when = _split_and_consume_keyword(remaining[5:], "THEN")
+        then_expression, remaining = _split_case_result(after_when)
+        branches.append((f"({value_expression}) = ({when_value})", then_expression))
+    if not remaining.upper().startswith("ELSE "):
+        raise ValueError(f"CASE expression is missing ELSE: {body}")
+    return CaseExpression(tuple(branches), remaining[5:].strip())
+
+
+def _split_case_result(text: str) -> tuple[str, str]:
+    next_when = _find_top_level_keyword(text, "WHEN")
+    next_else = _find_top_level_keyword(text, "ELSE")
+    candidates = [index for index in (next_when, next_else) if index >= 0]
+    if not candidates:
+        raise ValueError(f"CASE branch is missing WHEN/ELSE terminator: {text}")
+    split_at = min(candidates)
+    return text[:split_at].strip(), text[split_at:].strip()
+
+
+def _split_before_keyword(text: str, keyword: str) -> tuple[str, str]:
+    index = _find_top_level_keyword(text, keyword)
+    if index < 0:
+        raise ValueError(f"missing {keyword} in CASE expression: {text}")
+    return text[:index].strip(), text[index + 1 :].strip()
+
+
+def _split_and_consume_keyword(text: str, keyword: str) -> tuple[str, str]:
+    index = _find_top_level_keyword(text, keyword)
+    if index < 0:
+        raise ValueError(f"missing {keyword} in CASE expression: {text}")
+    after = index + len(keyword) + 2
+    return text[:index].strip(), text[after:].strip()
 
 
 def _parse_cast(expr: str) -> str | None:

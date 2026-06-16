@@ -22,7 +22,7 @@
 - 默认链路：原始 SQL → DuckDB/Sirius-like planner admission → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
 - TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1-Q22 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；历史 graph recipes 不再是默认执行路径。
-- Generic SQL：单表 projection/filter/aggregate/order/limit 子集。
+- Generic SQL：单表 projection/filter/aggregate/order/limit 子集；DuckDB physical interpreter 已支持 basic HAVING、multi-branch/simple CASE 和无重复 key 的单 key TOP_N tensor top-k。
 - 压缩执行：已有 Plain/RLE/Index mask 原型，Q6 可通过 `--compressed-masks` 显式开启。
 
 ## 3. TQP verified 算子清单
@@ -58,7 +58,7 @@
 - [x] 当前 TPC-H executor 的 bitmap-style filter masks。
 - [x] Generic SQL boolean filter tree：`AND` / `OR` / `NOT`。
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
-- [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、`CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
+- [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、multi-branch/simple `CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。
@@ -241,11 +241,11 @@
 - [x] Boolean filter expression tree：comparison / `IN` / `LIKE` + `AND` / `OR` / `NOT`。
 - [ ] Full arithmetic/date/string expression tree beyond filters。
 - [x] Generic `MIN`, `MAX`, `AVG`, `COUNT(col)`。
-- [ ] Basic `HAVING`。
+- [x] Basic `HAVING` over aggregate aliases / aggregate expressions。
 - [x] Generic `IN`, `LIKE`, `OR`, `NOT`。
-- [ ] Generic `CASE`。
+- [x] Generic searched/simple `CASE` for supported physical expressions。
 - [x] Multi-key order-by 和 DESC/ASC。
-- [ ] Tensor top-k integration for `ORDER BY ... LIMIT`。
+- [x] Tensor top-k integration for duplicate-free single-key `ORDER BY ... LIMIT` / DuckDB `TOP_N`。
 
 ### Batch 3：Generic joins / subquery lowering
 

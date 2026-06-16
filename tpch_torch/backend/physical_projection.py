@@ -132,6 +132,12 @@ def matching_aggregate_alias(table: PhysicalTable, expression: str) -> str | Non
     return _matching_aggregate_alias(table, expression)
 
 
+def matching_expression_alias(table: PhysicalTable, expression: str) -> str | None:
+    """Return a materialized column matching a normalized scalar expression."""
+
+    return _matching_expression_alias(table, expression)
+
+
 def order_alias_value(select_aliases: dict[str, str], table: PhysicalTable, key_name: str) -> str | None:
     """Return a child value reference for an ORDER BY alias."""
 
