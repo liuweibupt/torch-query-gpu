@@ -3,6 +3,7 @@ import json
 
 import duckdb
 import pytest
+import torch
 
 from tpch_torch.duckdb_bridge import (
     DuckDBSubstraitError,
@@ -32,6 +33,50 @@ def test_fetch_lineitem_tensor_table_reads_duckdb_fixture():
     assert table.columns["l_shipdate"].tolist() == [19980902, 19980903, 19980101, 19971231]
     assert table.decode_value("l_returnflag", 0) == "A"
 
+
+
+class _FakeLineitemConnection:
+    def __init__(self):
+        self.execute_count = 0
+
+    def execute(self, _sql):
+        self.execute_count += 1
+        if self.execute_count > 1:
+            raise AssertionError("hot Q1 should reuse resident lineitem tensors")
+        return self
+
+    def fetchnumpy(self):
+        import numpy as np
+
+        return {
+            "l_returnflag": np.array([1, 0], dtype=np.int64),
+            "l_linestatus": np.array([1, 0], dtype=np.int64),
+            "l_quantity": np.array([10.0, 5.0], dtype=np.float64),
+            "l_extendedprice": np.array([100.0, 50.0], dtype=np.float64),
+            "l_discount": np.array([0.05, 0.0], dtype=np.float64),
+            "l_tax": np.array([0.10, 0.08], dtype=np.float64),
+            "l_shipdate": np.array([19980902, 19980101], dtype=np.int32),
+        }
+
+
+def test_fetch_lineitem_tensor_table_reuses_cached_tensors_for_same_connection_and_device():
+    con = _FakeLineitemConnection()
+
+    first = fetch_lineitem_tensor_table(con, device="cpu")
+    second = fetch_lineitem_tensor_table(con, device="cpu")
+
+    assert second is first
+    assert con.execute_count == 1
+
+
+def test_fetch_lineitem_tensor_table_cache_normalizes_equivalent_cpu_devices():
+    con = _FakeLineitemConnection()
+
+    first = fetch_lineitem_tensor_table(con, device="cpu")
+    second = fetch_lineitem_tensor_table(con, device=torch.device("cpu"))
+
+    assert second is first
+    assert con.execute_count == 1
 
 def test_fetch_lineitem_tensor_table_uses_preencoded_string_columns(monkeypatch):
     from tpch_torch import duckdb_bridge

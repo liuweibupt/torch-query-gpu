@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import weakref
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -45,6 +46,7 @@ LINEITEM_DICTIONARIES = {
     "l_returnflag": ("A", "N", "R"),
     "l_linestatus": ("F", "O"),
 }
+_LINEITEM_TENSOR_TABLE_CACHE: weakref.WeakKeyDictionary[Any, dict[str, TensorTable]] = weakref.WeakKeyDictionary()
 
 
 class DuckDBSubstraitError(RuntimeError):
@@ -68,6 +70,7 @@ def create_lineitem_fixture(
 ) -> None:
     """Create a minimal `lineitem` table containing only Q1 columns."""
 
+    clear_lineitem_tensor_table_cache(con)
     con.execute("drop table if exists lineitem")
     con.execute(
         """
@@ -91,6 +94,7 @@ def create_lineitem_fixture(
 def generate_tpch(con: duckdb.DuckDBPyConnection, scale_factor: float = 1.0) -> None:
     """Generate TPC-H tables inside DuckDB using the official DuckDB extension."""
 
+    clear_lineitem_tensor_table_cache(con)
     try:
         con.execute("install tpch")
         con.execute("load tpch")
@@ -116,8 +120,42 @@ def fetch_lineitem_tensor_table(
 ) -> TensorTable:
     """Fetch Q1 lineitem columns into a columnar `TensorTable`."""
 
+    device_key = _device_cache_key(device)
+    cached = _cached_lineitem_tensor_table(con, device_key)
+    if cached is not None:
+        return cached
     columnar = con.execute(LINEITEM_SELECT_FOR_TORCH).fetchnumpy()
-    return _lineitem_table_from_preencoded_columnar(columnar, device=device)
+    table = _lineitem_table_from_preencoded_columnar(columnar, device=device)
+    _cache_lineitem_tensor_table(con, device_key, table)
+    return table
+
+
+def clear_lineitem_tensor_table_cache(con: Any | None = None) -> None:
+    """Clear resident lineitem tensor cache for one connection or all connections."""
+
+    if con is None:
+        _LINEITEM_TENSOR_TABLE_CACHE.clear()
+        return
+    try:
+        del _LINEITEM_TENSOR_TABLE_CACHE[con]
+    except KeyError:
+        return
+
+
+def _cached_lineitem_tensor_table(con: Any, device_key: str) -> TensorTable | None:
+    device_tables = _LINEITEM_TENSOR_TABLE_CACHE.get(con)
+    if device_tables is None:
+        return None
+    return device_tables.get(device_key)
+
+
+def _cache_lineitem_tensor_table(con: Any, device_key: str, table: TensorTable) -> None:
+    device_tables = _LINEITEM_TENSOR_TABLE_CACHE.setdefault(con, {})
+    device_tables[device_key] = table
+
+
+def _device_cache_key(device: str | torch.device) -> str:
+    return str(torch.device(device))
 
 
 def _lineitem_table_from_preencoded_columnar(
