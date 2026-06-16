@@ -192,3 +192,53 @@ def test_mask_column_dispatch_rejects_incompatible_masks():
 
     with pytest.raises(ValueError, match="row_count"):
         mask_and(left, right)
+
+
+def test_range_arange_generates_segmented_offsets():
+    from tpch_torch.compressed import range_arange
+
+    starts = torch.tensor([2, 10, 20], dtype=torch.int64)
+    lengths = torch.tensor([3, 0, 2], dtype=torch.int64)
+
+    result = range_arange(starts, lengths)
+
+    assert result.tolist() == [2, 3, 4, 20, 21]
+
+
+def test_compact_rle_removes_gaps_between_selected_runs():
+    from tpch_torch.compressed import compact_rle
+
+    ranges = RLERanges(starts=torch.tensor([2, 6, 10]), ends=torch.tensor([3, 8, 10]))
+
+    result = compact_rle(ranges)
+
+    assert result.starts.tolist() == [0, 2, 5]
+    assert result.ends.tolist() == [1, 4, 5]
+
+
+def test_rle_aggregates_use_run_lengths_without_expanding_positions(monkeypatch):
+    from tpch_torch.compressed import rle_to_index
+    from tpch_torch.compressed_aggregates import rle_count, rle_max, rle_mean, rle_min, rle_sum
+
+    def fail_expand(*_args, **_kwargs):
+        raise AssertionError("RLE aggregates should use run lengths, not row expansion")
+
+    monkeypatch.setattr("tpch_torch.compressed.rle_to_index", fail_expand)
+
+    ranges = RLERanges(starts=torch.tensor([2, 6, 10]), ends=torch.tensor([3, 8, 10]))
+    values = torch.tensor([5.0, 2.0, 7.0])
+
+    assert rle_count(ranges).item() == 6
+    assert rle_sum(values, ranges).item() == 23.0
+    assert rle_min(values, ranges).item() == 2.0
+    assert rle_max(values, ranges).item() == 7.0
+    assert rle_mean(values, ranges).item() == 23.0 / 6.0
+
+
+def test_rle_aggregates_reject_misaligned_run_values():
+    from tpch_torch.compressed_aggregates import rle_sum
+
+    ranges = RLERanges(starts=torch.tensor([0, 3]), ends=torch.tensor([1, 4]))
+
+    with pytest.raises(ValueError, match="one value per RLE run"):
+        rle_sum(torch.tensor([1.0]), ranges)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from tpch_torch.compressed_primitives import range_arange
 
 _INTEGER_DTYPES = frozenset(
     {
@@ -162,6 +163,17 @@ def rle_to_plain(ranges: RLERanges, row_count: int) -> torch.Tensor:
         return mask
     mask[rle_to_index(ranges)] = True
     return mask
+
+
+def compact_rle(ranges: RLERanges) -> RLERanges:
+    """Remove positional gaps while preserving RLE run lengths."""
+
+    if ranges.starts.numel() == 0:
+        return RLERanges.empty(ranges.device)
+    lengths = ranges.lengths
+    ends = torch.cumsum(lengths, dim=0) - 1
+    starts = ends - lengths + 1
+    return RLERanges(starts=starts.to(dtype=torch.int64), ends=ends.to(dtype=torch.int64))
 
 
 def range_intersect(left: RLERanges, right: RLERanges) -> RLERanges:
@@ -443,23 +455,11 @@ def _range_intersect_ordered(smaller: RLERanges, larger: RLERanges) -> RLERanges
     smaller_idx = torch.repeat_interleave(
         torch.arange(smaller.starts.numel(), dtype=torch.int64, device=smaller.device), counts
     )
-    larger_idx = _range_arange(bins, counts)
+    larger_idx = range_arange(bins, counts)
     starts = torch.maximum(smaller.starts[smaller_idx], larger.starts[larger_idx])
     ends = torch.minimum(smaller.ends[smaller_idx], larger.ends[larger_idx])
     overlap = starts <= ends
     return RLERanges(starts=starts[overlap], ends=ends[overlap])
-
-
-def _range_arange(starts: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-    total_size = int(lengths.sum().cpu().item())
-    if total_size == 0:
-        return torch.empty(0, dtype=torch.int64, device=starts.device)
-    offsets = torch.cumsum(lengths, dim=0) - lengths
-    return (
-        torch.repeat_interleave(starts, lengths)
-        + torch.arange(total_size, dtype=torch.int64, device=starts.device)
-        - torch.repeat_interleave(offsets, lengths)
-    )
 
 
 def _validate_row_count(row_count: int) -> None:
