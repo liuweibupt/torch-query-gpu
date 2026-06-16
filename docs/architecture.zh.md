@@ -2,6 +2,8 @@
 
 本文档描述当前仓库的真实执行链路。DuckDB 负责 SQL 解析、绑定、计划准入和 JSON physical plan 输出；Sirius-like 前端 lowering 成 `TQPOperatorGraph`；PyTorch 后端在 CPU/CUDA tensor 上执行 graph nodes。DuckDB 只在 validation 中作为 baseline，不是执行 fallback。
 
+如果需要逐行理解 Q1 从 SQL 到 PyTorch tensor operators 的具体执行过程，请阅读 [`docs/q1-end-to-end-execution.zh.md`](q1-end-to-end-execution.zh.md)。
+
 ## 1. 一图看懂端到端链路
 
 ```mermaid
