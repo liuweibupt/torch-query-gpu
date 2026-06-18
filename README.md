@@ -360,6 +360,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 | --- | --- |
 | [`docs/architecture.zh.md`](docs/architecture.zh.md) | 中文架构说明、关键代码片段、Q1 分层图。 |
 | [`docs/q1-end-to-end-execution.zh.md`](docs/q1-end-to-end-execution.zh.md) | 以 TPC-H Q1 为例，详细解释 SQL 解析、DuckDB JSON physical plan、TQPOperatorGraph、PyTorch backend/operator 与冷/热执行口径。 |
+| [`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md) | 对比 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 与本项目 PyTorch 路线，分析软件栈、显存管理和复用 CUDA 算子的工程取舍。 |
 | [`docs/architecture.md`](docs/architecture.md) | 英文架构说明。 |
 | [`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md) | 中文 Roadmap / TODO。 |
 | [`docs/operator-roadmap.md`](docs/operator-roadmap.md) | 英文完整 Roadmap。 |
