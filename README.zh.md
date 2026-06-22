@@ -15,6 +15,7 @@
 - 中文架构说明：[`docs/architecture.zh.md`](docs/architecture.zh.md)
 - Q1 端到端执行链路详解：[`docs/q1-end-to-end-execution.zh.md`](docs/q1-end-to-end-execution.zh.md)
 - GPU SQL / Tensor Query 软件栈分析：[`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md)
+- GPU 数据库引擎评估 HTML：[`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html)
 - 中文 Roadmap：[`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md)
 - 英文架构说明：[`docs/architecture.md`](docs/architecture.md)
 - 英文 Roadmap：[`docs/operator-roadmap.md`](docs/operator-roadmap.md)

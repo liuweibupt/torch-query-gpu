@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPU 数据库引擎评估：从原型到系统还缺什么</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --paper: #ffffff;
+      --ink: #132238;
+      --muted: #5b6b83;
+      --line: #dce4f0;
+      --blue: #2563eb;
+      --cyan: #0891b2;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --purple: #7c3aed;
+      --code: #0f172a;
+      --soft-blue: #eff6ff;
+      --soft-green: #ecfdf5;
+      --soft-amber: #fffbeb;
+      --soft-red: #fef2f2;
+      --shadow: 0 16px 40px rgba(15, 23, 42, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.72;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 34rem),
+        radial-gradient(circle at top right, rgba(8, 145, 178, 0.14), transparent 30rem),
+        var(--bg);
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .page {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 54%, #0e7490 100%);
+      color: white;
+      border-radius: 28px;
+      padding: 42px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 360px;
+      height: 360px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.10);
+      font-size: 13px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 18px 0 14px;
+      font-size: clamp(34px, 5vw, 62px);
+      line-height: 1.08;
+      letter-spacing: -0.04em;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 900px;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 19px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 28px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .metric {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      backdrop-filter: blur(8px);
+    }
+
+    .metric b {
+      display: block;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 6px;
+      color: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px 1fr;
+      gap: 24px;
+      margin-top: 24px;
+      align-items: start;
+    }
+
+    nav {
+      position: sticky;
+      top: 20px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+      backdrop-filter: blur(10px);
+    }
+
+    nav h2 {
+      font-size: 14px;
+      margin: 0 0 12px;
+      color: var(--muted);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    nav ol { margin: 0; padding-left: 18px; }
+    nav li { margin: 8px 0; font-size: 14px; }
+
+    main {
+      display: grid;
+      gap: 22px;
+    }
+
+    section, .card {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: -0.025em;
+    }
+
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 20px;
+      line-height: 1.3;
+    }
+
+    p { margin: 0 0 12px; }
+    ul { margin: 8px 0 0; padding-left: 22px; }
+    li { margin: 6px 0; }
+
+    .lead {
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .callout {
+      border-radius: 18px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: var(--soft-blue);
+      margin: 16px 0;
+    }
+
+    .callout strong { color: #1d4ed8; }
+    .callout.warn { background: var(--soft-amber); }
+    .callout.warn strong { color: var(--amber); }
+    .callout.risk { background: var(--soft-red); }
+    .callout.risk strong { color: var(--red); }
+    .callout.good { background: var(--soft-green); }
+    .callout.good strong { color: var(--green); }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }
+
+    .stage {
+      min-height: 118px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      position: relative;
+    }
+
+    .stage::after {
+      content: "→";
+      position: absolute;
+      right: -14px;
+      top: 42%;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .stage:last-child::after { display: none; }
+    .stage b { display: block; margin-bottom: 6px; }
+    .stage span { color: var(--muted); font-size: 13px; }
+
+    .matrix {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      font-size: 14px;
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 12px 14px;
+      vertical-align: top;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .matrix th {
+      background: #f1f5f9;
+      text-align: left;
+      color: #334155;
+    }
+
+    .matrix tr:last-child td { border-bottom: 0; }
+    .matrix th:last-child,
+    .matrix td:last-child { border-right: 0; }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .tag.good { background: #dcfce7; color: #166534; }
+    .tag.mid { background: #fef3c7; color: #92400e; }
+    .tag.bad { background: #fee2e2; color: #991b1b; }
+    .tag.info { background: #dbeafe; color: #1e40af; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .mini {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      background: #fbfdff;
+    }
+
+    .mini h3 { margin-top: 0; }
+
+    pre {
+      overflow-x: auto;
+      margin: 14px 0 0;
+      padding: 16px;
+      border-radius: 18px;
+      background: var(--code);
+      color: #dbeafe;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .roadmap {
+      display: grid;
+      gap: 12px;
+    }
+
+    .roadmap-item {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fbfdff;
+    }
+
+    .priority {
+      text-align: center;
+      padding: 8px 10px;
+      border-radius: 14px;
+      color: white;
+      font-weight: 800;
+    }
+
+    .p0 { background: var(--red); }
+    .p1 { background: var(--amber); }
+    .p2 { background: var(--blue); }
+    .p3 { background: var(--purple); }
+
+    .footnotes {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .hero-grid, .pipeline, .cards { grid-template-columns: 1fr 1fr; }
+      .stage::after { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      .page { width: min(100vw - 20px, 1180px); padding-top: 12px; }
+      .hero, section, .card { border-radius: 20px; padding: 22px; }
+      .hero-grid, .pipeline, .cards, .roadmap-item { grid-template-columns: 1fr; }
+      .matrix { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="eyebrow">GPU SQL Engine Assessment · torch-query-gpu</div>
+      <h1>GPU 数据库引擎并不好写：当前简单版还缺什么？</h1>
+      <p class="subtitle">
+        一个真正可用的 GPU 数据库引擎不只是“把几个算子放到 CUDA 上”。它同时需要 SQL 前端、关系优化器、GPU 算子库、显存生命周期管理、数据移动调度、压缩执行、错误语义、benchmark 和工程生态。本报告评估当前项目的简化 TQP/PyTorch 版本距离完整引擎还差哪些关键能力。
+      </p>
+      <div class="hero-grid">
+        <div class="metric"><b>22</b><span>TPC-H 查询当前可通过 physical-plan 路径覆盖</span></div>
+        <div class="metric"><b>1</b><span>主后端：PyTorch tensor operators / CUDA</span></div>
+        <div class="metric"><b>0</b><span>当前未接入 RAPIDS/cuDF/RMM 作为执行后端</span></div>
+        <div class="metric"><b>P0</b><span>最优先：通用 lowering、算子融合、内存计划</span></div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="目录">
+        <h2>目录</h2>
+        <ol>
+          <li><a href="#summary">总体判断</a></li>
+          <li><a href="#why-hard">为什么 GPU DB 难写</a></li>
+          <li><a href="#current">当前项目现状</a></li>
+          <li><a href="#gap">差距矩阵</a></li>
+          <li><a href="#memory">显存与数据移动</a></li>
+          <li><a href="#operators">算子与编译</a></li>
+          <li><a href="#roadmap">提升路线</a></li>
+          <li><a href="#references">相关文档</a></li>
+        </ol>
+      </nav>
+
+      <main>
+        <section id="summary">
+          <h2>1. 总体判断</h2>
+          <p class="lead">
+            是的，一个 GPU 数据库引擎很难写。当前仓库已经打通了“SQL → DuckDB/Sirius-like frontend → TQPOperatorGraph → PyTorch/CUDA”的研究型链路，但它更接近可验证原型，而不是成熟 GPU DBMS。
+          </p>
+          <div class="callout good">
+            <strong>当前已经有价值：</strong>项目证明了可以不手写完整 CUDA SQL engine，而是复用 DuckDB 前端和 PyTorch CUDA tensor operators，把 TPC-H 查询导入一个可执行的 TQP-style 路径。
+          </div>
+          <div class="callout warn">
+            <strong>当前主要短板：</strong>很多能力仍是“能跑”优先：通用 SQL lowering、物理算子选择、fusion、显存规划、压缩列常驻、复杂 SQL 语义、性能可解释性都还没有达到数据库引擎级别。
+          </div>
+          <p>
+            因此，这个项目下一阶段不应该只继续堆 TPC-H case，而应把每个 TPC-H pattern 抽象成通用 graph node 和 tensor primitive，逐步形成可组合的 compiler/executor。
+          </p>
+        </section>
+
+        <section id="why-hard">
+          <h2>2. 为什么 GPU 数据库引擎不好写</h2>
+          <div class="cards">
+            <article class="mini">
+              <h3>SQL 前端很复杂</h3>
+              <p>SQL 不是简单表达式。真实查询涉及 name binding、type coercion、null semantics、subquery、CTE、window、set operations、correlated predicates 和权限/catalog。</p>
+            </article>
+            <article class="mini">
+              <h3>优化器决定成败</h3>
+              <p>GPU 上 join order、聚合策略、排序/TopK、pipeline breaker 和数据驻留成本常常比单个 kernel 更重要。</p>
+            </article>
+            <article class="mini">
+              <h3>GPU 算子不是 DB 算子</h3>
+              <p>PyTorch/cuDF/Triton 提供 primitives，但 SQL 需要 decimal、string、date、null、collation、stable ordering 和精确聚合语义。</p>
+            </article>
+            <article class="mini">
+              <h3>显存是硬约束</h3>
+              <p>HBM 容量小于主存。中间结果 materialization、hash table、sort buffer、group state 会导致峰值显存爆炸。</p>
+            </article>
+            <article class="mini">
+              <h3>数据移动昂贵</h3>
+              <p>CPU↔GPU、GPU↔GPU、NVLink/PCIe/InfiniBand、host spill 和文件 IO 都可能吞掉算子加速收益。</p>
+            </article>
+            <article class="mini">
+              <h3>性能验证困难</h3>
+              <p>需要区分 cold/hot、compile/data load/H2D/kernel/D2H/materialize，并用 Nsight/PyTorch profiler 解释瓶颈。</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="current">
+          <h2>3. 当前项目现状</h2>
+          <p>当前仓库的核心路线是复用成熟前端和 tensor backend，而不是自己从 CUDA kernel、SQL parser、optimizer 全部重写。</p>
+          <div class="pipeline" role="img" aria-label="SQL 到 PyTorch CUDA 执行链路">
+            <div class="stage"><b>SQL</b><span>SQL 文件或字符串输入。</span></div>
+            <div class="stage"><b>DuckDB 前端</b><span>parser、binder、physical plan 导出。</span></div>
+            <div class="stage"><b>TQPOperatorGraph</b><span>把 DuckDB JSON plan lowering 成图。</span></div>
+            <div class="stage"><b>PyTorch backend</b><span>physical interpreter、graph nodes、少量 fused primitive。</span></div>
+            <div class="stage"><b>CUDA ops</b><span>复用 torch 内置 CUDA 算子执行。</span></div>
+          </div>
+          <pre><code>SQL
+  → DuckDB JSON physical plan
+  → lower_duckdb_json_to_operator_graph(...)
+  → PyTorchGraphExecutor / physical interpreter
+  → torch.where / argsort / searchsorted / bincount / topk / gather / scatter-like ops
+  → rows + DuckDB baseline validation</code></pre>
+          <div class="callout">
+            <strong>关键定位：</strong>当前项目不是 RAPIDS/cuDF SQL engine，也没有使用 RMM 管理显存；它是一个 TQP-style SQL-to-tensor execution 原型，主要复用 PyTorch 已有 CUDA 算子。
+          </div>
+        </section>
+
+        <section id="gap">
+          <h2>4. 当前简单版与成熟 GPU DB 引擎的差距矩阵</h2>
+          <table class="matrix">
+            <thead>
+              <tr>
+                <th>能力域</th>
+                <th>当前状态</th>
+                <th>成熟引擎需要</th>
+                <th>优先级</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SQL coverage</td>
+                <td><span class="tag mid">部分</span> TPC-H Q1-Q22 可跑；generic SQL subset 仍有限。</td>
+                <td>更完整的 joins、subquery、CTE、window、set operations、null/decimal/string 语义。</td>
+                <td><span class="tag bad">P0</span></td>
+              </tr>
+              <tr>
+                <td>通用 lowering</td>
+                <td><span class="tag mid">进行中</span> 已有 DuckDB JSON physical plan → graph，但仍有 interpreter 兼容层。</td>
+                <td>每类 physical node 明确 lowering 到通用 graph nodes，而不是 query/template 特化。</td>
+                <td><span class="tag bad">P0</span></td>
+              </tr>
+              <tr>
+                <td>算子库</td>
+                <td><span class="tag mid">基础</span> filter/project/group/join/order/top-k/RLE aggregate primitives。</td>
+                <td>统一 operator contract、null mask、typed column、string/date/decimal、multi-algorithm join/group/sort。</td>
+                <td><span class="tag bad">P0</span></td>
+              </tr>
+              <tr>
+                <td>融合与编译</td>
+                <td><span class="tag mid">局部</span> Q1 有 fused physical primitive；大多数路径仍是多 torch op。</td>
+                <td>expression fusion、scan-filter-project-aggregate fusion、join pipeline fusion、plan cache。</td>
+                <td><span class="tag bad">P0</span></td>
+              </tr>
+              <tr>
+                <td>显存管理</td>
+                <td><span class="tag bad">薄弱</span> 主要依赖 PyTorch caching allocator 和 resident tensor cache。</td>
+                <td>lifetime analysis、peak memory estimator、buffer reuse、spill、admission control、allocator telemetry。</td>
+                <td><span class="tag bad">P0</span></td>
+              </tr>
+              <tr>
+                <td>压缩执行</td>
+                <td><span class="tag mid">实验</span> RLE/Index mask 与 RLE aggregates 有第一版。</td>
+                <td>compressed storage metadata、encoded predicate、encoded join/group-by、late materialization。</td>
+                <td><span class="tag mid">P1</span></td>
+              </tr>
+              <tr>
+                <td>性能工程</td>
+                <td><span class="tag mid">基础</span> 有 cold/hot benchmark 口径，但缺系统 profiler 报告。</td>
+                <td>kernel-level profiling、memory bandwidth/launch overhead、operator time breakdown、回归性能门禁。</td>
+                <td><span class="tag mid">P1</span></td>
+              </tr>
+              <tr>
+                <td>生态互操作</td>
+                <td><span class="tag info">未接入</span> 没有 cuDF/RMM/Arrow GPU buffer pipeline。</td>
+                <td>Arrow/DLPack/CUDA array interface、RMM 或 allocator 协调、zero-copy 数据交换。</td>
+                <td><span class="tag info">P2</span></td>
+              </tr>
+              <tr>
+                <td>分布式/多 GPU</td>
+                <td><span class="tag info">未覆盖</span> 单进程/单机原型。</td>
+                <td>partition、shuffle、NVLink/InfiniBand、GPU locality、fault handling。</td>
+                <td><span class="tag info">P3</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="memory">
+          <h2>5. 显存与数据移动：目前最容易低估的部分</h2>
+          <p>
+            GPU 数据库引擎的瓶颈经常不是某个单独 kernel，而是中间结果和数据移动。当前版本依赖 PyTorch caching allocator，这能避免裸 `cudaMalloc` 的一部分开销，但它不知道 SQL plan 的全局生命周期。
+          </p>
+          <div class="callout risk">
+            <strong>风险：</strong>如果继续只优化单算子，而不做 query-level memory plan，那么复杂 join、sort、group-by 可能在 SF 更大或并发查询下因为中间 tensor、hash table、sort buffer 导致显存峰值失控。
+          </div>
+          <h3>建议补齐的内存能力</h3>
+          <ul>
+            <li>为每个 physical operator 记录输入列、输出列、中间 tensor、估计 cardinality 和估计 bytes。</li>
+            <li>执行前做 peak memory 估算：识别 pipeline breaker，例如 sort、hash join build、group-by。</li>
+            <li>增加 tensor lifetime analysis：最后一次使用后释放或复用 buffer。</li>
+            <li>区分 resident table tensors、query intermediate tensors 和 result materialization tensors。</li>
+            <li>为 benchmark 输出 H2D、D2H、kernel、materialize、validation 分段时间。</li>
+            <li>未来再评估 RMM/cuDF interop，而不是过早把 RMM 当作完整解法。</li>
+          </ul>
+        </section>
+
+        <section id="operators">
+          <h2>6. 算子与编译：下一步应从“能跑”转为“可组合”</h2>
+          <p>
+            当前 TPC-H 全部能跑是重要里程碑，但真正的目标应是：TPC-H 只是验证集，每个查询都由通用 lowering 自动生成 operator graph，然后调用可组合 tensor primitives。
+          </p>
+          <table class="matrix">
+            <thead>
+              <tr>
+                <th>类别</th>
+                <th>短期应该做成的通用节点</th>
+                <th>性能方向</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Scan / Filter / Project</td>
+                <td>typed column scan、mask expression、computed columns、null mask propagation。</td>
+                <td>融合 scan-filter-project，减少 mask/gather 中间 tensor。</td>
+              </tr>
+              <tr>
+                <td>Aggregate</td>
+                <td>grouped/ungrouped sum/count/min/max/avg、HAVING、CASE aggregate。</td>
+                <td>dense group id、sorted group fast path、bincount/index_add fusion。</td>
+              </tr>
+              <tr>
+                <td>Join</td>
+                <td>inner/left/semi/anti、multi-key、range predicate、subquery decorrelation。</td>
+                <td>sorted join、hash/index table、membership probe、build-side residency。</td>
+              </tr>
+              <tr>
+                <td>Order / TopK / Limit</td>
+                <td>multi-key ordering、stable tie handling、offset/limit。</td>
+                <td>TopK pushdown，避免全量排序。</td>
+              </tr>
+              <tr>
+                <td>Compressed</td>
+                <td>RLE/Index/Dictionary metadata、encoded predicates、late materialization。</td>
+                <td>在压缩域做 filter/aggregate/join，避免展开 rows。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="roadmap">
+          <h2>7. 建议提升路线</h2>
+          <div class="roadmap">
+            <div class="roadmap-item">
+              <div class="priority p0">P0-A</div>
+              <div>
+                <h3>把 TPC-H patterns 全部拆成通用 graph nodes</h3>
+                <p>目标是去掉 query-id/template 思维：每个 TPC-H 查询都只是 DuckDB physical plan 的一个实例，最终由通用 operator graph 自动执行。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p0">P0-B</div>
+              <div>
+                <h3>建立 operator contract 和 typed column model</h3>
+                <p>统一 tensor、null mask、dictionary/string/date/decimal 表达方式，避免每个算子单独处理边界条件。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p0">P0-C</div>
+              <div>
+                <h3>做 query-level memory accounting</h3>
+                <p>先不需要完整 RMM，但需要可解释的显存账本：每个节点分配多少、释放多少、峰值在哪里。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p1">P1-A</div>
+              <div>
+                <h3>扩大 fusion 范围</h3>
+                <p>从 Q1 的 fused primitive 扩展到 scan-filter-project、group-by、TopK、semi/anti join probe 等高频路径。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p1">P1-B</div>
+              <div>
+                <h3>引入系统化 profiling</h3>
+                <p>每次性能优化都要输出 operator breakdown、GPU kernel 时间、H2D/D2H、materialization 和 allocator 统计。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p2">P2</div>
+              <div>
+                <h3>压缩执行与生态互操作</h3>
+                <p>把 RLE/Index/Dictionary 从实验 primitive 推到 storage metadata；评估 Arrow/DLPack/cuDF/RMM interop 的真实收益和复杂度。</p>
+              </div>
+            </div>
+            <div class="roadmap-item">
+              <div class="priority p3">P3</div>
+              <div>
+                <h3>多 GPU / 分布式 / 生产能力</h3>
+                <p>只有在单机 compiler/executor 足够干净后，再考虑 shuffle、partition、NVLink/InfiniBand、fault handling 和并发查询调度。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="references">
+          <h2>8. 相关仓库文档</h2>
+          <ul>
+            <li><a href="architecture.zh.md">当前架构：DuckDB/Sirius-like 前端 → TQP IR → PyTorch Graph Nodes</a></li>
+            <li><a href="q1-end-to-end-execution.zh.md">Q1 端到端执行链路详解</a></li>
+            <li><a href="gpu-sql-ecosystem-analysis.zh.md">GPU SQL / Tensor Query 软件栈分析：RAPIDS、Sirius、TQP 与 CoddSpeed</a></li>
+            <li><a href="operator-roadmap.zh.md">中文 Roadmap / TODO</a></li>
+            <li><a href="papers/README.md">TQP / TQEx / TQP++ / CoddSpeed paper notes</a></li>
+          </ul>
+          <p class="footnotes">
+            本 HTML 是静态说明文档，不引入外部 JavaScript 或运行时依赖。它描述当前项目的工程边界，不声称本仓库已经实现 RAPIDS/cuDF/RMM 或完整生产级 GPU 数据库系统。
+          </p>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
