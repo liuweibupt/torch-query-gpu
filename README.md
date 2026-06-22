@@ -363,6 +363,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 | [`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md) | 对比 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 与本项目 PyTorch 路线，分析软件栈、显存管理和复用 CUDA 算子的工程取舍。 |
 | [`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html) | 可浏览 HTML：评估 GPU 数据库引擎为什么难写，以及当前简化 TQP/PyTorch 版本距离成熟引擎还需要补齐的能力。 |
 | [`docs/ai-tensor-db-on-domestic-gpu.zh.md`](docs/ai-tensor-db-on-domestic-gpu.zh.md) | 面向分享的完整视图：以当前 demo、TQP 和 CoddSpeed 为参考，说明如何在国产卡上复用 AI tensor / PyTorch 生态实现关系代数与数据库执行。 |
+| [`docs/tqp-coddspeed-pytorch-runtime-notes.zh.md`](docs/tqp-coddspeed-pytorch-runtime-notes.zh.md) | 补充说明：TQP/TQP++/CoddSpeed 复用 PyTorch/TCR 的能力边界，以及 PyTorch CPU/GPU kernel 并行、streams、DataLoader 与 graph/compiler fusion 的层次。 |
 | [`docs/architecture.md`](docs/architecture.md) | 英文架构说明。 |
 | [`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md) | 中文 Roadmap / TODO。 |
 | [`docs/operator-roadmap.md`](docs/operator-roadmap.md) | 英文完整 Roadmap。 |

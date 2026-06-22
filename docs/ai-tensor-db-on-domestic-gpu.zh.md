@@ -2,7 +2,7 @@
 
 本文面向一次技术分享，目标是建立一个完整视图：如果底层硬件不是 NVIDIA CUDA，而是国产 AI 加速卡 / 国产 GPU，是否可以复用 AI tensor 生态来做数据库执行引擎？当前 `torch-query-gpu` demo 说明了一条可行的研究路径：复用 DuckDB 做 SQL 前端，把关系代数 lowering 成 tensor operator graph，再用 PyTorch 或兼容 PyTorch 的国产 AI runtime 执行。
 
-本文会同时覆盖整体架构和关键细节：PyTorch 到底提供了什么能力，本 demo 实际用了哪些能力，数据流图和 runtime 是否有用，怎样用 tensor 表达关系代数，以及 TQP / CoddSpeed 给了哪些参考。
+本文会同时覆盖整体架构和关键细节：PyTorch 到底提供了什么能力，本 demo 实际用了哪些能力，数据流图和 runtime 是否有用，怎样用 tensor 表达关系代数，以及 TQP / CoddSpeed 给了哪些参考。关于 TQP/CoddSpeed 具体复用 PyTorch/TCR 哪些能力，以及 PyTorch kernel 并行如何发生，请阅读补充说明 [`docs/tqp-coddspeed-pytorch-runtime-notes.zh.md`](tqp-coddspeed-pytorch-runtime-notes.zh.md)。
 
 > 说明：仓库已经下载 TQP 与 compressed-data GPU SQL 论文 PDF；CoddSpeed 当前只有公开 Microsoft Research 页面和仓库记录，全文 PDF 在本环境不可达。因此本文对 CoddSpeed 的描述仅基于公开摘要与 [`docs/papers/README.md`](papers/README.md)，不伪造未读取的全文细节。
 

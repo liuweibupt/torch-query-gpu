@@ -17,6 +17,7 @@
 - GPU SQL / Tensor Query 软件栈分析：[`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md)
 - GPU 数据库引擎评估 HTML：[`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html)
 - 国产卡 AI Tensor DB 分享文档：[`docs/ai-tensor-db-on-domestic-gpu.zh.md`](docs/ai-tensor-db-on-domestic-gpu.zh.md)
+- TQP/CoddSpeed 与 PyTorch runtime 补充说明：[`docs/tqp-coddspeed-pytorch-runtime-notes.zh.md`](docs/tqp-coddspeed-pytorch-runtime-notes.zh.md)
 - 中文 Roadmap：[`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md)
 - 英文架构说明：[`docs/architecture.md`](docs/architecture.md)
 - 英文 Roadmap：[`docs/operator-roadmap.md`](docs/operator-roadmap.md)
