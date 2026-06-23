@@ -21,3 +21,4 @@
 - 中文 Roadmap：[`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md)
 - 英文架构说明：[`docs/architecture.md`](docs/architecture.md)
 - 英文 Roadmap：[`docs/operator-roadmap.md`](docs/operator-roadmap.md)
+- 论文总索引与精读笔记：[`docs/papers/README.md`](docs/papers/README.md)

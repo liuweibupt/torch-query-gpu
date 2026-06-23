@@ -367,7 +367,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 | [`docs/architecture.md`](docs/architecture.md) | 英文架构说明。 |
 | [`docs/operator-roadmap.zh.md`](docs/operator-roadmap.zh.md) | 中文 Roadmap / TODO。 |
 | [`docs/operator-roadmap.md`](docs/operator-roadmap.md) | 英文完整 Roadmap。 |
-| [`docs/papers/README.md`](docs/papers/README.md) | 已下载论文与来源说明。 |
+| [`docs/papers/README.md`](docs/papers/README.md) | 论文总索引、下载状态、跨论文 synthesis，以及 TQP/TQEx/CoddSpeed 精读笔记入口。 |
 
 ## 开发验证
 
