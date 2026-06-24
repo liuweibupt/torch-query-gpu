@@ -484,8 +484,8 @@ def test_q1_physical_plan_uses_graph_lowered_fusion(monkeypatch):
     calls = []
     sentinel = [{"ok": 1}]
 
-    def fused(con_arg, graph, device):
-        calls.append((graph.query_id, graph.root.kind, device))
+    def fused(con_arg, graph, device, scan_ranges=None):
+        calls.append((graph.query_id, graph.root.kind, device, scan_ranges))
         return sentinel
 
     monkeypatch.setattr(physical_fusion, "try_execute_fused_physical_plan", fused)
@@ -493,7 +493,7 @@ def test_q1_physical_plan_uses_graph_lowered_fusion(monkeypatch):
     rows = execute_physical_plan(con, plan.operator_graph, device="cpu")
 
     assert rows == sentinel
-    assert calls == [(1, plan.operator_graph.root.kind, "cpu")]
+    assert calls == [(1, plan.operator_graph.root.kind, "cpu", {})]
 
 
 def test_q1_fused_physical_plan_matches_duckdb_fixture_without_generic_unique(monkeypatch):

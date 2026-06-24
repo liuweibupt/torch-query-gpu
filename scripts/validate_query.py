@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.ir import FrontendName
 from tpch_torch.relational import SQLValidationResult
@@ -18,7 +19,7 @@ FIRST_TPCH_QUERY_ID = 1
 LAST_TPCH_QUERY_ID = 22
 ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
-QueryValidator = Callable[[object, str, str, FrontendName, bool], SQLValidationResult]
+QueryValidator = Callable[[object, str, str, FrontendName, bool, PartitionConfig | None], SQLValidationResult]
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use explicit compressed mask execution where implemented, currently TPC-H Q6",
     )
+    parser.add_argument("--partition-table", help="Enable partitionable execution over this table")
+    parser.add_argument("--partition-chunk-size", type=int, help="Rows per partitionable chunk")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
     return parser
 
@@ -73,6 +76,7 @@ def validate_queries(
     keep_going: bool,
     frontend: FrontendName = "sirius",
     use_compressed_masks: bool = False,
+    partition_config: PartitionConfig | None = None,
     load_query: QueryLoader = get_tpch_query,
     validator: QueryValidator = validate_sql_with_frontend,
 ) -> list[BatchValidationRecord]:
@@ -86,6 +90,7 @@ def validate_queries(
                 tolerance=tolerance,
                 frontend=frontend,
                 use_compressed_masks=use_compressed_masks,
+                partition_config=partition_config,
                 load_query=load_query,
                 validator=validator,
             )
@@ -108,9 +113,10 @@ def _validate_one_query(
     load_query: QueryLoader,
     validator: QueryValidator,
     use_compressed_masks: bool,
+    partition_config: PartitionConfig | None,
 ) -> BatchValidationRecord:
     sql = load_query(con, query_id)
-    result = validator(con, sql, device, frontend, use_compressed_masks)
+    result = validator(con, sql, device, frontend, use_compressed_masks, partition_config)
     if result.max_abs_error > tolerance:
         raise AssertionError(
             f"Q{result.query_id} validation failed: "
@@ -138,6 +144,7 @@ def main() -> None:
                 keep_going=args.keep_going,
                 frontend=args.frontend,
                 use_compressed_masks=args.compressed_masks,
+                partition_config=_partition_config(args),
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
@@ -149,6 +156,7 @@ def main() -> None:
             device=args.device,
             frontend=args.frontend,
             use_compressed_masks=args.compressed_masks,
+            partition_config=_partition_config(args),
         )
     finally:
         con.close()
@@ -161,6 +169,14 @@ def main() -> None:
         f"validated query={result.query_id} rows={result.row_count} "
         f"max_abs_error={result.max_abs_error:.6g}"
     )
+
+
+def _partition_config(args: argparse.Namespace) -> PartitionConfig | None:
+    if args.partition_table is None and args.partition_chunk_size is None:
+        return None
+    if args.partition_table is None or args.partition_chunk_size is None:
+        raise SystemExit("--partition-table and --partition-chunk-size must be provided together")
+    return PartitionConfig(args.partition_table, args.partition_chunk_size)
 
 
 def _print_batch_records(records: list[BatchValidationRecord]) -> None:

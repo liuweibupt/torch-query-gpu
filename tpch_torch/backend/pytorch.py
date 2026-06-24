@@ -7,6 +7,7 @@ from typing import Any
 import duckdb
 
 from tpch_torch.backend.graph import PyTorchGraphExecutor
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.ir import TQPPlan
 
@@ -20,6 +21,7 @@ class PyTorchBackend:
         plan: TQPPlan,
         device: str = "cpu",
         use_compressed_masks: bool = False,
+        partition_config: PartitionConfig | None = None,
     ) -> list[dict[str, Any]]:
         if plan.operator_graph is not None:
             return PyTorchGraphExecutor().execute(
@@ -27,6 +29,7 @@ class PyTorchBackend:
                 plan,
                 device=device,
                 use_compressed_masks=use_compressed_masks,
+                partition_config=partition_config,
             )
         if plan.query_id is not None:
             raise UnsupportedPlanError(
@@ -37,4 +40,5 @@ class PyTorchBackend:
             plan,
             device=device,
             use_compressed_masks=use_compressed_masks,
+            partition_config=partition_config,
         )

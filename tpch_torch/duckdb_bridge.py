@@ -116,10 +116,15 @@ def export_substrait_json(con: duckdb.DuckDBPyConnection, sql: str) -> dict[str,
 
 
 def fetch_lineitem_tensor_table(
-    con: duckdb.DuckDBPyConnection, device: str = "cpu"
+    con: duckdb.DuckDBPyConnection,
+    device: str = "cpu",
+    scan_range: tuple[int, int] | None = None,
 ) -> TensorTable:
     """Fetch Q1 lineitem columns into a columnar `TensorTable`."""
 
+    if scan_range is not None:
+        columnar = con.execute(_lineitem_select_with_range(scan_range)).fetchnumpy()
+        return _lineitem_table_from_preencoded_columnar(columnar, device=device)
     device_key = _device_cache_key(device)
     cached = _cached_lineitem_tensor_table(con, device_key)
     if cached is not None:
@@ -128,6 +133,13 @@ def fetch_lineitem_tensor_table(
     table = _lineitem_table_from_preencoded_columnar(columnar, device=device)
     _cache_lineitem_tensor_table(con, device_key, table)
     return table
+
+
+def _lineitem_select_with_range(scan_range: tuple[int, int]) -> str:
+    start, end = scan_range
+    if start < 0 or end < start:
+        raise ValueError(f"invalid lineitem scan range: {scan_range}")
+    return f"{LINEITEM_SELECT_FOR_TORCH} limit {end - start} offset {start}"
 
 
 def clear_lineitem_tensor_table_cache(con: Any | None = None) -> None:

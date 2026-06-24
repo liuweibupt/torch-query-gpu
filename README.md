@@ -19,6 +19,7 @@
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
+- ✅ 新增 CoddSpeed-style partitionable execution 原型：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N`，当前覆盖单表 aggregate fragments（Q6、Q1），每个 chunk 仍走 DuckDB physical graph → PyTorch tensor operators，再由 host merge partial aggregates。
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
 - ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
@@ -39,9 +40,11 @@ flowchart LR
     Backend --> GraphExec["PyTorchGraphExecutor.forward-like execute"]
     GraphExec -->|Q1-Q22 + generic joins| Physical["DuckDB physical-plan interpreter<br/>backend/physical*.py"]
     GraphExec -->|Q6 --compressed-masks| Primitives["Q6 compressed mask experimental primitive"]
+    GraphExec -->|explicit PartitionConfig| Partitionable["CoddSpeed-style partitionable executor<br/>chunk scan · local aggregate · host merge"]
     GraphExec -->|single-table generic subset| Generic["tpch_torch/backend/generic.py"]
     Physical --> Nodes["Physical tensor nodes<br/>Scan · Filter · Project · Join · Aggregate · Sort/TopN"]
     Primitives --> Torch["PyTorch Tensor Operators<br/>CPU / CUDA"]
+    Partitionable --> Physical
     Nodes --> Torch
     Generic --> Torch
     Torch --> Rows["Result Rows"]
@@ -57,7 +60,7 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
 | IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
 | Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py`, `tpch_torch/backend/physical*.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q1-Q22 与 generic joins 可由 DuckDB physical-plan interpreter 执行；不执行 compiled TPC-H fallback root。 |
-| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask 与 RLE aggregate primitives。 |
+| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives，以及 partitionable chunk scan + host partial aggregate merge。 |
 
 ## Q1 是怎么实现的
 
@@ -103,6 +106,22 @@ fused_rows = physical_fusion.try_execute_fused_physical_plan(...)
 if fused_rows is not None:
     return fused_rows
 ```
+
+## CoddSpeed-style partitionable execution
+
+当前 engine 支持显式启用的 partitionable execution，用于模拟 CoddSpeed 中 host/coprocessor 按 chunk 执行 query fragment 的模型。默认执行路径不变；只有传入 `PartitionConfig` 或 benchmark CLI 参数时才启用。
+
+```bash
+python -m scripts.benchmark_query \
+  --db data/tpch_sf1.duckdb \
+  --query 6 \
+  --device cpu \
+  --cold-runs 0 --warmup-runs 1 --hot-runs 3 \
+  --partition-table lineitem \
+  --partition-chunk-size 100000
+```
+
+当前覆盖单表 aggregate physical fragments（例如 TPC-H Q6/Q1）：每个 chunk 通过同一个 DuckDB physical graph interpreter 调用 PyTorch tensor 算子，host 端再合并 `SUM/COUNT/MIN/MAX/AVG` partial aggregate。详细说明见 [`docs/partitionable-execution.zh.md`](docs/partitionable-execution.zh.md)。
 
 ## 安装
 

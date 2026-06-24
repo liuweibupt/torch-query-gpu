@@ -57,6 +57,42 @@ def test_validate_parser_rejects_removed_plan_source(tmp_path):
         parser.parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--query", "1", "--plan-source", "duckdb-logical"])
 
 
+def test_run_parser_accepts_partition_options(tmp_path):
+    args = run_parser().parse_args(
+        [
+            "--db",
+            str(tmp_path / "tpch.duckdb"),
+            "--query",
+            "6",
+            "--partition-table",
+            "lineitem",
+            "--partition-chunk-size",
+            "100",
+        ]
+    )
+
+    assert args.partition_table == "lineitem"
+    assert args.partition_chunk_size == 100
+
+
+def test_validate_parser_accepts_partition_options(tmp_path):
+    args = validate_parser().parse_args(
+        [
+            "--db",
+            str(tmp_path / "tpch.duckdb"),
+            "--query",
+            "6",
+            "--partition-table",
+            "lineitem",
+            "--partition-chunk-size",
+            "100",
+        ]
+    )
+
+    assert args.partition_table == "lineitem"
+    assert args.partition_chunk_size == 100
+
+
 def test_run_parser_accepts_frontend(tmp_path):
     args = run_parser().parse_args(
         ["--db", str(tmp_path / "tpch.duckdb"), "--query", "6", "--frontend", "sirius"]
@@ -143,10 +179,11 @@ def test_run_query_main_prints_generic_query_label(monkeypatch, tmp_path, capsys
     def connect_database(path):
         return FakeConnection()
 
-    def timed_run_sql(con, sql, *, device, frontend, use_compressed_masks):
+    def timed_run_sql(con, sql, *, device, frontend, use_compressed_masks, partition_config):
         assert sql == "select count(*) as n from t"
         assert frontend == "sirius"
         assert use_compressed_masks is False
+        assert partition_config is None
         return QueryResult(query_id=None, rows=[{"n": 2}]), 1.25
 
     monkeypatch.setattr(run_query, "connect_database", connect_database)

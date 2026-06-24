@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import duckdb
 import torch
@@ -33,33 +33,43 @@ from tpch_torch.backend.physical_projection import (
 )
 from tpch_torch.backend.physical_required import parents_by_child, required_columns_from_parents
 from tpch_torch.backend.physical_sql import select_expressions_by_alias
+from tpch_torch.backend.physical_scan import fetch_physical_table, scan_row_count
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
-from tpch_torch.backend.generic import _encode_generic_column
-from tpch_torch.relational import DATE_COLUMNS_EXTENDED
 
 _ROW_ID = "__rowid__"
-_DUCKDB_ROW_ID = "rowid"
 _aggregate_specs = aggregate_specs
-
 
 class PhysicalPlanExecutor:
     """Interpret supported DuckDB physical-plan nodes using tensor operators."""
 
-    def __init__(self, con: duckdb.DuckDBPyConnection, graph: TQPOperatorGraph, device: str = "cpu"):
+    def __init__(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        graph: TQPOperatorGraph,
+        device: str = "cpu",
+        *,
+        scan_ranges: Mapping[str, tuple[int, int]] | None = None,
+        enable_fusion: bool = True,
+    ):
         self._con = con
         self._graph = graph
         self._device = device
+        self._scan_ranges = {key.lower(): value for key, value in (scan_ranges or {}).items()}
+        self._enable_fusion = enable_fusion
         self._select_aliases = select_expressions_by_alias(graph.source_sql)
         self._parents = parents_by_child(graph)
         self._delim_tables: dict[str, PhysicalTable] = {}
         self._cte_tables: dict[str, PhysicalTable] = {}
 
     def execute(self) -> list[dict[str, Any]]:
-        fused_rows = physical_fusion.try_execute_fused_physical_plan(self._con, self._graph, self._device)
-        if fused_rows is not None:
-            return fused_rows
+        if self._enable_fusion:
+            fused_rows = physical_fusion.try_execute_fused_physical_plan(
+                self._con, self._graph, self._device, self._scan_ranges
+            )
+            if fused_rows is not None:
+                return fused_rows
         table = self._execute_node(self._graph.root_id)
         aliases = _describe_aliases(self._con, self._graph.source_sql)
         table = _trim_to_output_arity(table, len(aliases))
@@ -107,16 +117,18 @@ class PhysicalPlanExecutor:
         fetched_columns = tuple(
             dict.fromkeys((*projected_columns, *_filter_columns(self._con, table_name, filters)))
         )
+        scan_range = self._scan_ranges.get(table_name.lower())
         if not fetched_columns:
-            count = int(self._con.execute(f"select count(*) from {table_name}").fetchone()[0])
-            row_id = torch.arange(count, dtype=torch.int64, device=self._device)
+            count, offset = scan_row_count(self._con, table_name, scan_range)
+            row_id = torch.arange(offset, offset + count, dtype=torch.int64, device=self._device)
             return PhysicalTable(table_name, {_ROW_ID: PhysicalValue(row_id)}, (_ROW_ID,), count)
-        table = _fetch_physical_table(
+        table = fetch_physical_table(
             self._con,
             table_name,
             fetched_columns,
             tuple(projected_columns),
             self._device,
+            scan_range=scan_range,
         )
         return _apply_scan_filters(table, filters) if filters else table
 
@@ -307,45 +319,6 @@ def execute_physical_plan(
     return PhysicalPlanExecutor(con, graph, device=device).execute()
 
 
-def _fetch_physical_table(
-    con: duckdb.DuckDBPyConnection,
-    table_name: str,
-    fetched_columns: tuple[str, ...],
-    order_columns: tuple[str, ...],
-    device: str,
-) -> PhysicalTable:
-    select_list = ", ".join(_select_expression(column) for column in fetched_columns)
-    columnar = con.execute(f"select {select_list} from {table_name}").fetchnumpy()
-    values: dict[str, PhysicalValue] = {}
-    for column in fetched_columns:
-        tensor, vocabulary = _encode_generic_column(
-            columnar[column],
-            device,
-            column_name=column,
-            table_name=table_name,
-        )
-        value = PhysicalValue(tensor=tensor, dictionary=vocabulary, is_date=column in DATE_COLUMNS_EXTENDED)
-        values[column] = value
-        values[f"{table_name}.{column}"] = value
-    row_count = 0 if not fetched_columns else int(next(iter(values.values())).require_tensor().numel())
-    _add_rowid_aliases(values, table_name, row_count, device)
-    order = order_columns or (_ROW_ID,)
-    if not order_columns:
-        values[_ROW_ID] = values[_DUCKDB_ROW_ID]
-    return PhysicalTable(table_name, values, order, row_count)
-
-
-def _add_rowid_aliases(
-    values: dict[str, PhysicalValue],
-    table_name: str,
-    row_count: int,
-    device: str,
-) -> None:
-    rowids = PhysicalValue(torch.arange(row_count, dtype=torch.int64, device=device))
-    values[_DUCKDB_ROW_ID] = rowids
-    values[f"{table_name}.{_DUCKDB_ROW_ID}"] = rowids
-
-
 def _has_duplicate_values(values: torch.Tensor) -> bool:
     if values.numel() <= 1:
         return False
@@ -402,12 +375,6 @@ def _rows_from_table(table: PhysicalTable) -> list[dict[str, Any]]:
 def _describe_aliases(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[str, ...]:
     rows = con.execute(f"DESCRIBE {sql}").fetchall()
     return tuple(str(row[0]) for row in rows)
-
-
-def _select_expression(column: str) -> str:
-    if column in DATE_COLUMNS_EXTENDED:
-        return f"strftime({column}, '%Y%m%d')::integer as {column}"
-    return column
 
 
 def _filter_columns(
