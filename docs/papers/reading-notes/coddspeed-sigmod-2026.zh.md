@@ -158,3 +158,26 @@ CoddSpeed : 把 TQP-derived GPU engine 放入生产数据平台，解决 host/co
 ```
 
 对本仓库来说，TQP/TQEx 更指导 operator lowering，CoddSpeed 更指导系统边界和工程化架构。
+
+
+## 13. 本仓库已落地的 partitionable execution 子集
+
+当前 `torch-query-gpu` 已加入一个显式 opt-in 的 CoddSpeed-style partitionable executor：
+
+```text
+SQL → DuckDB/Sirius-like frontend → TQPOperatorGraph
+  → PyTorchGraphExecutor(partition_config)
+  → execute_partitionable_physical_plan
+  → chunk scan + local physical aggregate
+  → host merge partial aggregate rows
+```
+
+实现对应论文中的几个点：
+
+- **partitionable over one table**：当前限定一个大表，例如 `lineitem`；
+- **fragment-level execution**：每个 row range 都执行同一个 physical graph fragment；
+- **local/global aggregate split**：Q6/Q1 这类聚合在 chunk 内先 local aggregate，再由 host 合并；
+- **no silent fallback**：不满足单表 aggregate shape 时显式抛 `UnsupportedPlanError`；
+- **coprocessor minimalist**：PyTorch executor 只处理 chunk fragment，partial results 的组合由 host Python 层完成。
+
+当前还没有实现论文中的 non-partitionable table `Prepare` 缓存、failed chunk fallback、多 runtime 并发、join partitioning 和 data movement service。

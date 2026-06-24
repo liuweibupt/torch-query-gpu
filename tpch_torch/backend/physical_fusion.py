@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import duckdb
 import torch
@@ -37,11 +37,12 @@ def try_execute_fused_physical_plan(
     con: duckdb.DuckDBPyConnection,
     graph: TQPOperatorGraph,
     device: str,
+    scan_ranges: Mapping[str, tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Return fused rows for recognized physical graphs, otherwise None."""
 
     if _is_q1_physical_graph(graph):
-        return _execute_q1_fused(con, device)
+        return _execute_q1_fused(con, device, scan_range=_scan_range(scan_ranges, "lineitem"))
     return None
 
 
@@ -61,8 +62,13 @@ def _is_q1_physical_graph(graph: TQPOperatorGraph) -> bool:
     return "lineitem" in scan_tables
 
 
-def _execute_q1_fused(con: duckdb.DuckDBPyConnection, device: str) -> list[dict[str, Any]]:
-    table = fetch_lineitem_tensor_table(con, device=device)
+def _execute_q1_fused(
+    con: duckdb.DuckDBPyConnection,
+    device: str,
+    *,
+    scan_range: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    table = fetch_lineitem_tensor_table(con, device=device, scan_range=scan_range)
     table.require_columns(_Q1_REQUIRED_COLUMNS)
     selected_mask = table.columns["l_shipdate"] <= _Q1_CUTOFF_YYYYMMDD
     if not bool(torch.any(selected_mask).cpu().item()):
@@ -75,6 +81,15 @@ def _execute_q1_fused(con: duckdb.DuckDBPyConnection, device: str) -> list[dict[
     compacted = {name: tensor[non_empty_group_ids] for name, tensor in aggregates.items()}
     keys = torch.stack((non_empty_group_ids // status_count, non_empty_group_ids % status_count), dim=1)
     return _format_q1_rows(table, keys, compacted)
+
+
+def _scan_range(
+    scan_ranges: Mapping[str, tuple[int, int]] | None,
+    table: str,
+) -> tuple[int, int] | None:
+    if scan_ranges is None:
+        return None
+    return scan_ranges.get(table) or scan_ranges.get(table.lower())
 
 
 def _q1_group_ids(table: TensorTable, status_count: int) -> torch.Tensor:

@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.runner import load_sql, timed_run_sql
 
@@ -30,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use explicit compressed mask execution where implemented, currently TPC-H Q6",
     )
+    parser.add_argument("--partition-table", help="Enable partitionable execution over this table")
+    parser.add_argument("--partition-chunk-size", type=int, help="Rows per partitionable chunk")
     return parser
 
 
@@ -44,6 +47,7 @@ def main() -> None:
             device=args.device,
             frontend=args.frontend,
             use_compressed_masks=args.compressed_masks,
+            partition_config=_partition_config(args),
         )
     finally:
         con.close()
@@ -54,6 +58,14 @@ def main() -> None:
             print(row)
     label = "generic" if result.query_id is None else f"q{result.query_id:02d}"
     print(f"{label}_pytorch_ms={elapsed_ms:.3f}")
+
+
+def _partition_config(args: argparse.Namespace) -> PartitionConfig | None:
+    if args.partition_table is None and args.partition_chunk_size is None:
+        return None
+    if args.partition_table is None or args.partition_chunk_size is None:
+        raise SystemExit("--partition-table and --partition-chunk-size must be provided together")
+    return PartitionConfig(args.partition_table, args.partition_chunk_size)
 
 
 if __name__ == "__main__":

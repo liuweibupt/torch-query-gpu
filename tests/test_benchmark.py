@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.benchmark import BenchmarkConfig, benchmark_sql
 from tpch_torch.relational import QueryResult
 
@@ -26,15 +27,15 @@ class IncrementingClock:
 
 def test_benchmark_uses_new_connections_for_cold_and_reuses_one_hot_connection():
     events: list[tuple[str, int]] = []
-    runner_calls: list[tuple[int, bool]] = []
+    runner_calls: list[tuple[int, bool, PartitionConfig | None]] = []
 
     def connect(path: Path):
         connection_id = len([event for event in events if event[0] == "connect"])
         events.append(("connect", connection_id))
         return FakeConnection(connection_id, events)
 
-    def runner(con, sql, *, device, frontend, use_compressed_masks):
-        runner_calls.append((con.connection_id, use_compressed_masks))
+    def runner(con, sql, *, device, frontend, use_compressed_masks, partition_config):
+        runner_calls.append((con.connection_id, use_compressed_masks, partition_config))
         return QueryResult(query_id=6, rows=[{"revenue": 1.0}])
 
     report = benchmark_sql(
@@ -47,6 +48,7 @@ def test_benchmark_uses_new_connections_for_cold_and_reuses_one_hot_connection()
             warmup_runs=1,
             hot_runs=2,
             use_compressed_masks=True,
+            partition_config=PartitionConfig("lineitem", 2),
         ),
         connect=connect,
         runner=runner,
@@ -54,7 +56,13 @@ def test_benchmark_uses_new_connections_for_cold_and_reuses_one_hot_connection()
     )
 
     assert events == [("connect", 0), ("close", 0), ("connect", 1), ("close", 1), ("connect", 2), ("close", 2)]
-    assert runner_calls == [(0, True), (1, True), (2, True), (2, True), (2, True)]
+    assert runner_calls == [
+        (0, True, PartitionConfig("lineitem", 2)),
+        (1, True, PartitionConfig("lineitem", 2)),
+        (2, True, PartitionConfig("lineitem", 2)),
+        (2, True, PartitionConfig("lineitem", 2)),
+        (2, True, PartitionConfig("lineitem", 2)),
+    ]
     assert [sample.mode for sample in report.samples] == ["cold", "cold", "hot", "hot"]
     assert report.cold.count == 2
     assert report.hot.count == 2
@@ -68,7 +76,7 @@ def test_cuda_benchmark_synchronizes_around_timed_runs():
     def connect(path: Path):
         return FakeConnection(0, [])
 
-    def runner(con, sql, *, device, frontend, use_compressed_masks):
+    def runner(con, sql, *, device, frontend, use_compressed_masks, partition_config):
         return QueryResult(query_id=None, rows=[{"n": 1}])
 
     benchmark_sql(

@@ -158,8 +158,8 @@ def test_pytorch_backend_executes_tpch_through_operator_graph(monkeypatch):
     calls = []
 
     class DummyGraphExecutor:
-        def execute(self, con, plan, *, device="cpu", use_compressed_masks=False):
-            calls.append((plan.query_id, device, use_compressed_masks))
+        def execute(self, con, plan, *, device="cpu", use_compressed_masks=False, partition_config=None):
+            calls.append((plan.query_id, device, use_compressed_masks, partition_config))
             return [{"ok": True}]
 
     node = TQPOperatorNode(
@@ -180,7 +180,7 @@ def test_pytorch_backend_executes_tpch_through_operator_graph(monkeypatch):
     rows = PyTorchBackend().execute(duckdb.connect(), plan, device="cpu", use_compressed_masks=True)
 
     assert rows == [{"ok": True}]
-    assert calls == [(3, "cpu", True)]
+    assert calls == [(3, "cpu", True, None)]
 
 
 def test_q1_graph_execution_does_not_call_template(monkeypatch):

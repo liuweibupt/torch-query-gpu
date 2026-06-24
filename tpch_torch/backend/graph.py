@@ -9,6 +9,10 @@ import torch
 
 from tpch_torch.backend.generic import execute_generic_sql_plan
 from tpch_torch.backend.physical import execute_physical_plan
+from tpch_torch.backend.physical_partitionable import (
+    PartitionConfig,
+    execute_partitionable_physical_plan,
+)
 from tpch_torch.compressed import PlainMask, RLEMask, mask_and, mask_to_index, plain_to_rle
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.ir import TQPPlan
@@ -28,15 +32,22 @@ class PyTorchGraphExecutor:
         *,
         device: str = "cpu",
         use_compressed_masks: bool = False,
+        partition_config: PartitionConfig | None = None,
     ) -> list[dict[str, Any]]:
         graph = plan.operator_graph
         if graph is None:
+            if partition_config is not None:
+                raise UnsupportedPlanError("partitionable execution requires a physical operator graph")
             if plan.generic_plan is not None:
                 return execute_generic_sql_plan(con, plan.generic_plan, device=device)
             raise UnsupportedPlanError("TQP operator graph is required for PyTorch graph execution")
+        if partition_config is not None and use_compressed_masks:
+            raise UnsupportedPlanError("partitionable execution cannot be combined with compressed mask mode")
         if plan.query_id is None:
+            if partition_config is not None:
+                return execute_partitionable_physical_plan(con, graph, partition_config, device=device)
             return execute_physical_plan(con, graph, device=device)
-        return self._execute_tpch_graph(con, plan, graph, device, use_compressed_masks)
+        return self._execute_tpch_graph(con, plan, graph, device, use_compressed_masks, partition_config)
 
     def _execute_generic_plan(
         self,
@@ -58,10 +69,13 @@ class PyTorchGraphExecutor:
         graph: TQPOperatorGraph,
         device: str,
         use_compressed_masks: bool,
+        partition_config: PartitionConfig | None = None,
     ) -> list[dict[str, Any]]:
         root = graph.root
         if root.kind == OperatorKind.COMPILED_TPCH:
             raise UnsupportedPlanError("compiled TPC-H compatibility roots are no longer executable")
+        if partition_config is not None:
+            return execute_partitionable_physical_plan(con, graph, partition_config, device=device)
         if plan.query_id == 6 and use_compressed_masks:
             return _execute_q6_graph(con, device, use_compressed_masks)
         if plan.query_id in _PHYSICAL_TPCH_QUERIES:

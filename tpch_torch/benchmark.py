@@ -13,6 +13,7 @@ from typing import Literal
 import duckdb
 import torch
 
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.duckdb_bridge import connect_database
 from tpch_torch.ir import FrontendName
 from tpch_torch.relational import QueryResult
@@ -42,6 +43,7 @@ class BenchmarkConfig:
     warmup_runs: int = DEFAULT_WARMUP_RUNS
     hot_runs: int = DEFAULT_HOT_RUNS
     use_compressed_masks: bool = False
+    partition_config: PartitionConfig | None = None
 
     def __post_init__(self) -> None:
         _validate_non_negative("cold_runs", self.cold_runs)
@@ -197,6 +199,7 @@ def _run_query(context: _BenchmarkContext, con: duckdb.DuckDBPyConnection) -> Qu
         device=config.device,
         frontend=config.frontend,
         use_compressed_masks=config.use_compressed_masks,
+        partition_config=config.partition_config,
     )
 
 

@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.benchmark import (
     DEFAULT_COLD_RUNS,
     DEFAULT_HOT_RUNS,
@@ -36,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use explicit compressed mask execution where implemented, currently TPC-H Q6",
     )
+    parser.add_argument("--partition-table", help="Enable partitionable execution over this table")
+    parser.add_argument("--partition-chunk-size", type=int, help="Rows per partitionable chunk")
     parser.add_argument("--json", action="store_true", help="Print benchmark report as JSON")
     return parser
 
@@ -43,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     sql = _load_sql(args)
+    partition_config = _partition_config(args)
     report = benchmark_sql(
         BenchmarkConfig(
             db_path=args.db,
@@ -53,12 +57,21 @@ def main() -> None:
             warmup_runs=args.warmup_runs,
             hot_runs=args.hot_runs,
             use_compressed_masks=args.compressed_masks,
+            partition_config=partition_config,
         )
     )
     if args.json:
         print(json.dumps(_report_dict(report), indent=2, sort_keys=True))
         return
     _print_report(report)
+
+
+def _partition_config(args: argparse.Namespace) -> PartitionConfig | None:
+    if args.partition_table is None and args.partition_chunk_size is None:
+        return None
+    if args.partition_table is None or args.partition_chunk_size is None:
+        raise SystemExit("--partition-table and --partition-chunk-size must be provided together")
+    return PartitionConfig(args.partition_table, args.partition_chunk_size)
 
 
 def _load_sql(args: argparse.Namespace) -> str:
@@ -74,7 +87,8 @@ def _print_report(report: BenchmarkReport) -> None:
     print(
         "benchmark "
         f"device={config.device} frontend={config.frontend} "
-        f"compressed_masks={config.use_compressed_masks}"
+        f"compressed_masks={config.use_compressed_masks} "
+        f"partition_config={config.partition_config}"
     )
     _print_summary("cold", report.cold)
     print(f"warmup_runs={config.warmup_runs}")
