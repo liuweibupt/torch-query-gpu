@@ -19,9 +19,10 @@
 
 **Step 1: Write failing tests**
 
-- Update `test_load_substrait_extension_uses_default_install_when_env_unset` to use a recording connection with `execute(sql)` and expect:
-  - `install substrait from community`
-  - `load substrait`
+- Keep `test_load_substrait_extension_uses_default_install_when_env_unset` on DuckDB's Python extension API and expect:
+  - `install_extension("substrait", repository="community")`
+  - `load_extension("substrait")`
+- Add a test where `load_extension("substrait")` raises `RuntimeError("Resource temporarily unavailable")` and assert `_load_substrait_extension()` raises `DuckDBSubstraitError` with the visible resource message.
 - Add a test where `execute("load substrait")` raises `RuntimeError("Resource temporarily unavailable")` and assert `_load_substrait_extension()` raises `DuckDBSubstraitError` with the visible resource message.
 - Add a test where `generate_tpch()` records `pragma threads=1` before `call dbgen` when `TQG_DUCKDB_THREADS` is unset.
 
@@ -37,7 +38,7 @@ Expected: fail because default loader still calls Python extension methods and `
 
 **Step 3: Implement minimal code**
 
-- Change default Substrait loading to SQL `con.execute("install substrait from community")` and `con.execute("load substrait")`.
+- Keep default Substrait loading on `install_extension()` / `load_extension()` to avoid SQL `LOAD` aborts seen with a `duckdb`-then-`torch` import order.
 - Catch `(duckdb.Error, RuntimeError)` in `_load_substrait_extension()`.
 - Add `_duckdb_helper_threads()` reading `TQG_DUCKDB_THREADS`, validating positive integer, defaulting to `1`.
 - Set `pragma threads=<value>` before `dbgen`.

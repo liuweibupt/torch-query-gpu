@@ -47,6 +47,8 @@ LINEITEM_DICTIONARIES = {
     "l_linestatus": ("F", "O"),
 }
 _LINEITEM_TENSOR_TABLE_CACHE: weakref.WeakKeyDictionary[Any, dict[str, TensorTable]] = weakref.WeakKeyDictionary()
+_DUCKDB_HELPER_THREADS_ENV = "TQG_DUCKDB_THREADS"
+_DEFAULT_DUCKDB_HELPER_THREADS = 1
 
 
 class DuckDBSubstraitError(RuntimeError):
@@ -98,8 +100,9 @@ def generate_tpch(con: duckdb.DuckDBPyConnection, scale_factor: float = 1.0) -> 
     try:
         con.execute("install tpch")
         con.execute("load tpch")
+        con.execute(f"pragma threads={_duckdb_helper_threads()}")
         con.execute("call dbgen(sf = ?)", [scale_factor])
-    except duckdb.Error as exc:
+    except (duckdb.Error, RuntimeError) as exc:
         raise DuckDBTPCHError(f"failed to generate TPC-H data: {exc}") from exc
 
 
@@ -199,7 +202,7 @@ def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:
             raise DuckDBSubstraitError(f"TQG_SUBSTRAIT_EXTENSION does not exist: {path}")
         try:
             con.load_extension(str(path))
-        except duckdb.Error as exc:
+        except (duckdb.Error, RuntimeError) as exc:
             raise DuckDBSubstraitError(
                 f"failed to load TQG_SUBSTRAIT_EXTENSION {path}: {exc}"
             ) from exc
@@ -207,8 +210,21 @@ def _load_substrait_extension(con: duckdb.DuckDBPyConnection) -> None:
     try:
         con.install_extension("substrait", repository="community")
         con.load_extension("substrait")
-    except duckdb.Error as exc:
+    except (duckdb.Error, RuntimeError) as exc:
         raise DuckDBSubstraitError(
             "DuckDB Substrait extension is unavailable; expected "
-            "INSTALL substrait FROM community; LOAD substrait to work"
+            f"INSTALL substrait FROM community; LOAD substrait to work: {exc}"
         ) from exc
+
+
+def _duckdb_helper_threads() -> int:
+    raw_value = os.environ.get(_DUCKDB_HELPER_THREADS_ENV)
+    if raw_value is None:
+        return _DEFAULT_DUCKDB_HELPER_THREADS
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise DuckDBTPCHError(f"{_DUCKDB_HELPER_THREADS_ENV} must be a positive integer") from exc
+    if value <= 0:
+        raise DuckDBTPCHError(f"{_DUCKDB_HELPER_THREADS_ENV} must be a positive integer")
+    return value

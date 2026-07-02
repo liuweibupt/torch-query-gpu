@@ -142,6 +142,14 @@ python -m scripts.gen_sf1 --db data/tpch_sf1.duckdb --sf 1
 tpch-torch-gen-sf1 --db data/tpch_sf1.duckdb --sf 1
 ```
 
+`scripts.gen_sf1` / `generate_tpch()` 会在调用 DuckDB `dbgen` 前设置
+`PRAGMA threads=1`，避免容器 PID 额度紧张时 DuckDB 为测试数据生成启动过多
+worker。需要更高并发时可显式设置，例如：
+
+```bash
+TQG_DUCKDB_THREADS=8 python -m scripts.gen_sf1 --db data/tpch_sf1.duckdb --sf 1
+```
+
 ## 运行与验证
 
 ### 运行单个 TPC-H 查询

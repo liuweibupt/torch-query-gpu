@@ -11,6 +11,7 @@ from tpch_torch.duckdb_bridge import (
     create_lineitem_fixture,
     export_substrait_json,
     fetch_lineitem_tensor_table,
+    generate_tpch,
 )
 from tpch_torch.relational import run_duckdb_sql
 from tpch_torch.sql import TPC_H_Q1_SQL
@@ -210,4 +211,44 @@ def test_load_substrait_extension_uses_default_install_when_env_unset(monkeypatc
     assert con.calls == [
         ("install_extension", "substrait", "community"),
         ("load_extension", "substrait"),
+    ]
+
+
+def test_load_substrait_extension_wraps_runtime_error(monkeypatch):
+    from tpch_torch import duckdb_bridge
+
+    class FailingLoadConnection:
+        def install_extension(self, name, repository=None):
+            return None
+
+        def load_extension(self, name):
+            raise RuntimeError("Resource temporarily unavailable")
+
+    monkeypatch.delenv("TQG_SUBSTRAIT_EXTENSION", raising=False)
+
+    with pytest.raises(DuckDBSubstraitError) as exc_info:
+        duckdb_bridge._load_substrait_extension(FailingLoadConnection())
+
+    assert "Resource temporarily unavailable" in str(exc_info.value)
+
+
+def test_generate_tpch_sets_default_helper_threads(monkeypatch):
+    class RecordingConnection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+            return self
+
+    monkeypatch.delenv("TQG_DUCKDB_THREADS", raising=False)
+    con = RecordingConnection()
+
+    generate_tpch(con, scale_factor=0.01)
+
+    assert con.calls[:4] == [
+        ("install tpch", None),
+        ("load tpch", None),
+        ("pragma threads=1", None),
+        ("call dbgen(sf = ?)", [0.01]),
     ]

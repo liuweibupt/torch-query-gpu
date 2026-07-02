@@ -9,7 +9,7 @@ Continue the paper-driven optimization roadmap by making the physical interprete
 - The TPC-H path is already end-to-end SQL driven: DuckDB emits JSON physical plans, the repository lowers them into `TQPOperatorGraph`, and the physical interpreter executes PyTorch tensor operators.
 - Existing inner join code is already tensorized: it sorts the build key, probes with `torch.searchsorted`, and uses a duplicate-free fast path when the sorted build key is strictly increasing.
 - The missing piece is persistent physical metadata. Each join currently rediscovers sortedness/uniqueness by scanning tensors; subsequent sort/group-by operators do not know when earlier operators already established order or uniqueness.
-- Baseline tests in the current container failed before code changes because the cgroup is near its PID limit (`pids.current` was close to `pids.max`). DuckDB `dbgen` with the default thread count attempted to create many worker threads and reported `Resource temporarily unavailable`. DuckDB's Python `load_extension()` also surfaced that error as `RuntimeError`, while SQL `INSTALL/LOAD` works. The fix must report failures explicitly and avoid hidden fallbacks.
+- Baseline tests in the current container failed before code changes because the cgroup is near its PID limit (`pids.current` was close to `pids.max`). DuckDB `dbgen` with the default thread count attempted to create many worker threads and reported `Resource temporarily unavailable`. DuckDB's Python `load_extension()` can surface the same resource error as `RuntimeError`. A later check also showed SQL `LOAD substrait` may abort in a `duckdb`-then-`torch` import order, so the safer fix is typed error wrapping for the Python API, not switching APIs.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ If metadata is absent, the current generic tensor path remains the correctness p
 
 Keep DuckDB helper failures visible, but make them typed and deterministic:
 
-- use SQL `INSTALL ...; LOAD ...` for Substrait by default, matching DuckDB's documented extension statements and the existing error message;
+- keep DuckDB's Python extension API for Substrait loading because SQL `LOAD` can abort in one import-order edge case in this environment;
 - wrap both `duckdb.Error` and `RuntimeError` from extension loading in `DuckDBSubstraitError` so tests can skip/report explicitly;
 - configure DuckDB `dbgen` worker count through an explicit `TQG_DUCKDB_THREADS` environment variable defaulting to `1` for repository-managed test-data generation. This is documented as a container resource control, not an execution fallback.
 
@@ -53,6 +53,6 @@ Keep DuckDB helper failures visible, but make them typed and deterministic:
 
 - Add unit tests for metadata preservation/drop rules on `PhysicalValue` and `PhysicalTable`.
 - Add join tests that prove the sorted/unique build key path skips `torch.argsort` while producing the same row-index pairs.
-- Add DuckDB bridge tests for SQL extension loading and typed `RuntimeError` wrapping.
+- Add DuckDB bridge tests for typed `RuntimeError` wrapping and helper thread configuration.
 - Run focused tests first, then full `pytest` with `timeout 60`.
 - Benchmark representative join-heavy TPC-H queries (Q14/Q19 if the existing SF=1 database is present) and record results in docs/README without overstating improvements.
