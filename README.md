@@ -217,6 +217,9 @@ final aggregate expression alias，例如 100 * sum(x) / sum(y)；支持 aggrega
 本轮算子优化已覆盖 physical-plan interpreter 的几条热路径：
 
 - `HASH_JOIN` row-index 生成从 Python `dict/list/tolist()` 改为 tensor `searchsorted` 路径；右侧 build key 已排序且唯一时跳过 `argsort` 和重复展开。
+- `PhysicalValue` 携带 conservative sorted/unique metadata；scan/filter/single-key
+  sort/single-key group-by 会传播这些属性，PK/FK join 可直接走
+  sorted-unique build lookup，避免重复探测 sortedness。
 - 已知 TPC-H 低基数字符串列使用 table-aware static dictionary encoding，避免大列上反复 `numpy.unique`。
 - `IN` / 同列 literal `OR` 使用 membership mask；singleton membership 直接走 equality。
 - `PhysicalTable.filter/gather` 对共享 alias 的 `PhysicalValue` 只转换一次，减少 physical plan 中 `col` / `table.col` alias 的重复 tensor selection。
@@ -331,6 +334,11 @@ tpch-torch-benchmark \
 
 Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke benchmark 主要覆盖 Q12/Q14/Q19 和 generic physical-plan 算子优化。
 
+2026-07-02 metadata batch 复测（SF=1 CPU，`--cold-runs 0 --warmup-runs 1 --hot-runs 3`，
+短样本端到端）：Q14 main/branch hot median 519.374/534.547 ms，Q19 main/branch hot
+median 1567.334/1484.621 ms。结论：metadata path 已接入但短样本收益混合，Q19 有小幅改善，
+Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
+
 ### Q1 graph-lowered fusion smoke benchmark（SF=1）
 
 命令均为 `--query 1 --frontend sirius --cold-runs 1 --warmup-runs 1 --hot-runs 5`，计时端到端且样本很短，仅用于确认优化方向：
@@ -370,7 +378,7 @@ Q1 已在后续改为 DuckDB physical-plan interpreter 路径；上表 smoke ben
 - [x] Q1 已增加 graph-lowered fused physical primitive：仍由 SQL/DuckDB graph 触发；hot path 复用 resident tensors，并用 masked `torch.bincount` 做融合聚合。
 - [x] Q6 默认路径已迁到 DuckDB physical-plan interpreter；`--compressed-masks` 保留显式 compressed mask primitive 实验。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
-- [x] Physical-plan 算子热路径优化：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
+- [x] Physical-plan 算子热路径优化：tensor join index、sorted/unique metadata、PK/FK sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
 - [ ] Generic subquery lowering、window、set operations；更复杂 `HAVING` / `CASE` SQL shapes 继续扩展。
 - [x] 压缩数据第一批 aggregate primitive：RLE `COUNT` / `SUM` / `MIN` / `MAX` / `AVG` 基于 run lengths 执行，不展开 rows。
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。

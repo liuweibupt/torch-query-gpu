@@ -112,6 +112,9 @@ until a readable full paper/appendix is available.
 - [x] Add reusable `LookupIndex` for pre-sorted dimension-key lookup probes.
 - [x] First optimizer awareness for sorted/unique columns: sorted unique physical
       join build keys avoid redundant sorting.
+- [x] Add `PhysicalValue` sorted/unique metadata propagation for scans, filters,
+      single-key sorts, single-key group-by outputs, and metadata-backed PK/FK
+      join probes.
 - [ ] Add broader optimizer awareness for sorted/unique columns to avoid redundant `sort`,
       `unique`, and `unique_consecutive` across whole query plans.
 - [ ] Add join strategy selection between hash and sort joins based on collision
