@@ -273,12 +273,22 @@ class PhysicalPlanExecutor:
 
     def _sort_table(self, table: PhysicalTable, order_items: Sequence[str]) -> PhysicalTable:
         result = table
+        single_order = len(order_items) == 1
         for raw_item in reversed(tuple(order_items)):
             expr, descending = strip_order_direction(raw_item)
             key_name = expression_sort_key_name(expr)
-            key = self._sort_value(result, expr, key_name).require_tensor()
+            key_value = self._sort_value(result, expr, key_name)
+            key = key_value.require_tensor()
+            key_was_unique = key_value.unique
             order = torch.argsort(key, descending=descending, stable=True)
             result = result.gather(order)
+            if single_order and not descending:
+                result = _mark_value_metadata(
+                    result,
+                    key_name,
+                    sorted_non_decreasing=True,
+                    unique=key_was_unique,
+                )
         return result
 
     def _sort_value(self, table: PhysicalTable, expression: str, key_name: str) -> PhysicalValue:
@@ -324,6 +334,25 @@ def _has_duplicate_values(values: torch.Tensor) -> bool:
         return False
     sorted_values = torch.sort(values).values
     return bool(torch.any(sorted_values[1:] == sorted_values[:-1]).cpu().item())
+
+
+def _mark_value_metadata(
+    table: PhysicalTable,
+    name: str,
+    *,
+    sorted_non_decreasing: bool,
+    unique: bool,
+) -> PhysicalTable:
+    try:
+        value = table.value_named(name)
+    except KeyError:
+        return table
+    replacement = value.with_metadata(sorted_non_decreasing=sorted_non_decreasing, unique=unique)
+    columns = {
+        column: replacement if candidate is value else candidate
+        for column, candidate in table.columns.items()
+    }
+    return PhysicalTable(table.name, columns, table.order, table.row_count)
 
 
 def _apply_scan_filters(table: PhysicalTable, filters: Sequence[str]) -> PhysicalTable:

@@ -33,13 +33,15 @@ def execute_grouped_aggregate(
     key_dtype = _group_key_dtype(key_values)
     key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
     stacked = torch.stack(key_tensors, dim=1)
-    unique_keys, inverse = _unique_group_keys(stacked)
+    unique_keys, inverse, keys_sorted = _unique_group_keys(stacked, key_values)
     row_count = int(unique_keys.shape[0])
     items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
     for index, (expression, value) in enumerate(zip(group_exprs, key_values)):
         name, aliases = projection_name(child, expression, index)
         key_tensor = unique_keys[:, index].to(dtype=value.require_tensor().dtype)
-        items.append((name, PhysicalValue(key_tensor, value.dictionary, value.is_date), aliases))
+        items.append(
+            (name, _group_key_value(key_tensor, value, len(group_exprs), keys_sorted), aliases)
+        )
     for spec in specs:
         value = _evaluate_group_aggregate(child, inverse, row_count, spec)
         items.append((spec.aliases[0], value, spec.aliases))
@@ -52,10 +54,34 @@ def _group_key_dtype(values: Sequence[PhysicalValue]) -> torch.dtype:
     return torch.int64
 
 
-def _unique_group_keys(stacked_keys: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    if _is_lexicographically_non_decreasing(stacked_keys):
-        return torch.unique_consecutive(stacked_keys, dim=0, return_inverse=True)
-    return torch.unique(stacked_keys, dim=0, sorted=True, return_inverse=True)
+def _unique_group_keys(
+    stacked_keys: torch.Tensor,
+    key_values: Sequence[PhysicalValue],
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    if _keys_known_sorted(key_values) or _is_lexicographically_non_decreasing(stacked_keys):
+        unique_keys, inverse = torch.unique_consecutive(stacked_keys, dim=0, return_inverse=True)
+        return unique_keys, inverse, True
+    unique_keys, inverse = torch.unique(stacked_keys, dim=0, sorted=True, return_inverse=True)
+    return unique_keys, inverse, True
+
+
+def _keys_known_sorted(key_values: Sequence[PhysicalValue]) -> bool:
+    return len(key_values) == 1 and key_values[0].sorted_non_decreasing
+
+
+def _group_key_value(
+    key_tensor: torch.Tensor,
+    source: PhysicalValue,
+    group_key_count: int,
+    keys_sorted: bool,
+) -> PhysicalValue:
+    return PhysicalValue(
+        key_tensor,
+        source.dictionary,
+        source.is_date,
+        sorted_non_decreasing=group_key_count == 1 and keys_sorted,
+        unique=group_key_count == 1,
+    )
 
 
 def _is_lexicographically_non_decreasing(stacked_keys: torch.Tensor) -> bool:

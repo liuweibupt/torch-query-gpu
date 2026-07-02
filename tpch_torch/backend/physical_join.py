@@ -45,6 +45,20 @@ def inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple
     return left_rows, right_rows
 
 
+def inner_join_indices_for_values(
+    left_value: PhysicalValue,
+    right_value: PhysicalValue,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return inner equi-join indices while honoring known build-key metadata."""
+
+    if right_value.sorted_non_decreasing and right_value.unique:
+        return _sorted_unique_build_join_indices(
+            left_value.require_tensor(),
+            right_value.require_tensor(),
+        )
+    return inner_join_indices(left_value.require_tensor(), right_value.require_tensor())
+
+
 def join_indices_for_conditions(
     left: PhysicalTable,
     right: PhysicalTable,
@@ -54,9 +68,9 @@ def join_indices_for_conditions(
 
     if len(conditions) == 1:
         left_expr, right_expr = conditions[0]
-        return inner_join_indices(
-            evaluate_expression(left, left_expr).require_tensor(),
-            evaluate_expression(right, right_expr).require_tensor(),
+        return inner_join_indices_for_values(
+            evaluate_expression(left, left_expr),
+            evaluate_expression(right, right_expr),
         )
     left_key, right_key = _composite_join_keys(
         left,
@@ -164,6 +178,25 @@ def _unique_build_join_indices(
     right_positions = starts[matched].to(dtype=torch.int64)
     right_rows = right_positions if right_order is None else right_order[right_positions]
     return left_rows, right_rows
+
+
+def _sorted_unique_build_join_indices(
+    left_key: torch.Tensor,
+    right_key: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _validate_join_keys(left_key, right_key)
+    device = left_key.device
+    if left_key.numel() == 0 or right_key.numel() == 0:
+        return _empty_indices(device)
+
+    left_values = left_key.to(dtype=torch.int64)
+    right_values = right_key.to(dtype=torch.int64).contiguous()
+    positions = torch.searchsorted(right_values, left_values, right=False).to(dtype=torch.int64)
+    in_bounds = positions < right_values.numel()
+    safe_positions = torch.where(in_bounds, positions, torch.zeros_like(positions))
+    matched = in_bounds & (right_values[safe_positions] == left_values)
+    left_rows = torch.nonzero(matched).flatten().to(dtype=torch.int64)
+    return left_rows, positions[matched]
 
 
 def _sorted_build_keys(right_values: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -394,7 +427,12 @@ def _composite_join_keys(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     left_stacked = _stack_join_key_columns(left, left_expressions)
     right_stacked = _stack_join_key_columns(right, right_expressions)
-    _, inverse = torch.unique(torch.cat((left_stacked, right_stacked), dim=0), dim=0, sorted=True, return_inverse=True)
+    _, inverse = torch.unique(
+        torch.cat((left_stacked, right_stacked), dim=0),
+        dim=0,
+        sorted=True,
+        return_inverse=True,
+    )
     return inverse[: left.row_count], inverse[left.row_count :]
 
 
