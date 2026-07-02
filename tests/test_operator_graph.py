@@ -39,7 +39,7 @@ def test_operator_graph_rejects_missing_root() -> None:
             nodes=(scan,),
         )
 
-from tpch_torch.duckdb_bridge import connect_database
+from tpch_torch.duckdb_bridge import connect_database, generate_tpch
 from tpch_torch.frontend import compile_sirius_plan
 from tpch_torch.sql import get_tpch_query
 
@@ -48,9 +48,7 @@ def test_sirius_frontend_lowers_tpch_query_to_operator_graph(tmp_path) -> None:
     db = tmp_path / "tpch.duckdb"
     con = connect_database(db)
     try:
-        con.execute("INSTALL tpch")
-        con.execute("LOAD tpch")
-        con.execute("CALL dbgen(sf=0.01)")
+        generate_tpch(con, scale_factor=0.01)
         plan = compile_sirius_plan(con, get_tpch_query(con, 1))
     finally:
         con.close()
@@ -65,9 +63,7 @@ def test_sirius_frontend_lowers_all_tpch_queries_to_operator_graph(tmp_path) -> 
     db = tmp_path / "tpch-all.duckdb"
     con = connect_database(db)
     try:
-        con.execute("INSTALL tpch")
-        con.execute("LOAD tpch")
-        con.execute("CALL dbgen(sf=0.01)")
+        generate_tpch(con, scale_factor=0.01)
         missing = []
         for query_id in range(1, 23):
             plan = compile_sirius_plan(con, get_tpch_query(con, query_id))
@@ -83,9 +79,7 @@ def test_q1_and_q6_lower_to_real_operator_graph_roots(tmp_path) -> None:
     db = tmp_path / "tpch-q1-q6.duckdb"
     con = connect_database(db)
     try:
-        con.execute("INSTALL tpch")
-        con.execute("LOAD tpch")
-        con.execute("CALL dbgen(sf=0.01)")
+        generate_tpch(con, scale_factor=0.01)
         for query_id in (1, 6):
             plan = compile_sirius_plan(con, get_tpch_query(con, query_id))
             assert plan.operator_graph is not None
@@ -101,9 +95,7 @@ def test_all_tpch_queries_have_real_lowered_duckdb_graph_roots(tmp_path) -> None
     db = tmp_path / "tpch-real-roots.duckdb"
     con = connect_database(db)
     try:
-        con.execute("INSTALL tpch")
-        con.execute("LOAD tpch")
-        con.execute("CALL dbgen(sf=0.01)")
+        generate_tpch(con, scale_factor=0.01)
         compiled_roots = []
         missing_scan = []
         for query_id in range(1, 23):

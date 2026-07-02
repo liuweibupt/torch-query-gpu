@@ -11,6 +11,14 @@ from tpch_torch.relational import DATE_COLUMNS_EXTENDED
 
 _ROW_ID = "__rowid__"
 _DUCKDB_ROW_ID = "rowid"
+_TPCH_SORTED_UNIQUE_COLUMNS = {
+    ("customer", "c_custkey"),
+    ("nation", "n_nationkey"),
+    ("orders", "o_orderkey"),
+    ("part", "p_partkey"),
+    ("region", "r_regionkey"),
+    ("supplier", "s_suppkey"),
+}
 
 
 def fetch_physical_table(
@@ -35,7 +43,12 @@ def fetch_physical_table(
             column_name=column,
             table_name=table_name,
         )
-        value = PhysicalValue(tensor=tensor, dictionary=vocabulary, is_date=column in DATE_COLUMNS_EXTENDED)
+        value = PhysicalValue(
+            tensor=tensor,
+            dictionary=vocabulary,
+            is_date=column in DATE_COLUMNS_EXTENDED,
+        )
+        value = _with_scan_metadata(table_name, column, value)
         values[column] = value
         values[f"{table_name}.{column}"] = value
     row_count = 0 if not fetched_columns else int(next(iter(values.values())).require_tensor().numel())
@@ -75,7 +88,11 @@ def _add_rowid_aliases(
     *,
     offset: int = 0,
 ) -> None:
-    rowids = PhysicalValue(torch.arange(offset, offset + row_count, dtype=torch.int64, device=device))
+    rowids = PhysicalValue(
+        torch.arange(offset, offset + row_count, dtype=torch.int64, device=device),
+        sorted_non_decreasing=True,
+        unique=True,
+    )
     values[_DUCKDB_ROW_ID] = rowids
     values[f"{table_name}.{_DUCKDB_ROW_ID}"] = rowids
 
@@ -84,3 +101,18 @@ def _select_expression(column: str) -> str:
     if column in DATE_COLUMNS_EXTENDED:
         return f"strftime({column}, '%Y%m%d')::integer as {column}"
     return column
+
+
+def _with_scan_metadata(table_name: str, column: str, value: PhysicalValue) -> PhysicalValue:
+    if (table_name.lower(), column.lower()) not in _TPCH_SORTED_UNIQUE_COLUMNS:
+        return value
+    tensor = value.require_tensor()
+    if not _is_strictly_increasing(tensor):
+        return value
+    return value.with_metadata(sorted_non_decreasing=True, unique=True)
+
+
+def _is_strictly_increasing(values: torch.Tensor) -> bool:
+    if values.numel() <= 1:
+        return True
+    return bool(torch.all(values[1:] > values[:-1]).cpu().item())

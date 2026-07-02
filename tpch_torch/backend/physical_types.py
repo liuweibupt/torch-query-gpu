@@ -20,6 +20,8 @@ class PhysicalValue:
     is_date: bool = False
     literal: int | float | str | bool | None = None
     valid: torch.Tensor | None = None
+    sorted_non_decreasing: bool = False
+    unique: bool = False
 
     @property
     def is_literal(self) -> bool:
@@ -58,6 +60,28 @@ class PhysicalValue:
             dictionary=self.dictionary,
             is_date=self.is_date,
             valid=valid,
+            sorted_non_decreasing=self.sorted_non_decreasing,
+            unique=self.unique,
+        )
+
+    def with_metadata(
+        self,
+        *,
+        sorted_non_decreasing: bool | None = None,
+        unique: bool | None = None,
+    ) -> "PhysicalValue":
+        return PhysicalValue(
+            tensor=self.tensor,
+            dictionary=self.dictionary,
+            is_date=self.is_date,
+            literal=self.literal,
+            valid=self.valid,
+            sorted_non_decreasing=(
+                self.sorted_non_decreasing
+                if sorted_non_decreasing is None
+                else sorted_non_decreasing
+            ),
+            unique=self.unique if unique is None else unique,
         )
 
     def cell(self, index: int) -> Any:

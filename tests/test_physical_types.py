@@ -37,3 +37,29 @@ def test_physical_table_gather_transforms_shared_alias_value_once(monkeypatch):
 
     assert len(calls) == 1
     assert gathered.columns["a"] is gathered.columns["t.a"]
+
+
+def test_physical_value_filter_preserves_sorted_unique_metadata():
+    value = PhysicalValue(
+        torch.tensor([1, 2, 3, 4], dtype=torch.int64),
+        sorted_non_decreasing=True,
+        unique=True,
+    )
+
+    filtered = value.filter(torch.tensor([True, False, True, False]))
+
+    assert filtered.sorted_non_decreasing is True
+    assert filtered.unique is True
+
+
+def test_physical_value_gather_drops_sorted_unique_metadata():
+    value = PhysicalValue(
+        torch.tensor([1, 2, 3, 4], dtype=torch.int64),
+        sorted_non_decreasing=True,
+        unique=True,
+    )
+
+    gathered = value.gather(torch.tensor([2, 0, 0], dtype=torch.int64))
+
+    assert gathered.sorted_non_decreasing is False
+    assert gathered.unique is False

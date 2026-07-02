@@ -85,6 +85,7 @@
 - [ ] 编译执行路径：TorchScript / TVM / `torch.compile` / Antares / codegen / CSE / fusion / Python dependency removal。
 - [x] `LookupIndex`：复用 pre-sorted dimension-key lookup probes。
 - [x] 第一批 sorted/unique 感知：已排序唯一 build-side join key 跳过冗余 sort。
+- [x] `PhysicalValue` sorted/unique metadata：scan/filter/single-key sort/single-key group-by 保守传播，PK/FK join 复用 metadata 跳过动态 sortedness 探测。
 - [ ] optimizer 感知更多 sorted/unique columns，避免冗余 `sort` / `unique` / `unique_consecutive`。
 - [ ] 基于 collision degree、key cardinality、device 选择 hash join 或 sort join。
 - [ ] 跟踪 backend bottlenecks：`unique`、indexing、`masked_select`、`scatter_add`、`nonzero` 同步、sort 成本。
