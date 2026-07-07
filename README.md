@@ -413,3 +413,54 @@ timeout 60 python -m pytest -q
 # Python 文件语法检查
 timeout 60 python -m compileall -q tpch_torch scripts
 ```
+
+# TODO
+## TQP 当前 TODO 总览
+
+### P0 — 正确性（3 项）
+
+1. 浮点 join key 截断：`physical_join.py` 强制 `.to(int64)` 导致浮点 key 被截断
+2. MIN/MAX 初始化：`_scatter_reduce` 用 `float("inf")` 初始化整数张量
+3. NULL 语义缺失：无 NULL-aware 布尔和聚合语义
+
+### P1 — TensorRecordBatch + 类型系统
+
+4. 新增 `TensorRecordBatch` + `ColumnMeta`（dtype/scale/nullable）
+5. DuckDB → PyTorch dtype 映射表
+6. scan→filter→projection 链路改造，输出列携带正确 ColumnMeta
+7. 扩展至 INT64 / FP32 / DECIMAL(int64+scale)
+8. projection 多精度多表达式：覆盖深度（AST 1~4 层）× 宽度（1/4/16/64 列）
+9. 变长数据管理：string 字典动态扩容
+
+### P2 — Join/Agg 多精度
+
+10. sort-based inner join 扩展至 INT64/FP32/DECIMAL
+11. single group-by SUM 扩展至 INT64/FP32/DECIMAL
+12. join 测试：key/payload 列数×类型枚举
+13. agg 测试：group key 列数×类型×SUM 个数枚举
+14. GPU hash join 调研与实现（参考 CoddSpeed/cuDF）
+15. hash join 测试：key/payload 列数×类型枚举
+
+### P3 — 压缩数据执行（远期）
+
+16. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
+17. 压缩数据 alignment、compressed join/agg
+18. 压缩感知 optimizer rules、encoding 选择策略
+
+### P4 — 编译器/融合/优化（远期）
+
+19. 更多 fusion passes（projection/filter/agg 链）
+20. `torch.compile` / Antares / TVM 编译执行
+21. hash join vs sort join 自适应选择
+22. sorted/unique 元数据感知优化
+23. hot path 去 Python loops
+
+### P5 — 论文对齐（远期）
+
+24. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
+25. TQP++：ML-compiler lowering、tiered scheduling
+26. CoddSpeed：数据移动建模、accelerator placement
+
+---
+
+**本次任务范围：P1 + P2（15 项），目标：功能正确 + offload GPU。**
