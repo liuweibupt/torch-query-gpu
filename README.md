@@ -239,6 +239,11 @@ tpch-torch-validate \
 
 这条命令走完整默认链路：**SQL → DuckDB/Sirius-like frontend → TQPPlan → PyTorch backend**。
 
+当前回归验证还覆盖 recipe-disabled physical-only smoke：在旧 `tpch_graph_qXX`
+函数被 monkeypatch 为失败的情况下，TPC-H Q1-Q22 均可通过 DuckDB physical
+plan interpreter 执行；Q17 额外在 SF=1 / CPU 上验证 correlated scalar
+subquery + `l_extendedprice` positional projection 的数值正确性。
+
 ### Strict Substrait 路径
 
 ```bash
