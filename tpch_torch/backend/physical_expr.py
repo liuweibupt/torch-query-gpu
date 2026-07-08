@@ -9,6 +9,11 @@ from typing import Any, Sequence
 import torch
 
 from tpch_torch.backend.physical_expr_folding import fold_same_column_literal_or
+from tpch_torch.backend.physical_decimal_expr import (
+    decimal_arithmetic,
+    decimal_case_where,
+    decimal_comparison_tensors,
+)
 from tpch_torch.backend.physical_expr_parse import (
     CaseExpression,
     _NO_LITERAL,
@@ -160,6 +165,10 @@ def _evaluate_case(table: PhysicalTable, case_expression: CaseExpression) -> Phy
     for condition_expression, result_expression in reversed(case_expression.branches):
         condition = _condition_mask(evaluate_expression(table, condition_expression))
         then_value = evaluate_expression(table, result_expression)
+        decimal_result = decimal_case_where(condition, then_value, result)
+        if decimal_result is not None:
+            result = decimal_result
+            continue
         then_tensor, else_tensor = _coerce_binary_tensors(then_value, result)
         valid = _combine_validity(then_value, result, then_tensor)
         result = PhysicalValue(tensor=torch.where(condition, then_tensor, else_tensor), valid=valid)
@@ -215,7 +224,8 @@ def _compare(left: PhysicalValue, operator: str, right: PhysicalValue) -> Physic
             tensor=_reverse_compare(_compare_string_literal(right, operator, left.literal), operator),
             valid=right.valid,
         )
-    left_tensor, right_tensor = _coerce_binary_tensors(left, right)
+    decimal_tensors = decimal_comparison_tensors(left, right)
+    left_tensor, right_tensor = decimal_tensors or _coerce_binary_tensors(left, right)
     valid = _combine_validity(left, right, left_tensor)
     if operator == "=":
         return PhysicalValue(tensor=left_tensor == right_tensor, valid=valid)
@@ -233,6 +243,9 @@ def _compare(left: PhysicalValue, operator: str, right: PhysicalValue) -> Physic
 
 
 def _arithmetic(left: PhysicalValue, operator: str, right: PhysicalValue) -> PhysicalValue:
+    decimal_result = decimal_arithmetic(left, operator, right)
+    if decimal_result is not None:
+        return decimal_result
     left_tensor, right_tensor = _coerce_binary_tensors(left, right)
     valid = _combine_validity(left, right, left_tensor)
     if operator == "+":

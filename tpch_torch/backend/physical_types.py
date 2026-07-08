@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from tpch_torch.relational import yyyymmdd_to_iso
+from tpch_torch.record_batch import ColumnMeta, LogicalDType
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class PhysicalValue:
     valid: torch.Tensor | None = None
     sorted_non_decreasing: bool = False
     unique: bool = False
+    meta: ColumnMeta | None = None
 
     @property
     def is_literal(self) -> bool:
@@ -39,6 +41,7 @@ class PhysicalValue:
             dictionary=self.dictionary,
             is_date=self.is_date,
             valid=valid,
+            meta=self.meta,
         )
 
     def gather_optional(self, indices: torch.Tensor, valid: torch.Tensor) -> "PhysicalValue":
@@ -51,6 +54,7 @@ class PhysicalValue:
             dictionary=self.dictionary,
             is_date=self.is_date,
             valid=base_valid & valid,
+            meta=self.meta,
         )
 
     def filter(self, mask: torch.Tensor) -> "PhysicalValue":
@@ -62,6 +66,7 @@ class PhysicalValue:
             valid=valid,
             sorted_non_decreasing=self.sorted_non_decreasing,
             unique=self.unique,
+            meta=self.meta,
         )
 
     def with_metadata(
@@ -82,6 +87,7 @@ class PhysicalValue:
                 else sorted_non_decreasing
             ),
             unique=self.unique if unique is None else unique,
+            meta=self.meta,
         )
 
     def cell(self, index: int) -> Any:
@@ -90,6 +96,8 @@ class PhysicalValue:
         raw = self.require_tensor()[index].cpu().item()
         if self.dictionary is not None:
             return self.dictionary[int(raw)]
+        if self.meta is not None and self.meta.logical_dtype == LogicalDType.DECIMAL:
+            return self.meta.decode_scalar(int(raw))
         if self.is_date:
             return yyyymmdd_to_iso(int(raw))
         if isinstance(raw, float):

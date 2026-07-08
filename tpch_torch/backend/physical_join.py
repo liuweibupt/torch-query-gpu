@@ -8,8 +8,13 @@ from typing import Sequence
 import torch
 
 from tpch_torch.backend.physical_aliases import qualified_aliases_for_join_side
+from tpch_torch.backend.physical_decimal_expr import decimal_comparison_tensors
 from tpch_torch.backend.physical_expr import evaluate_expression
-from tpch_torch.backend.physical_key_ops import comparable_key_tensors, pairwise_equal_values
+from tpch_torch.backend.physical_key_ops import (
+    comparable_key_tensors,
+    comparable_value_tensors,
+    pairwise_equal_values,
+)
 from tpch_torch.backend.physical_membership import membership_join_indices
 from tpch_torch.backend.physical_projection import matching_aggregate_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
@@ -51,12 +56,10 @@ def inner_join_indices_for_values(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return inner equi-join indices while honoring known build-key metadata."""
 
+    left_key, right_key = comparable_value_tensors(left_value, right_value)
     if right_value.sorted_non_decreasing and right_value.unique:
-        return _sorted_unique_build_join_indices(
-            left_value.require_tensor(),
-            right_value.require_tensor(),
-        )
-    return inner_join_indices(left_value.require_tensor(), right_value.require_tensor())
+        return _sorted_unique_build_join_indices(left_key, right_key)
+    return inner_join_indices(left_key, right_key)
 
 
 def join_indices_for_conditions(
@@ -150,9 +153,9 @@ def try_execute_scalar_nested_loop_join(
     left_expr, operator = comparison
     if right.row_count != 1 or len(right.order) != 1:
         raise UnsupportedPlanError("scalar SUBQUERY join expects one row and one column")
-    left_tensor = _scalar_left_value(left, left_expr).require_tensor()
-    scalar = right.value_at(0).require_tensor()[0].to(dtype=left_tensor.dtype, device=left_tensor.device)
-    return left.filter(_compare_with_scalar(left_tensor, operator, scalar))
+    left_value = _scalar_left_value(left, left_expr)
+    right_value = _single_row_value(right.value_at(0))
+    return left.filter(_compare_scalar_values(left_value, operator, right_value))
 
 
 def _scalar_left_value(table: PhysicalTable, expression: str) -> PhysicalValue:
@@ -320,6 +323,38 @@ def _split_scalar_subquery_condition(condition: str) -> tuple[str, str] | None:
         if condition.endswith(suffix):
             return condition[: -len(suffix)].strip(), operator
     return None
+
+
+def _single_row_value(value: PhysicalValue) -> PhysicalValue:
+    tensor = value.require_tensor()
+    index = torch.zeros(1, dtype=torch.int64, device=tensor.device)
+    return value.gather(index)
+
+
+def _compare_scalar_values(
+    left_value: PhysicalValue,
+    operator: str,
+    right_value: PhysicalValue,
+) -> torch.Tensor:
+    decimal_tensors = decimal_comparison_tensors(left_value, right_value)
+    left_tensor, right_tensor = decimal_tensors or comparable_key_tensors(
+        left_value.require_tensor(),
+        right_value.require_tensor(),
+    )
+    compared = _compare_with_scalar(left_tensor, operator, right_tensor)
+    return _apply_scalar_compare_validity(compared, left_value, right_value)
+
+
+def _apply_scalar_compare_validity(
+    compared: torch.Tensor,
+    left_value: PhysicalValue,
+    right_value: PhysicalValue,
+) -> torch.Tensor:
+    if left_value.valid is not None:
+        compared = compared & left_value.valid.to(device=compared.device)
+    if right_value.valid is not None:
+        compared = compared & right_value.valid.to(device=compared.device)
+    return compared
 
 
 def _compare_with_scalar(values: torch.Tensor, operator: str, scalar: torch.Tensor) -> torch.Tensor:
