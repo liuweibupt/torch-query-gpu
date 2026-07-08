@@ -7,7 +7,9 @@ import torch
 
 from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+from tpch_torch.backend.type_mapping import column_meta_from_duckdb_type, encode_decimal_array
 from tpch_torch.relational import DATE_COLUMNS_EXTENDED
+from tpch_torch.record_batch import ColumnMeta, LogicalDType
 
 _ROW_ID = "__rowid__"
 _DUCKDB_ROW_ID = "rowid"
@@ -35,18 +37,22 @@ def fetch_physical_table(
     select_list = ", ".join(_select_expression(column) for column in fetched_columns)
     offset, limit = _scan_offset_limit(scan_range)
     columnar = con.execute(f"select {select_list} from {table_name}{limit}").fetchnumpy()
+    column_types = _table_column_type_map(con, table_name)
     values: dict[str, PhysicalValue] = {}
     for column in fetched_columns:
-        tensor, vocabulary = _encode_generic_column(
+        meta = column_meta_from_duckdb_type(column_types.get(column, ""), nullable=True)
+        tensor, vocabulary, meta = _encode_physical_column(
             columnar[column],
             device,
             column_name=column,
             table_name=table_name,
+            meta=meta,
         )
         value = PhysicalValue(
             tensor=tensor,
             dictionary=vocabulary,
             is_date=column in DATE_COLUMNS_EXTENDED,
+            meta=meta,
         )
         value = _with_scan_metadata(table_name, column, value)
         values[column] = value
@@ -116,3 +122,31 @@ def _is_strictly_increasing(values: torch.Tensor) -> bool:
     if values.numel() <= 1:
         return True
     return bool(torch.all(values[1:] > values[:-1]).cpu().item())
+
+
+def _encode_physical_column(
+    values,
+    device: str,
+    *,
+    column_name: str,
+    table_name: str,
+    meta: ColumnMeta,
+) -> tuple[torch.Tensor, tuple[str, ...] | None, ColumnMeta]:
+    if meta.logical_dtype == LogicalDType.DECIMAL:
+        return encode_decimal_array(values, meta, device), None, meta
+    tensor, vocabulary = _encode_generic_column(
+        values,
+        device,
+        column_name=column_name,
+        table_name=table_name,
+    )
+    if vocabulary is not None:
+        meta = ColumnMeta.string_dict(vocabulary, nullable=meta.nullable)
+    elif meta.logical_dtype == LogicalDType.FP32:
+        tensor = tensor.to(dtype=torch.float32)
+    return tensor, vocabulary, meta
+
+
+def _table_column_type_map(con: duckdb.DuckDBPyConnection, table_name: str) -> dict[str, str]:
+    rows = con.execute(f"pragma table_info('{table_name}')").fetchall()
+    return {str(row[1]): str(row[2]) for row in rows}

@@ -10,8 +10,10 @@ import torch
 
 from tpch_torch.backend.physical_expr import aggregate_output_aliases, evaluate_expression, projection_name
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
+from tpch_torch.backend.type_mapping import DECIMAL_BASE
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import TQPOperatorNode
+from tpch_torch.record_batch import ColumnMeta, LogicalDType
 
 _AGGREGATE_FUNCTION_ALIASES = {"sum_no_overflow": "sum"}
 
@@ -81,6 +83,7 @@ def _group_key_value(
         source.is_date,
         sorted_non_decreasing=group_key_count == 1 and keys_sorted,
         unique=group_key_count == 1,
+        meta=source.meta,
     )
 
 
@@ -119,15 +122,15 @@ def _evaluate_group_aggregate(
             return PhysicalValue(_scatter_count_distinct(values, group_ids, group_count, valid))
         return PhysicalValue(_scatter_sum(valid.to(dtype=torch.int64), group_ids, group_count))
     if spec.function == "sum":
-        return _group_sum(values, group_ids, group_count, valid)
+        return _group_sum(values, group_ids, group_count, valid, argument.meta)
     if spec.function == "min":
-        return _group_min_max(values, group_ids, group_count, valid, "amin")
+        return _group_min_max(values, group_ids, group_count, valid, "amin", argument.meta)
     if spec.function == "max":
-        return _group_min_max(values, group_ids, group_count, valid, "amax")
+        return _group_min_max(values, group_ids, group_count, valid, "amax", argument.meta)
     if spec.function == "avg":
-        return _group_avg(values, group_ids, group_count, valid)
+        return _group_avg(values, group_ids, group_count, valid, argument.meta)
     if spec.function == "first":
-        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amin"))
+        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amin"), meta=argument.meta)
     raise UnsupportedPlanError(f"unsupported grouped aggregate: {spec.function}")
 
 
@@ -144,7 +147,7 @@ def _evaluate_scalar_aggregate(child: PhysicalTable, spec: AggregateSpec) -> Phy
     elif spec.function == "count":
         tensor = valid.sum().reshape(1)
     elif values.numel() == 0 or not bool(torch.any(valid).cpu().item()):
-        return _null_scalar(values, table_device(child))
+        return _null_scalar(values, table_device(child), _scalar_aggregate_meta(spec.function, argument))
     elif spec.function == "sum":
         tensor = values[valid].sum().reshape(1)
     elif spec.function == "min":
@@ -152,12 +155,12 @@ def _evaluate_scalar_aggregate(child: PhysicalTable, spec: AggregateSpec) -> Phy
     elif spec.function == "max":
         tensor = values[valid].max().reshape(1)
     elif spec.function == "avg":
-        tensor = values[valid].to(dtype=torch.float64).mean().reshape(1)
+        tensor = _average_values(values, argument.meta)[valid].mean().reshape(1)
     elif spec.function == "first":
         tensor = values[:1]
     else:
         raise UnsupportedPlanError(f"unsupported scalar aggregate: {spec.function}")
-    return PhysicalValue(tensor)
+    return PhysicalValue(tensor, meta=_scalar_aggregate_meta(spec.function, argument))
 
 
 def _aggregate_argument(child: PhysicalTable, spec: AggregateSpec) -> PhysicalValue:
@@ -257,10 +260,11 @@ def _group_sum(
     group_ids: torch.Tensor,
     group_count: int,
     valid: torch.Tensor,
+    meta: ColumnMeta | None,
 ) -> PhysicalValue:
     safe_values = torch.where(valid, values, torch.zeros_like(values))
     counts = _valid_counts(valid, group_ids, group_count)
-    return PhysicalValue(_scatter_sum(safe_values, group_ids, group_count), valid=counts > 0)
+    return PhysicalValue(_scatter_sum(safe_values, group_ids, group_count), valid=counts > 0, meta=meta)
 
 
 def _group_avg(
@@ -268,11 +272,13 @@ def _group_avg(
     group_ids: torch.Tensor,
     group_count: int,
     valid: torch.Tensor,
+    meta: ColumnMeta | None,
 ) -> PhysicalValue:
-    safe_values = torch.where(valid, values.to(dtype=torch.float64), torch.zeros_like(values, dtype=torch.float64))
+    real_values = _average_values(values, meta)
+    safe_values = torch.where(valid, real_values, torch.zeros_like(real_values))
     counts = _scatter_sum(valid.to(dtype=torch.float64), group_ids, group_count)
     sums = _scatter_sum(safe_values, group_ids, group_count)
-    return PhysicalValue(sums / torch.clamp(counts, min=1.0), valid=counts > 0)
+    return PhysicalValue(sums / torch.clamp(counts, min=1.0), valid=counts > 0, meta=ColumnMeta.fp64())
 
 
 def _group_min_max(
@@ -281,11 +287,12 @@ def _group_min_max(
     group_count: int,
     valid: torch.Tensor,
     reduce: str,
+    meta: ColumnMeta | None,
 ) -> PhysicalValue:
     fill = _reduce_fill_value(values.dtype, reduce)
     safe_values = torch.where(valid, values, torch.full_like(values, fill))
     counts = _valid_counts(valid, group_ids, group_count)
-    return PhysicalValue(_scatter_reduce(safe_values, group_ids, group_count, reduce), valid=counts > 0)
+    return PhysicalValue(_scatter_reduce(safe_values, group_ids, group_count, reduce), valid=counts > 0, meta=meta)
 
 
 def _valid_counts(valid: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
@@ -299,7 +306,30 @@ def _reduce_fill_value(dtype: torch.dtype, reduce: str) -> int | float:
     return info.max if reduce == "amin" else info.min
 
 
-def _null_scalar(values: torch.Tensor, device: torch.device) -> PhysicalValue:
+def _average_values(values: torch.Tensor, meta: ColumnMeta | None) -> torch.Tensor:
+    real_values = values.to(dtype=torch.float64)
+    if meta is None or meta.logical_dtype != LogicalDType.DECIMAL:
+        return real_values
+    return real_values / float(DECIMAL_BASE ** int(meta.scale or 0))
+
+
+def _null_scalar(
+    values: torch.Tensor,
+    device: torch.device,
+    meta: ColumnMeta | None = None,
+) -> PhysicalValue:
     tensor = torch.zeros(1, dtype=values.dtype, device=device)
     valid = torch.zeros(1, dtype=torch.bool, device=device)
-    return PhysicalValue(tensor=tensor, valid=valid)
+    return PhysicalValue(tensor=tensor, valid=valid, meta=meta)
+
+
+def _scalar_aggregate_meta(function: str, argument: PhysicalValue) -> ColumnMeta | None:
+    if function in {"sum", "min", "max", "first"}:
+        return argument.meta
+    if function == "avg" and _is_decimal(argument):
+        return ColumnMeta.fp64()
+    return None
+
+
+def _is_decimal(value: PhysicalValue) -> bool:
+    return value.meta is not None and value.meta.logical_dtype == LogicalDType.DECIMAL

@@ -426,21 +426,22 @@ timeout 60 python -m compileall -q tpch_torch scripts
 
 ### P1 — TensorRecordBatch + 类型系统
 
-4. 新增 `TensorRecordBatch` + `ColumnMeta`（dtype/scale/nullable）
-5. DuckDB → PyTorch dtype 映射表
-6. scan→filter→projection 链路改造，输出列携带正确 ColumnMeta
-7. 扩展至 INT64 / FP32 / DECIMAL(int64+scale)
-8. projection 多精度多表达式：覆盖深度（AST 1~4 层）× 宽度（1/4/16/64 列）
-9. 变长数据管理：string 字典动态扩容
+4. [x] 新增 `TensorRecordBatch` + `ColumnMeta`（dtype/scale/nullable）
+5. [x] DuckDB → PyTorch dtype 映射表
+6. [x] scan→filter→projection 链路改造，输出列携带正确 `ColumnMeta`
+7. [x] 扩展至 INT64 / FP32 / FP64 / DECIMAL(int64+scale)
+8. [x] projection 多精度表达式第一版：DECIMAL arithmetic/comparison/CASE/scalar-subquery
+   已走 metadata-aware tensor path；AST 深度×宽度压力矩阵仍保留为扩展测试项
+9. [x] 变长数据管理第一版：string 字典动态扩容，并保留已有 dictionary id
 
 ### P2 — Join/Agg 多精度
 
-10. sort-based inner join 扩展至 INT64/FP32/DECIMAL
-11. single group-by SUM 扩展至 INT64/FP32/DECIMAL
-12. join 测试：key/payload 列数×类型枚举
-13. agg 测试：group key 列数×类型×SUM 个数枚举
-14. GPU hash join 调研与实现（参考 CoddSpeed/cuDF）
-15. hash join 测试：key/payload 列数×类型枚举
+10. [x] sort/searchsorted inner join 扩展至 INT64/FP32/FP64/DECIMAL(scale-aligned)
+11. [x] group-by SUM/MIN/MAX/AVG 扩展至 INT64/FP32/FP64/DECIMAL；DECIMAL AVG 输出真实 fp64
+12. [x] join 第一批测试：INT64/FP32/FP64/DECIMAL key 覆盖；完整 key/payload 矩阵待扩展
+13. [x] agg 第一批测试：INT64/FP32/FP64/DECIMAL SUM + DECIMAL MIN/MAX/AVG；完整多 key/SUM 矩阵待扩展
+14. [x] hash-style join 第一版接口：tensor dictionary/probe prototype（不是成熟 GPU hash table）
+15. [x] hash join 第一批测试：DECIMAL scale-aligned probe；完整 key/payload 矩阵待扩展
 
 ### P3 — 压缩数据执行（远期）
 
@@ -464,4 +465,11 @@ timeout 60 python -m compileall -q tpch_torch scripts
 
 ---
 
-**本次任务范围：P1 + P2（15 项），目标：功能正确 + offload GPU。**
+**本次任务范围：P1 + P2 第一版已落地，目标是功能正确优先；成熟 GPU hash table 与完整压力矩阵仍在 P4/P2 扩展项中跟踪。**
+
+当前类型层实现要点：
+
+- `tpch_torch/record_batch.py` 提供 `TensorRecordBatch`、`ColumnMeta`、`LogicalDType`。
+- `tpch_torch/backend/type_mapping.py` 负责 DuckDB type → PyTorch dtype / `ColumnMeta`，其中 `DECIMAL(p,s)` 表示为 `torch.int64 + scale=s`。
+- `PhysicalValue.meta` 让现有 physical executor 在 scan/filter/gather/projection/join/agg 中保留 logical dtype。
+- `physical_decimal_expr.py` 负责 DECIMAL 与 literal / numeric tensor 的 scale 对齐、CASE 合并和 scalar-subquery 比较。

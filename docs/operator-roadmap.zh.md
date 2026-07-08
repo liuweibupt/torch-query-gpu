@@ -55,18 +55,27 @@
 ## 4. TQP 算法 TODO
 
 - [x] Plain columnar tensor table representation。
+- [x] 第一版 `TensorRecordBatch` / `ColumnMeta` metadata substrate，包含 DuckDB
+      type mapping，以及 DECIMAL 的 scaled `int64 + scale` 表示。
 - [x] 当前 TPC-H executor 的 bitmap-style filter masks。
 - [x] Generic SQL boolean filter tree：`AND` / `OR` / `NOT`。
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
 - [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、multi-branch/simple `CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
+- [x] 第一版多精度 physical expression：覆盖 INT64/FP32/FP64 以及 DECIMAL
+      arithmetic/comparison/CASE/scalar-subquery。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。
+- [x] 第一版多精度 join：覆盖 INT64/FP32/FP64/DECIMAL key；DECIMAL join
+      在 probe 前做 scale alignment。
+- [x] 第一版 hash-style tensor dictionary/probe API；这还不是成熟 GPU hash table。
 - [ ] Join variants：non-equi、left outer、left semi、left anti。
 - [x] 第一版 sorted-input group-by fast path：`unique_consecutive`、inverse ids、scatter reductions。
 - [ ] 完整 sort-based group-by aggregation：concatenated keys、sort、`unique_consecutive`、inverse ids、scatter reductions。
 - [x] 当前 query templates 的 sum/count group reductions。
 - [x] 可复用 min/max/mean group reductions。
+- [x] 第一版 DECIMAL aggregate：SUM/MIN/MAX 保留 scaled int64 metadata，
+      AVG 输出真实 fp64 数值。
 - [ ] Count-distinct aggregation。
 - [ ] Scalar/nested/correlated subquery lowering。
 - [x] 基础 NULL-aware boolean and aggregate semantics：当前覆盖 `PhysicalValue.valid`
