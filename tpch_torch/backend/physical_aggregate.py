@@ -113,21 +113,19 @@ def _evaluate_group_aggregate(
         return PhysicalValue(_scatter_sum(ones, group_ids, group_count))
     argument = _aggregate_argument(child, spec)
     values = argument.require_tensor()
+    valid = _validity_or_ones(argument, values)
     if spec.function == "count":
         if spec.distinct:
-            return PhysicalValue(_scatter_count_distinct(values, group_ids, group_count))
-        valid = _validity_or_ones(argument, values)
+            return PhysicalValue(_scatter_count_distinct(values, group_ids, group_count, valid))
         return PhysicalValue(_scatter_sum(valid.to(dtype=torch.int64), group_ids, group_count))
     if spec.function == "sum":
-        return PhysicalValue(_scatter_sum(values, group_ids, group_count))
+        return _group_sum(values, group_ids, group_count, valid)
     if spec.function == "min":
-        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amin"))
+        return _group_min_max(values, group_ids, group_count, valid, "amin")
     if spec.function == "max":
-        return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amax"))
+        return _group_min_max(values, group_ids, group_count, valid, "amax")
     if spec.function == "avg":
-        sums = _scatter_sum(values.to(dtype=torch.float64), group_ids, group_count)
-        counts = _scatter_sum(torch.ones_like(values, dtype=torch.float64), group_ids, group_count)
-        return PhysicalValue(sums / counts)
+        return _group_avg(values, group_ids, group_count, valid)
     if spec.function == "first":
         return PhysicalValue(_scatter_reduce(values, group_ids, group_count, "amin"))
     raise UnsupportedPlanError(f"unsupported grouped aggregate: {spec.function}")
@@ -139,23 +137,22 @@ def _evaluate_scalar_aggregate(child: PhysicalTable, spec: AggregateSpec) -> Phy
         return PhysicalValue(tensor)
     argument = _aggregate_argument(child, spec)
     values = argument.require_tensor()
+    valid = _validity_or_ones(argument, values)
     if spec.function == "count" and spec.distinct:
-        tensor = torch.unique(values).numel()
+        tensor = torch.unique(values[valid]).numel()
         tensor = torch.tensor([tensor], dtype=torch.int64, device=table_device(child))
     elif spec.function == "count":
-        tensor = _validity_or_ones(argument, values).sum().reshape(1)
-    elif values.numel() == 0:
-        tensor = torch.tensor([0.0], dtype=torch.float64, device=table_device(child))
-        valid = torch.zeros(1, dtype=torch.bool, device=table_device(child))
-        return PhysicalValue(tensor=tensor, valid=valid)
+        tensor = valid.sum().reshape(1)
+    elif values.numel() == 0 or not bool(torch.any(valid).cpu().item()):
+        return _null_scalar(values, table_device(child))
     elif spec.function == "sum":
-        tensor = values.sum().reshape(1)
+        tensor = values[valid].sum().reshape(1)
     elif spec.function == "min":
-        tensor = values.min().reshape(1)
+        tensor = values[valid].min().reshape(1)
     elif spec.function == "max":
-        tensor = values.max().reshape(1)
+        tensor = values[valid].max().reshape(1)
     elif spec.function == "avg":
-        tensor = values.to(dtype=torch.float64).mean().reshape(1)
+        tensor = values[valid].to(dtype=torch.float64).mean().reshape(1)
     elif spec.function == "first":
         tensor = values[:1]
     else:
@@ -198,7 +195,14 @@ def aggregate_specs(node: TQPOperatorNode, child: PhysicalTable) -> tuple[Aggreg
         distinct = argument.upper().startswith("DISTINCT ")
         argument = argument[len("DISTINCT ") :].strip() if distinct else argument
         child_name = _child_name(child, argument)
-        specs.append(AggregateSpec(function, argument, aggregate_output_aliases(function, argument, child_name), distinct))
+        specs.append(
+            AggregateSpec(
+                function,
+                argument,
+                aggregate_output_aliases(function, argument, child_name),
+                distinct,
+            )
+        )
     return tuple(specs)
 
 
@@ -226,13 +230,76 @@ def _scatter_sum(values: torch.Tensor, group_ids: torch.Tensor, group_count: int
 
 
 def _scatter_reduce(values: torch.Tensor, group_ids: torch.Tensor, group_count: int, reduce: str) -> torch.Tensor:
-    fill_value = float("inf") if reduce == "amin" else float("-inf")
+    fill_value = _reduce_fill_value(values.dtype, reduce)
     result = torch.full((group_count,), fill_value, dtype=values.dtype, device=values.device)
     return result.scatter_reduce(0, group_ids.to(dtype=torch.int64), values, reduce=reduce, include_self=True)
 
 
-def _scatter_count_distinct(values: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+def _scatter_count_distinct(
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+    valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if valid is not None:
+        values = values[valid]
+        group_ids = group_ids[valid]
+    if values.numel() == 0:
+        return torch.zeros(group_count, dtype=torch.int64, device=group_ids.device)
     pairs = torch.stack((group_ids.to(dtype=torch.int64), values.to(dtype=torch.int64)), dim=1)
     unique_pairs = torch.unique(pairs, dim=0, sorted=True)
     ones = torch.ones(unique_pairs.shape[0], dtype=torch.int64, device=values.device)
     return _scatter_sum(ones, unique_pairs[:, 0], group_count)
+
+
+def _group_sum(
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+    valid: torch.Tensor,
+) -> PhysicalValue:
+    safe_values = torch.where(valid, values, torch.zeros_like(values))
+    counts = _valid_counts(valid, group_ids, group_count)
+    return PhysicalValue(_scatter_sum(safe_values, group_ids, group_count), valid=counts > 0)
+
+
+def _group_avg(
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+    valid: torch.Tensor,
+) -> PhysicalValue:
+    safe_values = torch.where(valid, values.to(dtype=torch.float64), torch.zeros_like(values, dtype=torch.float64))
+    counts = _scatter_sum(valid.to(dtype=torch.float64), group_ids, group_count)
+    sums = _scatter_sum(safe_values, group_ids, group_count)
+    return PhysicalValue(sums / torch.clamp(counts, min=1.0), valid=counts > 0)
+
+
+def _group_min_max(
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+    valid: torch.Tensor,
+    reduce: str,
+) -> PhysicalValue:
+    fill = _reduce_fill_value(values.dtype, reduce)
+    safe_values = torch.where(valid, values, torch.full_like(values, fill))
+    counts = _valid_counts(valid, group_ids, group_count)
+    return PhysicalValue(_scatter_reduce(safe_values, group_ids, group_count, reduce), valid=counts > 0)
+
+
+def _valid_counts(valid: torch.Tensor, group_ids: torch.Tensor, group_count: int) -> torch.Tensor:
+    return _scatter_sum(valid.to(dtype=torch.int64), group_ids, group_count)
+
+
+def _reduce_fill_value(dtype: torch.dtype, reduce: str) -> int | float:
+    if dtype.is_floating_point:
+        return float("inf") if reduce == "amin" else float("-inf")
+    info = torch.iinfo(dtype)
+    return info.max if reduce == "amin" else info.min
+
+
+def _null_scalar(values: torch.Tensor, device: torch.device) -> PhysicalValue:
+    tensor = torch.zeros(1, dtype=values.dtype, device=device)
+    valid = torch.zeros(1, dtype=torch.bool, device=device)
+    return PhysicalValue(tensor=tensor, valid=valid)

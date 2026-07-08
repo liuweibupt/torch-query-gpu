@@ -9,6 +9,7 @@ import torch
 
 from tpch_torch.backend.physical_aliases import qualified_aliases_for_join_side
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_key_ops import comparable_key_tensors, pairwise_equal_values
 from tpch_torch.backend.physical_membership import membership_join_indices
 from tpch_torch.backend.physical_projection import matching_aggregate_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
@@ -24,8 +25,7 @@ def inner_join_indices(left_key: torch.Tensor, right_key: torch.Tensor) -> tuple
     if left_key.numel() == 0 or right_key.numel() == 0:
         return _empty_indices(device)
 
-    left_values = left_key.to(dtype=torch.int64)
-    right_values = right_key.to(dtype=torch.int64)
+    left_values, right_values = comparable_key_tensors(left_key, right_key)
     right_order, sorted_right_values = _sorted_build_keys(right_values)
     starts = torch.searchsorted(sorted_right_values, left_values, right=False)
     ends = torch.searchsorted(sorted_right_values, left_values, right=True)
@@ -72,13 +72,7 @@ def join_indices_for_conditions(
             evaluate_expression(left, left_expr),
             evaluate_expression(right, right_expr),
         )
-    left_key, right_key = _composite_join_keys(
-        left,
-        right,
-        tuple(pair[0] for pair in conditions),
-        tuple(pair[1] for pair in conditions),
-    )
-    return inner_join_indices(left_key, right_key)
+    return _join_indices_for_multiple_conditions(left, right, conditions)
 
 
 def semi_join_indices(
@@ -189,8 +183,8 @@ def _sorted_unique_build_join_indices(
     if left_key.numel() == 0 or right_key.numel() == 0:
         return _empty_indices(device)
 
-    left_values = left_key.to(dtype=torch.int64)
-    right_values = right_key.to(dtype=torch.int64).contiguous()
+    left_values, right_values = comparable_key_tensors(left_key, right_key)
+    right_values = right_values.contiguous()
     positions = torch.searchsorted(right_values, left_values, right=False).to(dtype=torch.int64)
     in_bounds = positions < right_values.numel()
     safe_positions = torch.where(in_bounds, positions, torch.zeros_like(positions))
@@ -419,29 +413,28 @@ def _matching_order_name(table: PhysicalTable, key: str) -> str | None:
     return None
 
 
-def _composite_join_keys(
+def _join_indices_for_multiple_conditions(
     left: PhysicalTable,
     right: PhysicalTable,
-    left_expressions: tuple[str, ...],
-    right_expressions: tuple[str, ...],
+    conditions: Sequence[tuple[str, str]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    left_stacked = _stack_join_key_columns(left, left_expressions)
-    right_stacked = _stack_join_key_columns(right, right_expressions)
-    _, inverse = torch.unique(
-        torch.cat((left_stacked, right_stacked), dim=0),
-        dim=0,
-        sorted=True,
-        return_inverse=True,
+    first_left, first_right = conditions[0]
+    left_rows, right_rows = inner_join_indices_for_values(
+        evaluate_expression(left, first_left),
+        evaluate_expression(right, first_right),
     )
-    return inverse[: left.row_count], inverse[left.row_count :]
-
-
-def _stack_join_key_columns(table: PhysicalTable, expressions: tuple[str, ...]) -> torch.Tensor:
-    columns = [
-        evaluate_expression(table, expression).require_tensor().to(dtype=torch.int64)
-        for expression in expressions
-    ]
-    return torch.stack(columns, dim=1)
+    for left_expr, right_expr in conditions[1:]:
+        if left_rows.numel() == 0:
+            return left_rows, right_rows
+        matched = pairwise_equal_values(
+            evaluate_expression(left, left_expr),
+            evaluate_expression(right, right_expr),
+            left_rows,
+            right_rows,
+        )
+        left_rows = left_rows[matched]
+        right_rows = right_rows[matched]
+    return left_rows, right_rows
 
 
 def _join_aliases(

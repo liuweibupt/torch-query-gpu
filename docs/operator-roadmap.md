@@ -87,7 +87,8 @@ until a readable full paper/appendix is available.
 - [x] First batch: min/max/mean group reductions as reusable primitives.
 - [ ] Count-distinct aggregation.
 - [ ] Scalar/nested/correlated subquery lowering into tensor operators.
-- [ ] NULL-aware boolean and aggregate semantics.
+- [x] Basic NULL-aware boolean and aggregate semantics over `PhysicalValue.valid`,
+      covering boolean/string predicates, CASE, and SUM/MIN/MAX/AVG/COUNT(DISTINCT).
 - [ ] ML prediction operator boundary for PyTorch/Hummingbird-style models.
 
 ### TQP optimization TODO
@@ -99,6 +100,9 @@ until a readable full paper/appendix is available.
       row loops; it produces tensor row-index pairs via `searchsorted`.
 - [x] First sorted/unique build-side join fast path skips redundant sort and
       duplicate expansion.
+- [x] Physical join key dtype correctness: single-key and metadata-backed joins
+      no longer truncate floating keys to `int64`; multi-condition joins now
+      produce candidate pairs and tensor-filter remaining conditions.
 - [x] Physical SEMI/ANTI joins now use membership probes without pair expansion.
 - [ ] Keep remaining data-dependent loops out of hot paths; loops over
       schema/operators are acceptable, loops over rows are not.

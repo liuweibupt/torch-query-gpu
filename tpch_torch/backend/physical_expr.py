@@ -90,7 +90,8 @@ def evaluate_expression(table: PhysicalTable, expression: str) -> PhysicalValue:
     if len(keyword_parts) > 1:
         return _logical_reduce(table, keyword_parts, torch.logical_and)
     if expr.upper().startswith("NOT "):
-        return PhysicalValue(tensor=torch.logical_not(_bool_tensor(evaluate_expression(table, expr[4:]))))
+        value = evaluate_expression(table, expr[4:])
+        return PhysicalValue(tensor=torch.logical_not(_bool_tensor(value)), valid=value.valid)
     comparison = _split_top_level_comparison(expr)
     if comparison is not None:
         left, operator, right = comparison
@@ -157,7 +158,7 @@ def strip_order_direction(expression: str) -> tuple[str, bool]:
 def _evaluate_case(table: PhysicalTable, case_expression: CaseExpression) -> PhysicalValue:
     result = evaluate_expression(table, case_expression.else_expression)
     for condition_expression, result_expression in reversed(case_expression.branches):
-        condition = _bool_tensor(evaluate_expression(table, condition_expression))
+        condition = _condition_mask(evaluate_expression(table, condition_expression))
         then_value = evaluate_expression(table, result_expression)
         then_tensor, else_tensor = _coerce_binary_tensors(then_value, result)
         valid = _combine_validity(then_value, result, then_tensor)
@@ -175,7 +176,7 @@ def _evaluate_call(table: PhysicalTable, name: str, raw_args: str) -> PhysicalVa
     if lowered in {"prefix", "contains", "suffix"} and len(args) == 2:
         value = evaluate_expression(table, args[0])
         literal = _literal_string(evaluate_expression(table, args[1]))
-        return PhysicalValue(tensor=_string_function(value, literal, lowered))
+        return PhysicalValue(tensor=_string_function(value, literal, lowered), valid=value.valid)
     if lowered == "substring" and len(args) == 3:
         return _evaluate_substring(table, args)
     if lowered == "substring" and len(args) == 1:
@@ -193,25 +194,27 @@ def _evaluate_in(table: PhysicalTable, left_expr: str, raw_values: str) -> Physi
     tensor = left.require_tensor()
     if left.dictionary is not None:
         accepted = [left.dictionary.index(str(value)) for value in values if str(value) in left.dictionary]
-        return PhysicalValue(tensor=_isin_ids(tensor, accepted))
-    return PhysicalValue(tensor=membership_mask(tensor, values))
+        return PhysicalValue(tensor=_isin_ids(tensor, accepted), valid=left.valid)
+    return PhysicalValue(tensor=membership_mask(tensor, values), valid=left.valid)
 
 
 def _logical_reduce(table: PhysicalTable, parts: Sequence[str], reducer) -> PhysicalValue:
-    masks = [_bool_tensor(evaluate_expression(table, part)) for part in parts]
-    result = masks[0]
-    for mask in masks[1:]:
-        result = reducer(result, mask)
-    return PhysicalValue(tensor=result)
+    result = evaluate_expression(table, parts[0])
+    for part in parts[1:]:
+        result = _logical_binary(result, evaluate_expression(table, part), reducer)
+    return result
 
 
 def _compare(left: PhysicalValue, operator: str, right: PhysicalValue) -> PhysicalValue:
     if left.dictionary is not None and isinstance(right.literal, str):
         if operator in {"~~", "!~~"}:
-            return PhysicalValue(tensor=_compare_like_literal(left, operator, right.literal))
-        return PhysicalValue(tensor=_compare_string_literal(left, operator, right.literal))
+            return PhysicalValue(tensor=_compare_like_literal(left, operator, right.literal), valid=left.valid)
+        return PhysicalValue(tensor=_compare_string_literal(left, operator, right.literal), valid=left.valid)
     if right.dictionary is not None and isinstance(left.literal, str):
-        return PhysicalValue(tensor=_reverse_compare(_compare_string_literal(right, operator, left.literal), operator))
+        return PhysicalValue(
+            tensor=_reverse_compare(_compare_string_literal(right, operator, left.literal), operator),
+            valid=right.valid,
+        )
     left_tensor, right_tensor = _coerce_binary_tensors(left, right)
     valid = _combine_validity(left, right, left_tensor)
     if operator == "=":
@@ -281,6 +284,50 @@ def _bool_tensor(value: PhysicalValue) -> torch.Tensor:
     if tensor.dtype is not torch.bool:
         raise UnsupportedPlanError("physical boolean expression did not produce a boolean tensor")
     return tensor
+
+
+def _condition_mask(value: PhysicalValue) -> torch.Tensor:
+    tensor = _bool_tensor(value)
+    if value.valid is None:
+        return tensor
+    return tensor & value.valid.to(device=tensor.device)
+
+
+def _logical_binary(left: PhysicalValue, right: PhysicalValue, reducer) -> PhysicalValue:
+    if reducer is torch.logical_or:
+        return _logical_or(left, right)
+    if reducer is torch.logical_and:
+        return _logical_and(left, right)
+    raise UnsupportedPlanError("unsupported logical reducer")
+
+
+def _logical_or(left: PhysicalValue, right: PhysicalValue) -> PhysicalValue:
+    left_tensor, left_valid = _bool_tensor_and_valid(left)
+    right_tensor, right_valid = _bool_tensor_and_valid(right)
+    true_known = (left_tensor & left_valid) | (right_tensor & right_valid)
+    false_known = (~left_tensor & left_valid) & (~right_tensor & right_valid)
+    return PhysicalValue(tensor=true_known, valid=_compact_validity(true_known | false_known))
+
+
+def _logical_and(left: PhysicalValue, right: PhysicalValue) -> PhysicalValue:
+    left_tensor, left_valid = _bool_tensor_and_valid(left)
+    right_tensor, right_valid = _bool_tensor_and_valid(right)
+    true_known = (left_tensor & left_valid) & (right_tensor & right_valid)
+    false_known = (~left_tensor & left_valid) | (~right_tensor & right_valid)
+    return PhysicalValue(tensor=true_known, valid=_compact_validity(true_known | false_known))
+
+
+def _bool_tensor_and_valid(value: PhysicalValue) -> tuple[torch.Tensor, torch.Tensor]:
+    tensor = _bool_tensor(value)
+    if value.valid is None:
+        return tensor, torch.ones(tensor.shape, dtype=torch.bool, device=tensor.device)
+    return tensor, value.valid.to(device=tensor.device)
+
+
+def _compact_validity(valid: torch.Tensor) -> torch.Tensor | None:
+    if bool(torch.all(valid).cpu().item()):
+        return None
+    return valid
 
 
 def _literal_string(value: PhysicalValue) -> str:
