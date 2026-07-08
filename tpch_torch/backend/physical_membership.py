@@ -7,6 +7,7 @@ from typing import Sequence
 import torch
 
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_key_ops import comparable_key_tensors
 from tpch_torch.backend.physical_types import PhysicalTable
 
 
@@ -35,9 +36,9 @@ def _membership_keys(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if len(conditions) == 1:
         left_expr, right_expr = conditions[0]
-        return (
-            evaluate_expression(left, left_expr).require_tensor().to(dtype=torch.int64),
-            evaluate_expression(right, right_expr).require_tensor().to(dtype=torch.int64),
+        return comparable_key_tensors(
+            evaluate_expression(left, left_expr).require_tensor(),
+            evaluate_expression(right, right_expr).require_tensor(),
         )
     left_stacked = _stack_key_columns(left, tuple(left for left, _ in conditions))
     right_stacked = _stack_key_columns(right, tuple(right for _, right in conditions))
@@ -47,7 +48,11 @@ def _membership_keys(
 
 def _membership_mask(left_key: torch.Tensor, right_key: torch.Tensor) -> torch.Tensor:
     _validate_key_tensors(left_key, right_key)
-    sorted_right = right_key.contiguous() if _is_sorted_non_decreasing(right_key) else right_key[torch.argsort(right_key)]
+    sorted_right = (
+        right_key.contiguous()
+        if _is_sorted_non_decreasing(right_key)
+        else right_key[torch.argsort(right_key)]
+    )
     positions = torch.searchsorted(sorted_right, left_key)
     in_bounds = positions < sorted_right.numel()
     safe_positions = torch.clamp(positions, max=max(int(sorted_right.numel()) - 1, 0))

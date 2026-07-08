@@ -217,6 +217,7 @@ final aggregate expression alias，例如 100 * sum(x) / sum(y)；支持 aggrega
 本轮算子优化已覆盖 physical-plan interpreter 的几条热路径：
 
 - `HASH_JOIN` row-index 生成从 Python `dict/list/tolist()` 改为 tensor `searchsorted` 路径；右侧 build key 已排序且唯一时跳过 `argsort` 和重复展开。
+- P0 正确性修复：浮点 join key 不再被截断为 `int64`；整数 `MIN/MAX` 使用 dtype-safe sentinel；`PhysicalValue.valid` 已接入基础 NULL-aware boolean / string predicate / aggregate 语义。
 - `PhysicalValue` 携带 conservative sorted/unique metadata；scan/filter/single-key
   sort/single-key group-by 会传播这些属性，PK/FK join 可直接走
   sorted-unique build lookup，避免重复探测 sortedness。
@@ -417,11 +418,11 @@ timeout 60 python -m compileall -q tpch_torch scripts
 # TODO
 ## TQP 当前 TODO 总览
 
-### P0 — 正确性（3 项）
+### P0 — 正确性（已完成）
 
-1. 浮点 join key 截断：`physical_join.py` 强制 `.to(int64)` 导致浮点 key 被截断
-2. MIN/MAX 初始化：`_scatter_reduce` 用 `float("inf")` 初始化整数张量
-3. NULL 语义缺失：无 NULL-aware 布尔和聚合语义
+1. [x] 浮点 join key 截断：`physical_join.py` 强制 `.to(int64)` 导致浮点 key 被截断
+2. [x] MIN/MAX 初始化：`_scatter_reduce` 用 `float("inf")` 初始化整数张量
+3. [x] NULL 语义缺失：无 NULL-aware 布尔和聚合语义
 
 ### P1 — TensorRecordBatch + 类型系统
 

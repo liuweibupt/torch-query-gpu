@@ -69,7 +69,8 @@
 - [x] 可复用 min/max/mean group reductions。
 - [ ] Count-distinct aggregation。
 - [ ] Scalar/nested/correlated subquery lowering。
-- [ ] NULL-aware boolean and aggregate semantics。
+- [x] 基础 NULL-aware boolean and aggregate semantics：当前覆盖 `PhysicalValue.valid`
+      上的 boolean/string predicate/CASE 与 SUM/MIN/MAX/AVG/COUNT(DISTINCT)。
 - [ ] ML prediction operator boundary。
 
 ## 5. TQP 优化 TODO
@@ -77,6 +78,8 @@
 - [x] Generic grouped aggregate 使用 tensor group id + grouped reductions，避免 Python row-group loops。
 - [x] DuckDB physical inner equi-join 移除 Python key row loop，使用 tensor `searchsorted` 产生 row-index pairs。
 - [x] Physical join sorted/unique build-side fast path：跳过 `argsort` 与重复展开。
+- [x] Physical join key dtype correctness：单键与 metadata-backed join 不再把浮点 key
+      截断为 `int64`；multi-condition join 改为候选 pairs 后按剩余条件 tensor filter。
 - [x] Physical SEMI/ANTI joins 使用 membership probe，不再先展开 join pairs。
 - [ ] 移除剩余 hot path 中的数据相关 Python row loops；保留 schema/operator 级循环。
 - [x] 保持 columnar late materialization：physical join 先产生 row-index pairs，再物化 payload columns。
