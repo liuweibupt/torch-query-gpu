@@ -569,6 +569,71 @@ def test_migrated_tpch_query_uses_physical_plan_not_recipe(
     assert result.max_abs_error <= 1e-2
 
 
+def test_q17_physical_plan_preserves_positional_extendedprice_projection(monkeypatch):
+    con = duckdb.connect()
+    con.execute(
+        """
+        create table lineitem(
+            l_partkey bigint,
+            l_quantity decimal(15,2),
+            l_extendedprice decimal(15,2)
+        )
+        """
+    )
+    con.execute(
+        """
+        create table part(
+            p_partkey bigint,
+            p_brand varchar,
+            p_container varchar
+        )
+        """
+    )
+    con.execute("insert into part values (1, 'Brand#23', 'MED BOX')")
+    con.execute(
+        """
+        insert into lineitem values
+            (1, 1.00, 70.00),
+            (1, 10.00, 1000.00),
+            (1, 10.00, 1000.00)
+        """
+    )
+    module = __import__("tpch_torch.backend.tpch_graph_q17", fromlist=["execute_q17_graph"])
+    monkeypatch.setattr(
+        module,
+        "execute_q17_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("query recipe path used")),
+    )
+
+    result = validate_sql_with_frontend(
+        con,
+        """
+        SELECT
+            sum(l_extendedprice) / 7.0 AS avg_yearly
+        FROM
+            lineitem,
+            part
+        WHERE
+            p_partkey = l_partkey
+            AND p_brand = 'Brand#23'
+            AND p_container = 'MED BOX'
+            AND l_quantity < (
+                SELECT
+                    0.2 * avg(l_quantity)
+                FROM
+                    lineitem
+                WHERE
+                    l_partkey = p_partkey)
+        """,
+        device="cpu",
+        frontend="sirius",
+    )
+
+    assert result.query_id == 17
+    assert result.max_abs_error == 0.0
+    assert result.pytorch_rows == [{"avg_yearly": 10.0}]
+
+
 def _q3_shape_con():
     con = duckdb.connect()
     con.execute("create table lineitem(l_orderkey integer, l_extendedprice double, l_discount double)")

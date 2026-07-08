@@ -31,6 +31,7 @@ from tpch_torch.backend.physical_projection import (
     projection_value_expression,
     resolve_alias_projections,
 )
+from tpch_torch.backend.physical_projection_binding import parent_bound_projection_expression
 from tpch_torch.backend.physical_required import parents_by_child, required_columns_from_parents
 from tpch_torch.backend.physical_sql import select_expressions_by_alias
 from tpch_torch.backend.physical_scan import fetch_physical_table, scan_row_count
@@ -145,9 +146,15 @@ class PhysicalPlanExecutor:
         if not expressions:
             return child
         expressions = resolve_alias_projections(self._select_aliases, child, expressions)
+        parent_required = required_columns_from_parents(self._graph, self._parents, node.node_id, _metadata_list)
         items = []
         for index, expression in enumerate(expressions):
-            value_expression = projection_value_expression(self._select_aliases, child, expression)
+            value_expression = parent_bound_projection_expression(
+                child,
+                expression,
+                len(expressions),
+                parent_required,
+            ) or projection_value_expression(self._select_aliases, child, expression)
             value = evaluate_expression(child, value_expression)
             if value.is_literal:
                 value = _materialize_literal(value, child)
