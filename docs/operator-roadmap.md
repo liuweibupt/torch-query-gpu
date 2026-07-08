@@ -68,15 +68,22 @@ until a readable full paper/appendix is available.
 ### TQP algorithm TODO
 
 - [x] Columnar tensor table representation for plain columns.
+- [x] First `TensorRecordBatch` / `ColumnMeta` metadata substrate with DuckDB
+      type mapping, including DECIMAL as scaled `int64 + scale`.
 - [x] Bitmap-style filter masks for current TPC-H executors.
 - [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
 - [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
 - [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, `NOT LIKE`/`!~~`, `CAST`, `EXTRACT(year FROM date)`, internal compress/decompress wrappers.
+- [x] First multi-precision physical expressions: INT64/FP32/FP64 plus
+      DECIMAL arithmetic/comparison/CASE/scalar-subquery handling.
 - [ ] Full generic projection operator with SQL parser-level expression-tree lowering.
 - [x] First Batch 2 step: generic stable multi-key `ORDER BY` with `ASC`/`DESC`.
 - [ ] Generic sort-based equi-join using sort, histograms, prefix sums,
       `bucketize`, quotient/remainder output-index generation.
 - [x] Correctness-first generic inner equi-join through DuckDB physical `HASH_JOIN`.
+- [x] First multi-precision join coverage for INT64/FP32/FP64/DECIMAL keys;
+      DECIMAL join comparisons align scale before probing.
+- [x] First hash-style tensor dictionary/probe API for physical values.
 - [ ] Generic hash equi-join fast path using hash buckets, scatter, probe, collision
       iteration, and duplicate accumulation.
 - [ ] Join variants: non-equi, left outer, left semi, left anti.
@@ -85,6 +92,8 @@ until a readable full paper/appendix is available.
       `unique_consecutive`, inverse ids, and scatter reductions.
 - [x] Sum/count group reductions for current query templates.
 - [x] First batch: min/max/mean group reductions as reusable primitives.
+- [x] First DECIMAL aggregate coverage: SUM/MIN/MAX preserve scaled int64
+      metadata; AVG returns real fp64 values.
 - [ ] Count-distinct aggregation.
 - [ ] Scalar/nested/correlated subquery lowering into tensor operators.
 - [x] Basic NULL-aware boolean and aggregate semantics over `PhysicalValue.valid`,
