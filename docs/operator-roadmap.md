@@ -70,10 +70,16 @@ until a readable full paper/appendix is available.
 - [x] Columnar tensor table representation for plain columns.
 - [x] First `TensorRecordBatch` / `ColumnMeta` metadata substrate with DuckDB
       type mapping, including DECIMAL as scaled `int64 + scale`.
+- [ ] `TensorRecordBatch v2` ABI: split DuckDB logical type, physical storage, batch metadata, and lifecycle owner; see `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`.
+- [ ] Batch/chunk metadata: preserve `row_count/chunk_size/chunk_index/source_offset/device/schema_version` at scan and update it through filter/gather/project.
+- [ ] Variable-length storage: complete dictionary ids and add a UTF8 `offsets + chars + validity` prototype.
 - [x] Bitmap-style filter masks for current TPC-H executors.
 - [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
 - [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
 - [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, `NOT LIKE`/`!~~`, `CAST`, `EXTRACT(year FROM date)`, internal compress/decompress wrappers.
+- [ ] Filter/projection TypedExpr AST: bind DuckDB type, nullable, scale, and storage kind from DuckDB expressions.
+- [ ] Expression DAG optimizer: constant folding, CSE, decimal scale hoisting, predicate normalization, and validity propagation.
+- [ ] Tensor primitive plan executor: batch multi-expression filter/projection execution that returns `TensorRecordBatch` and forbids hot-path row-level Python loops.
 - [x] First multi-precision physical expressions: INT64/FP32/FP64 plus
       DECIMAL arithmetic/comparison/CASE/scalar-subquery handling.
 - [ ] Full generic projection operator with SQL parser-level expression-tree lowering.

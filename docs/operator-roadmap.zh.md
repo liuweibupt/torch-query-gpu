@@ -57,10 +57,16 @@
 - [x] Plain columnar tensor table representation。
 - [x] 第一版 `TensorRecordBatch` / `ColumnMeta` metadata substrate，包含 DuckDB
       type mapping，以及 DECIMAL 的 scaled `int64 + scale` 表示。
+- [ ] `TensorRecordBatch v2` ABI：拆分 DuckDB logical type、physical storage、batch metadata、lifecycle owner；设计见 `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`。
+- [ ] Batch/chunk metadata：`row_count/chunk_size/chunk_index/source_offset/device/schema_version` 从 scan 入口保留并随 filter/gather/project 更新。
+- [ ] 变长数据 storage：dictionary ids 完整化，并新增 UTF8 `offsets + chars + validity` prototype。
 - [x] 当前 TPC-H executor 的 bitmap-style filter masks。
 - [x] Generic SQL boolean filter tree：`AND` / `OR` / `NOT`。
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
 - [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、multi-branch/simple `CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
+- [ ] Filter/projection TypedExpr AST：从 DuckDB expression 绑定类型、nullable、scale 与 storage kind。
+- [ ] Expression DAG optimizer：constant folding、CSE、decimal scale hoisting、predicate normalization、validity propagation。
+- [ ] Tensor primitive plan executor：projection/filter 多表达式批执行，输出 `TensorRecordBatch`，禁止 hot path row-level Python loop。
 - [x] 第一版多精度 physical expression：覆盖 INT64/FP32/FP64 以及 DECIMAL
       arithmetic/comparison/CASE/scalar-subquery。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。

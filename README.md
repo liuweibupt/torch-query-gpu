@@ -481,6 +481,8 @@ timeout 60 python -m compileall -q tpch_torch scripts
 
 ## TensorRecordBatch / 多精度 / Join-Agg 任务分解与验收矩阵
 
+完整设计文档：[`docs/plans/2026-07-09-tensor-record-batch-v2-design.md`](docs/plans/2026-07-09-tensor-record-batch-v2-design.md)。该文档按“外部实现调研 → 当前 TQP 落点评估 → 最终 ABI/AST/变长数据/lifecycle 方案 → 分阶段 TODO”组织。
+
 > 任务背景：在已有 TQP physical-plan interpreter 基础上，把关系数据进一步抽象为 typed tensor batch，并补齐数据库常见数值精度、变长数据、join/agg、多 GPU/offload 验证和论文对齐。候选协作人：@georgism(DAVID ZHELIANG LIAO)、@ziliangzhu(朱梓良)。
 
 ### 1. 已有实现评估
@@ -733,10 +735,14 @@ AST 设计要求：
 | --- | --- | --- |
 | P0 | Projection 深度×宽度×多精度测试矩阵。 | CPU/GPU 均通过；覆盖 depth=1..4、width=1/4/16/64、INT64/FP32/FP64/DECIMAL。 |
 | P0 | `TensorRecordBatch` filter/projection primitive 与 physical executor 适配。 | 新算子以 `TensorRecordBatch` 为边界；现有 physical tests 不回退。 |
+| P0 | `TensorRecordBatch v2` ABI：DuckDB logical type、physical storage、batch metadata、device。 | `ColumnType/ColumnStorage/BatchMeta` 可表达 `DECIMAL(15,2)`、`VARCHAR`、chunk offset/size；v1 tests 兼容。 |
+| P0 | Filter/projection TypedExpr AST → optimized DAG → tensor primitive plan。 | 支持 type binding、constant folding、CSE、decimal scale hoisting；Q1 filter/projection 可走新 plan。 |
 | P0 | Sort join 完整 key/payload 矩阵。 | 指定 key/payload 列数和 dtype 后可生成参数化测试。 |
 | P0 | Single group-by SUM 完整矩阵。 | group key 列数/type、SUM 个数/type 参数化。 |
 | P0 | CPU/GPU offload 断言规范。 | 每个新增算子测试 output.device；CUDA 不可用显式 skip。 |
 | P1 | 变长 string dictionary 管理完善。 | dictionary merge/filter/gather/project 稳定；string predicate fast path。 |
+| P1 | 生命周期/ownership 元数据。 | 默认 torch owner；view/external owner 有显式字段；无手工 `close()` 和无声 CPU fallback。 |
+| P1 | UTF8 offsets+chars 变长字符串列。 | empty/null/basic unicode 覆盖；filter/gather/project 后 offsets/chars 有效。 |
 | P1 | 多 key sort join 与 multi-key group-by。 | lexicographic/key-packing 正确，DuckDB baseline 通过。 |
 | P1 | Hash join multi-key / duplicate 输出。 | many-to-many join index 正确，CPU/GPU 一致。 |
 | P1 | DECIMAL overflow/rounding policy。 | 超界显式错误或文档化规则；测试覆盖。 |
