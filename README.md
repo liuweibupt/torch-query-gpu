@@ -536,6 +536,105 @@ timeout 60 python -m compileall -q tpch_torch scripts
 | oracle | DuckDB SQL baseline + 手写小张量 expected values 双重校验。 |
 | offload 断言 | 输出 tensor device 与输入一致；测试中 monkeypatch/断言禁止 `.cpu().tolist()` 进入 hot path。 |
 
+#### 2.4 TensorRecordBatch v2 结构设计补充
+
+`TensorRecordBatch` 不应只是一组 `name -> tensor`，而应该成为 physical operator 之间唯一的 typed columnar ABI。建议把下一版拆成四层元数据：
+
+| 层次 | 必备字段 | 说明 |
+| --- | --- | --- |
+| Batch metadata | `row_count`, `chunk_size`, `chunk_index`, `source_offset`, `device`, `schema_version` | 描述当前 chunk 的行数、来源位置、目标 device；chunk 大小与 DB vector/chunk 概念对齐，便于后续 pipeline scheduling。 |
+| Schema / DuckDB type | `name`, `duckdb_type_id`, `duckdb_type_repr`, `nullable`, `logical_dtype` | 必须保留 DuckDB 类型语义，例如 `DECIMAL(15,2)`、`VARCHAR`、`DATE`，不能只剩 PyTorch dtype。 |
+| Physical storage | `storage_kind`, `torch_dtype`, `scale`, `precision`, `children` | 描述实际 tensor 表示：fixed-width、decimal int64+scale、dictionary ids、offsets+values 等。 |
+| Runtime / lifecycle | `owner`, `is_view`, `parent_batch_id`, `stream`, `memory_resource` | 第一阶段使用 PyTorch tensor 引用计数管理生命周期；后续接入外部 CUDA/DLPack/cuDF buffer 时再启用 explicit owner/resource。 |
+
+参考 cuDF/libcudf 的设计，`column` 持有 data buffer、null mask 和 child columns；`column_view` 是不拥有内存的 view；字符串列是 compound column，由 packed chars buffer 与 offsets child 表达，父列的 size 仍是字符串行数，null mask 表示每行字符串有效性。当前项目不需要立即复刻 RMM，但应预留 `MemoryResource` / `AllocationOwner` 字段，避免后续接外部 GPU buffer 时破坏 ABI。
+
+参考资料：[libcudf `column`](https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1column/)、[libcudf `column_view`](https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1column__view/)、[libcudf column factories / strings column](https://docs.rapids.ai/api/libcudf/stable/group__column__factories/)、[RMM](https://docs.rapids.ai/api/rmm/stable/)。
+
+推荐的 Python 侧形态：
+
+```python
+@dataclass(frozen=True)
+class ColumnType:
+    duckdb_type_id: str           # DECIMAL, VARCHAR, BIGINT, ...
+    duckdb_type_repr: str         # DECIMAL(15,2), VARCHAR, DATE
+    logical_dtype: LogicalDType   # DECIMAL / STRING / INT64 / FP32 ...
+    nullable: bool
+    precision: int | None = None
+    scale: int | None = None
+
+@dataclass(frozen=True)
+class ColumnStorage:
+    kind: StorageKind             # FIXED, DECIMAL64, DICTIONARY, UTF8_OFFSETS
+    data: torch.Tensor            # values / dictionary ids / chars buffer
+    validity: torch.Tensor | None # row-level bool mask
+    children: Mapping[str, torch.Tensor] = field(default_factory=dict)
+    owner: AllocationOwner | None = None
+
+@dataclass(frozen=True)
+class TensorRecordBatch:
+    columns: Mapping[str, ColumnStorage]
+    types: Mapping[str, ColumnType]
+    row_count: int
+    chunk_size: int
+    chunk_index: int
+    source_offset: int
+    device: torch.device
+```
+
+落地原则：
+
+- fixed-width 数值列：`data.shape[0] == row_count`。
+- DECIMAL：`data=torch.int64`，类型层保留 `precision/scale/duckdb_type_repr`。
+- dictionary string：`data=torch.int64 ids`，children/meta 中保留 vocabulary；适合 TPC-H 低基数字符串。
+- UTF8 varlen：`children["offsets"]` 长度为 `row_count + 1`，`data` 或 `children["chars"]` 是 packed `uint8` 字节；filter/gather 后必须 compact offsets/chars 或显式标记为 view。
+- 生命周期：默认不可变、算子返回新 batch；view 型 batch 必须记录 parent，禁止悬垂外部 buffer；没有外部 buffer 时不增加手工 `close()`。
+
+新增 TODO：
+
+| ID | 优先级 | 任务 | 完成标准 |
+| --- | --- | --- | --- |
+| TRB-08 | P0 | `ColumnMeta` 拆分/扩展为 DuckDB logical type + physical storage。 | `DECIMAL(15,2)`、`VARCHAR`、`DATE` 等 DuckDB 类型可 round-trip；原测试通过。 |
+| TRB-09 | P0 | 在 batch 层加入 `row_count/chunk_size/chunk_index/source_offset/device`。 | scan/filter/project/gather 后 chunk metadata 明确更新。 |
+| TRB-10 | P1 | 引入 owning/view lifecycle 标记。 | filter/gather/project 可区分 copy 与 view；外部 buffer 接入点有测试。 |
+| TRB-11 | P1 | UTF8 offsets+chars storage prototype。 | 支持 varlen filter/gather/project，覆盖 empty/null/basic unicode。 |
+
+#### 2.5 Filter / Projection 表达式 AST 与优化设计
+
+filter/projection 不应长期停留在“递归解释 DuckDB 表达式并即时执行 tensor op”的形态。推荐链路：
+
+```text
+DuckDB logical/physical expression
+        ↓ bind/type inference
+Typed Expression AST
+        ↓ normalize + optimize
+Expression DAG
+        ↓ lower
+Tensor primitive plan
+        ↓ execute on torch device
+TensorRecordBatch
+```
+
+优化重点：
+
+| 优化 | 作用 | 第一阶段范围 |
+| --- | --- | --- |
+| Type binding | 每个 AST node 标注 DuckDB 类型、PyTorch dtype、decimal scale、nullable。 | P0 |
+| Constant folding | `l_discount < 0.10 + 0.01` 这类常量提前算好。 | P0 |
+| Decimal scale hoisting | 表达式树中统一 scale 对齐，避免每层重复乘 10。 | P0 |
+| Common sub-expression elimination | 多 projection 共享 `l_extendedprice * (1-l_discount)` 等中间结果。 | P0 |
+| Predicate normalization | AND/OR/NOT、BETWEEN、IN 统一成 mask DAG。 | P1 |
+| Projection batch execution | 多表达式一次性 lower，统一 intermediate cache 和 validity propagation。 | P1 |
+| Numeric fusion | 纯数值 DAG 后续可尝试 `torch.compile` / custom kernel 融合。 | P2 |
+| String fast path | dictionary string equality/IN/prefix 优先走 id/set tensor op。 | P1 |
+
+AST 设计要求：
+
+- AST node 是不可变对象，包含 `op`, `children`, `literal`, `bound_type`, `nullable`。
+- lowering 只生成 tensor primitive，不允许在 hot path 做 row-level Python loop。
+- 每个 primitive 明确 CPU/CUDA 支持矩阵；CUDA 不可用只能 skip 测试，不能静默 fallback。
+- 对 DECIMAL overflow/rounding 不确定的地方显式抛错或进入文档化策略，不能悄悄转 fp64。
+
 ### 3. 变长数据管理调研与落地任务
 
 #### 3.1 论文/系统参考方向
