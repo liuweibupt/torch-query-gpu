@@ -72,6 +72,7 @@ def execute_partitionable_physical_plan(
             graph,
             device=device,
             scan_ranges={analysis.table: (start, end)},
+            scan_chunk_sizes={analysis.table: config.chunk_size},
             enable_fusion=True,
         )
         partial_rows.extend(executor.execute())

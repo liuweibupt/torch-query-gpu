@@ -9,6 +9,7 @@ import duckdb
 import torch
 
 from tpch_torch.backend import PyTorchBackend
+from tpch_torch.backend.physical_chunked import ScanChunkConfig
 from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.frontend import compile_sirius_plan, compile_substrait_plan
 from tpch_torch.ir import FrontendName, TQPPlan
@@ -40,6 +41,7 @@ def run_sql(
     device: str = "cpu",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    scan_chunk_config: ScanChunkConfig | None = None,
 ) -> QueryResult:
     return run_sql_with_frontend(
         con,
@@ -48,6 +50,7 @@ def run_sql(
         frontend="sirius",
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
+        scan_chunk_config=scan_chunk_config,
     )
 
 
@@ -58,6 +61,7 @@ def run_sql_with_frontend(
     frontend: FrontendName = "sirius",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    scan_chunk_config: ScanChunkConfig | None = None,
 ) -> QueryResult:
     _validate_device(device)
     plan = compile_tqp_plan(con, sql, frontend)
@@ -67,6 +71,7 @@ def run_sql_with_frontend(
         device=device,
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
+        scan_chunk_config=scan_chunk_config,
     )
     return QueryResult(query_id=plan.query_id, rows=rows)
 
@@ -77,6 +82,7 @@ def validate_sql(
     device: str = "cpu",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    scan_chunk_config: ScanChunkConfig | None = None,
 ) -> SQLValidationResult:
     return validate_sql_with_frontend(
         con,
@@ -85,6 +91,7 @@ def validate_sql(
         frontend="sirius",
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
+        scan_chunk_config=scan_chunk_config,
     )
 
 
@@ -95,6 +102,7 @@ def validate_sql_with_frontend(
     frontend: FrontendName = "sirius",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    scan_chunk_config: ScanChunkConfig | None = None,
 ) -> SQLValidationResult:
     result = run_sql_with_frontend(
         con,
@@ -103,6 +111,7 @@ def validate_sql_with_frontend(
         frontend=frontend,
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
+        scan_chunk_config=scan_chunk_config,
     )
     duckdb_rows = run_duckdb_sql(con, sql)
     max_abs_error = compare_rows(duckdb_rows, result.rows)
@@ -122,6 +131,7 @@ def timed_run_sql(
     frontend: FrontendName = "sirius",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    scan_chunk_config: ScanChunkConfig | None = None,
 ) -> tuple[QueryResult, float]:
     if device == "cuda":
         start = torch.cuda.Event(enable_timing=True)
@@ -134,6 +144,7 @@ def timed_run_sql(
             frontend=frontend,
             use_compressed_masks=use_compressed_masks,
             partition_config=partition_config,
+            scan_chunk_config=scan_chunk_config,
         )
         end.record()
         torch.cuda.synchronize()
@@ -146,6 +157,7 @@ def timed_run_sql(
         frontend=frontend,
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
+        scan_chunk_config=scan_chunk_config,
     )
     return result, (perf_counter() - start_time) * 1000.0
 

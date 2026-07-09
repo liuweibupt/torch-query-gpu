@@ -20,6 +20,7 @@
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ 新增 CoddSpeed-style partitionable execution 原型：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N`，当前覆盖单表 aggregate fragments（Q6、Q1），每个 chunk 仍走 DuckDB physical graph → PyTorch tensor operators，再由 host merge partial aggregates。
+- ✅ 新增显式 scan chunk execution：`ScanChunkConfig(table, chunk_size)` 可把单表 scan/filter/project physical plan 切成多个 `TensorRecordBatch` chunk 执行；join/aggregate/sort/limit 等需要全局语义的 plan 会显式拒绝，不做静默整表 fallback。
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
 - ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
@@ -41,10 +42,12 @@ flowchart LR
     GraphExec -->|Q1-Q22 + generic joins| Physical["DuckDB physical-plan interpreter<br/>backend/physical*.py"]
     GraphExec -->|Q6 --compressed-masks| Primitives["Q6 compressed mask experimental primitive"]
     GraphExec -->|explicit PartitionConfig| Partitionable["CoddSpeed-style partitionable executor<br/>chunk scan · local aggregate · host merge"]
+    GraphExec -->|explicit ScanChunkConfig| ScanChunk["scan chunk executor<br/>safe scan/filter/project chunks"]
     GraphExec -->|single-table generic subset| Generic["tpch_torch/backend/generic.py"]
     Physical --> Nodes["Physical tensor nodes<br/>Scan · Filter · Project · Join · Aggregate · Sort/TopN"]
     Primitives --> Torch["PyTorch Tensor Operators<br/>CPU / CUDA"]
     Partitionable --> Physical
+    ScanChunk --> Physical
     Nodes --> Torch
     Generic --> Torch
     Torch --> Rows["Result Rows"]
@@ -60,7 +63,7 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
 | IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
 | Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py`, `tpch_torch/backend/physical*.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q1-Q22 与 generic joins 可由 DuckDB physical-plan interpreter 执行；不执行 compiled TPC-H fallback root。 |
-| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives，以及 partitionable chunk scan + host partial aggregate merge。 |
+| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives、scan chunk execution，以及 partitionable chunk scan + host partial aggregate merge。 |
 
 ## Q1 是怎么实现的
 
@@ -122,6 +125,35 @@ python -m scripts.benchmark_query \
 ```
 
 当前覆盖单表 aggregate physical fragments（例如 TPC-H Q6/Q1）：每个 chunk 通过同一个 DuckDB physical graph interpreter 调用 PyTorch tensor 算子，host 端再合并 `SUM/COUNT/MIN/MAX/AVG` partial aggregate。详细说明见 [`docs/partitionable-execution.zh.md`](docs/partitionable-execution.zh.md)。
+
+## 显式 Scan Chunk Execution
+
+`ScanChunkConfig` 用于把**单表 scan/filter/project** 查询按行范围切成多个 chunk。每个 chunk 仍从 SQL 编译出的 DuckDB physical graph 进入 `PhysicalPlanExecutor`，scan 产生带 `BatchMeta(chunk_size, chunk_index, source_offset)` 的 `TensorRecordBatch`，后续 filter/project 继续在 PyTorch tensor 上执行。
+
+```python
+import duckdb
+from tpch_torch.backend.graph import PyTorchGraphExecutor
+from tpch_torch.backend.physical_chunked import ScanChunkConfig
+from tpch_torch.runner import compile_tqp_plan
+
+con = duckdb.connect("data/tpch_sf1.duckdb")
+sql = "select l_orderkey, l_quantity + 1 as q from lineitem where l_quantity < 24"
+plan = compile_tqp_plan(con, sql, frontend="sirius")
+
+rows = PyTorchGraphExecutor().execute(
+    con,
+    plan,
+    device="cuda",
+    scan_chunk_config=ScanChunkConfig(table="lineitem", chunk_size=100_000),
+)
+```
+
+边界：
+
+- ✅ 支持：一个 scan table 上的 scan/filter/project。
+- ❌ 暂不支持：join、aggregate、sort、limit、CTE、delim/subquery 等跨 chunk 需要全局语义或状态合并的 plan。
+- ✅ aggregate chunk 执行请继续使用 `PartitionConfig`，因为它带 partial aggregate host merge。
+- ✅ 不支持的 plan 会抛 `UnsupportedPlanError`，不会静默退回整表执行。
 
 ## 安装
 
@@ -438,35 +470,36 @@ timeout 60 python -m compileall -q tpch_torch scripts
 8. [x] projection 多精度表达式第一版：DECIMAL arithmetic/comparison/CASE/scalar-subquery
    已走 metadata-aware tensor path；AST 深度×宽度压力矩阵仍保留为扩展测试项
 9. [x] 变长数据管理第一版：string 字典动态扩容，并保留已有 dictionary id
+10. [x] scan chunk execution 第一版：`ScanChunkConfig` 显式切分单表 scan/filter/project，并把 configured chunk metadata 写入 `TensorRecordBatch.batch_meta`
 
 ### P2 — Join/Agg 多精度
 
-10. [x] sort/searchsorted inner join 扩展至 INT64/FP32/FP64/DECIMAL(scale-aligned)
-11. [x] group-by SUM/MIN/MAX/AVG 扩展至 INT64/FP32/FP64/DECIMAL；DECIMAL AVG 输出真实 fp64
-12. [x] join 第一批测试：INT64/FP32/FP64/DECIMAL key 覆盖；完整 key/payload 矩阵待扩展
-13. [x] agg 第一批测试：INT64/FP32/FP64/DECIMAL SUM + DECIMAL MIN/MAX/AVG；完整多 key/SUM 矩阵待扩展
-14. [x] hash-style join 第一版接口：tensor dictionary/probe prototype（不是成熟 GPU hash table）
-15. [x] hash join 第一批测试：DECIMAL scale-aligned probe；完整 key/payload 矩阵待扩展
+11. [x] sort/searchsorted inner join 扩展至 INT64/FP32/FP64/DECIMAL(scale-aligned)
+12. [x] group-by SUM/MIN/MAX/AVG 扩展至 INT64/FP32/FP64/DECIMAL；DECIMAL AVG 输出真实 fp64
+13. [x] join 第一批测试：INT64/FP32/FP64/DECIMAL key 覆盖；完整 key/payload 矩阵待扩展
+14. [x] agg 第一批测试：INT64/FP32/FP64/DECIMAL SUM + DECIMAL MIN/MAX/AVG；完整多 key/SUM 矩阵待扩展
+15. [x] hash-style join 第一版接口：tensor dictionary/probe prototype（不是成熟 GPU hash table）
+16. [x] hash join 第一批测试：DECIMAL scale-aligned probe；完整 key/payload 矩阵待扩展
 
 ### P3 — 压缩数据执行（远期）
 
-16. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
-17. 压缩数据 alignment、compressed join/agg
-18. 压缩感知 optimizer rules、encoding 选择策略
+17. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
+18. 压缩数据 alignment、compressed join/agg
+19. 压缩感知 optimizer rules、encoding 选择策略
 
 ### P4 — 编译器/融合/优化（远期）
 
-19. 更多 fusion passes（projection/filter/agg 链）
-20. `torch.compile` / Antares / TVM 编译执行
-21. hash join vs sort join 自适应选择
-22. sorted/unique 元数据感知优化
-23. hot path 去 Python loops
+20. 更多 fusion passes（projection/filter/agg 链）
+21. `torch.compile` / Antares / TVM 编译执行
+22. hash join vs sort join 自适应选择
+23. sorted/unique 元数据感知优化
+24. hot path 去 Python loops
 
 ### P5 — 论文对齐（远期）
 
-24. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
-25. TQP++：ML-compiler lowering、tiered scheduling
-26. CoddSpeed：数据移动建模、accelerator placement
+25. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
+26. TQP++：ML-compiler lowering、tiered scheduling
+27. CoddSpeed：数据移动建模、accelerator placement
 
 ---
 

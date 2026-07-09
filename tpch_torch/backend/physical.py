@@ -52,12 +52,14 @@ class PhysicalPlanExecutor:
         device: str = "cpu",
         *,
         scan_ranges: Mapping[str, tuple[int, int]] | None = None,
+        scan_chunk_sizes: Mapping[str, int] | None = None,
         enable_fusion: bool = True,
     ):
         self._con = con
         self._graph = graph
         self._device = device
         self._scan_ranges = {key.lower(): value for key, value in (scan_ranges or {}).items()}
+        self._scan_chunk_sizes = {key.lower(): value for key, value in (scan_chunk_sizes or {}).items()}
         self._enable_fusion = enable_fusion
         self._select_aliases = select_expressions_by_alias(graph.source_sql)
         self._parents = parents_by_child(graph)
@@ -130,6 +132,7 @@ class PhysicalPlanExecutor:
             tuple(projected_columns),
             self._device,
             scan_range=scan_range,
+            chunk_size=self._scan_chunk_sizes.get(table_name.lower()),
         )
         return _apply_scan_filters(table, filters) if filters else table
 
