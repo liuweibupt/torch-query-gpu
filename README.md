@@ -478,3 +478,169 @@ timeout 60 python -m compileall -q tpch_torch scripts
 - `tpch_torch/backend/type_mapping.py` 负责 DuckDB type → PyTorch dtype / `ColumnMeta`，其中 `DECIMAL(p,s)` 表示为 `torch.int64 + scale=s`。
 - `PhysicalValue.meta` 让现有 physical executor 在 scan/filter/gather/projection/join/agg 中保留 logical dtype。
 - `physical_decimal_expr.py` 负责 DECIMAL 与 literal / numeric tensor 的 scale 对齐、CASE 合并和 scalar-subquery 比较。
+
+## TensorRecordBatch / 多精度 / Join-Agg 任务分解与验收矩阵
+
+> 任务背景：在已有 TQP physical-plan interpreter 基础上，把关系数据进一步抽象为 typed tensor batch，并补齐数据库常见数值精度、变长数据、join/agg、多 GPU/offload 验证和论文对齐。候选协作人：@georgism(DAVID ZHELIANG LIAO)、@ziliangzhu(朱梓良)。
+
+### 1. 已有实现评估
+
+| 方向 | 当前状态 | 关键代码 / 测试 | 缺口 |
+| --- | --- | --- | --- |
+| `TensorRecordBatch` / `ColumnMeta` | 已有第一版 typed columnar batch，可 `filter/gather/project` 保留 metadata/validity。 | `tpch_torch/record_batch.py`, `tests/test_record_batch.py` | 还未作为所有 physical operator 的唯一数据边界；当前仍与 `PhysicalTable` / `PhysicalValue` 兼容共存。 |
+| DuckDB → PyTorch dtype mapping | 已支持 BIGINT/INTEGER、FLOAT、DOUBLE、BOOLEAN、DATE、VARCHAR、DECIMAL(p,s)。 | `tpch_torch/backend/type_mapping.py`, `tests/test_type_mapping.py` | 需要补齐更多 DuckDB 类型、nullable/overflow policy、decimal precision 上限策略。 |
+| Filter / projection metadata | scan/filter/gather/projection 已能传播 `PhysicalValue.meta`；DECIMAL 表达式走 metadata-aware path。 | `physical_scan.py`, `physical_expr.py`, `physical_decimal_expr.py`, `tests/test_decimal_physical.py` | projection 压力测试矩阵不足：复杂单表达式嵌套深度、同时多表达式宽度、mixed decimal/literal/float/int 组合仍需系统化覆盖。 |
+| 多精度数值 | 已覆盖 INT64 / FP32 / FP64 / DECIMAL(int64+scale) 第一版。 | `tests/test_p2_multi_precision.py` | 需要明确 DECIMAL overflow/rounding/scale promotion 规则；division 目前 correctness-first 输出 fp64。 |
+| 变长数据 | 已有 string dictionary 动态扩容 helper，并保留已有 dictionary id。 | `encode_strings_dynamic()` | 还缺 offset/value 形式的变长字符串、dictionary merge、LIKE/prefix/substring 的 batch-level 测试矩阵和 GPU offload 口径。 |
+| Sort/searchsorted join | 单列 inner join 已支持 INT64/FP32/FP64/DECIMAL scale alignment；multi-condition join 先候选再 tensor filter。 | `physical_join.py`, `physical_key_ops.py` | 还缺完整 sort-based multi-key join 设计：key packing、payload 多列 late materialization、duplicate/null 矩阵、join-index 输出。 |
+| Group-by / aggregate | SUM/MIN/MAX/AVG 已支持多精度第一版；DECIMAL SUM/MIN/MAX 保留 meta，AVG 输出 fp64。 | `physical_aggregate.py` | 还缺 single group-by 多 key / 多 SUM 系统矩阵；COUNT DISTINCT、STD/VAR、nullable decimal 的完整规则。 |
+| Hash join | 已有 hash-style tensor dictionary/probe prototype。 | `physical_hash_join.py` | 不是成熟 GPU hash table；需要基于 cuDF/TQP/CoddSpeed 调研并实现 build/probe/collision/duplicate 输出索引。 |
+| GPU offload | physical executor 支持 device=`cuda`，已有 Q1-Q22 recipe-disabled smoke。 | runner / physical tests | 需要每个新算子都有 CPU/GPU 双路径测试，断言 tensor device，禁止隐式 CPU fallback。 |
+
+### 2. Filter / Projection + TensorRecordBatch 类型系统任务
+
+#### 2.1 方案
+
+- 以 `TensorRecordBatch` 作为下一阶段 operator 边界：`columns[name] -> torch.Tensor`，`meta[name] -> ColumnMeta`，`validity[name] -> bool mask`。
+- 保留 `PhysicalTable` 兼容层，但新增算子优先以 `TensorRecordBatch` API 实现，再由 physical executor 做适配。
+- DECIMAL 继续采用 `int64 + scale`：
+  - `+/-`：scale 对齐到 max scale。
+  - `*`：scale 相加，precision 保守传播。
+  - `/`：先保持 correctness-first 输出 fp64；若后续需要 SQL decimal rounding，再单独设计。
+- String 变长数据分两层：
+  - 低基数字符串：dictionary encoded int64 ids。
+  - 真正变长字符串：后续引入 `offsets + values` / dictionary + overflow vocabulary，避免 Python object array 进入 hot path。
+
+#### 2.2 设计任务
+
+| ID | 优先级 | 任务 | 产出 |
+| --- | --- | --- | --- |
+| TRB-01 | P0 | 将 filter/projection primitive 抽象成 `TensorRecordBatch -> TensorRecordBatch`，保留 meta/validity。 | `tpch_torch/record_batch_ops.py` 或同等模块；适配 tests。 |
+| TRB-02 | P0 | 建立 DuckDB 类型映射表的完整文档与测试 fixture。 | BIGINT/INTEGER/FLOAT/DOUBLE/DECIMAL/VARCHAR/DATE/BOOLEAN/nullable coverage。 |
+| TRB-03 | P0 | projection arithmetic expression 支持 INT64/FP32/FP64/DECIMAL 混合表达式。 | metadata-aware expression evaluator；scale alignment 测试。 |
+| TRB-04 | P1 | projection 多表达式批量执行接口，避免每个表达式重复 materialize 中间列。 | expression list evaluator；可记录 intermediate reuse。 |
+| TRB-05 | P1 | 明确 DECIMAL overflow / rounding / scale promotion policy。 | README + tests；必要时显式抛错，不静默降级。 |
+| TRB-06 | P1 | string dictionary dynamic expansion 完整化：merge、gather/filter 后 dictionary 稳定、unknown value error policy。 | string dictionary tests。 |
+| TRB-07 | P2 | 引入变长字符串 `offsets + values` 表示，参考 TQP/TQEx 对 variable-length data 的 gap 分析。 | `StringColumnMeta` / storage prototype。 |
+
+#### 2.3 Projection 测试矩阵
+
+| 维度 | 覆盖要求 |
+| --- | --- |
+| dtype | INT64、FP32、FP64、DECIMAL(scale=0/2/4)、mixed literal。 |
+| 表达式深度 | depth=1/2/3/4，例如 `a+b`、`a*(b-c)`、`(a+b)*(c-d)/e`。 |
+| 表达式宽度 | 同时 projection 1 / 4 / 16 / 64 个表达式。 |
+| NULL/validity | no-null、single-null、all-null、mixed validity。 |
+| DECIMAL scale | same scale、different scale、literal scale、乘法 scale 增长、除法 fp64。 |
+| 设备 | CPU + CUDA；CUDA 不可用时测试应显式 skip，不允许静默 fallback。 |
+| oracle | DuckDB SQL baseline + 手写小张量 expected values 双重校验。 |
+| offload 断言 | 输出 tensor device 与输入一致；测试中 monkeypatch/断言禁止 `.cpu().tolist()` 进入 hot path。 |
+
+### 3. 变长数据管理调研与落地任务
+
+#### 3.1 论文/系统参考方向
+
+- TQP/TQEx 关注 SQL irregular data 与 tensor uniform operations 的 gap；变长字符串是典型 gap。
+- TQP++ 强调 compiler lowering 与调度，变长数据应尽量变成 offsets/ids 后再进入 tensor graph。
+- CoddSpeed/cuDF 路线倾向将字符串列用 columnar buffers、offsets、null mask、dictionary/hash 辅助结构表达，避免 Python string 对象参与 GPU kernel。
+
+#### 3.2 方案候选评估
+
+| 方案 | 优点 | 缺点 | 适用范围 |
+| --- | --- | --- | --- |
+| Dictionary ids | 简单、与当前 TPC-H 低基数字符串契合、join/group/filter 易 tensor 化。 | 不适合高基数/任意 substring；dictionary merge 成本需要管理。 | TPC-H flags/status/nation/region/brand/container 等。 |
+| Offsets + values | 接近 Arrow/cuDF 字符串列，可表达任意变长数据。 | 字符串函数需要专门 kernel；PyTorch 原生支持弱。 | 高基数字符串、LIKE/substring 扩展。 |
+| Hybrid dictionary + overflow | 低基数走 ids，高基数或未知值走 offsets。 | metadata 和算子分支更复杂。 | 通用 SQL 前端长期目标。 |
+
+#### 3.3 变长数据 TODO
+
+| ID | 优先级 | 任务 | 测试 |
+| --- | --- | --- | --- |
+| STR-01 | P0 | dictionary column metadata 标准化，记录 vocabulary、unknown policy、nullable。 | encode/filter/gather/project 后 ids 稳定。 |
+| STR-02 | P0 | string equality / IN / prefix / contains / suffix 在 dictionary ids 上的 fast path。 | CPU/GPU 输出一致；dictionary miss 显式错误或全 false。 |
+| STR-03 | P1 | dictionary merge / dynamic expansion 批处理化，避免 repeated Python set/sort hot path。 | 多 batch append 后旧 id 不变。 |
+| STR-04 | P2 | offsets + values prototype，支持 gather/filter/project。 | offset validity、empty string、null string、unicode/basic ASCII。 |
+| STR-05 | P2 | 评估 LIKE/substring 是否用 Triton/CUDA extension/cuDF interop。 | benchmark + correctness。 |
+
+### 4. Sort-based Join / Agg 关系代数算子任务
+
+#### 4.1 Sort join 方案
+
+- 单列 key：继续使用 tensor sort/searchsorted/bucketize 产生 join index pairs。
+- 多列 key：先实现 key packing / lexicographic sort；支持 INT64/FP32/FP64/DECIMAL normalized key。
+- payload：join 算子只输出 `left_rows/right_rows` join index，payload 延迟 materialize。
+- DECIMAL key：join 前 scale alignment；禁止把 DECIMAL 直接截断成 int64 语义外比较。
+- NULL：inner join 默认 NULL 不匹配；后续为 `IS NOT DISTINCT FROM` 单独提供 null-aware key equality。
+
+#### 4.2 Sort join 测试矩阵
+
+| 维度 | 覆盖要求 |
+| --- | --- |
+| join type | inner join 第一阶段；后续扩展 semi/anti/outer。 |
+| key 列数 | 1 / 2 / 4。 |
+| payload 列数 | 0 / 1 / 4 / 16。 |
+| key dtype | INT64、FP32、FP64、DECIMAL same/different scale、string dictionary ids。 |
+| 数据形态 | unique build、duplicate build、duplicate probe、empty side、all unmatched、all matched。 |
+| 输出 | left/right join indices 正确；payload gather 后与 DuckDB baseline 一致。 |
+| device | CPU + CUDA；输出 index tensors 在目标 device。 |
+
+#### 4.3 Aggregate 方案
+
+- single group-by 第一阶段：支持 1 个 group key + N 个 SUM。
+- 后续扩展：multi-key group-by、COUNT/MIN/MAX/AVG/COUNT DISTINCT、STD/VAR。
+- group key dtype：INT64/FP32/FP64/DECIMAL/string dictionary；DECIMAL key 需要 normalized comparable tensor。
+- aggregation dtype：SUM 保持 input dtype；DECIMAL SUM 保留 int64+scale；AVG 输出 fp64。
+
+#### 4.4 Aggregate 测试矩阵
+
+| 维度 | 覆盖要求 |
+| --- | --- |
+| group key 列数 | 1 / 2 / 4。 |
+| group key dtype | INT64、FP32、FP64、DECIMAL、string dictionary。 |
+| SUM 个数 | 1 / 4 / 16。 |
+| SUM dtype | INT64、FP32、FP64、DECIMAL。 |
+| 数据形态 | sorted keys、unsorted keys、single group、all unique、empty input、nullable values。 |
+| oracle | DuckDB group-by baseline + 手写 scatter expected。 |
+| offload | group ids、scatter/index_add 在 target device；禁止 row-level Python accumulation。 |
+
+### 5. GPU Hash Join / CoddSpeed-cuDF 方向任务
+
+#### 5.1 方案
+
+- 第一阶段保持 correctness-first tensor API：输入 key columns，输出 `left_rows/right_rows` join indices。
+- 第二阶段实现真正 GPU hash join：
+  - build side hash bucket / offset / next arrays 或 sort-free dictionary ids。
+  - probe side parallel lookup。
+  - duplicate key 使用 prefix sum / offsets 生成 many-to-many output。
+  - payload 延迟 materialize。
+- 与 CoddSpeed 对齐：把 hash join 作为可替换算子，planner/strategy 根据 cardinality、collision degree、sorted/unique metadata、device 选择 sort join 或 hash join。
+- 与 cuDF 对齐：学习 columnar buffers、null mask、hash partition/probe、RMM-style memory planning；本项目不直接依赖 cuDF 作为 fallback，除非明确引入 interop 实验。
+
+#### 5.2 Hash join TODO
+
+| ID | 优先级 | 任务 | 测试 |
+| --- | --- | --- | --- |
+| HJ-01 | P0 | 明确 `hash_join_indices_for_values()` API：single key、多 dtype、返回 join indices。 | INT64/FP32/FP64/DECIMAL/string ids。 |
+| HJ-02 | P0 | hash join 与 sort join 输出顺序 policy 文档化。 | 与 DuckDB 比较时按 SQL order 或排序后比较。 |
+| HJ-03 | P1 | 多 key hash join：key normalization + composite hash。 | key 列数 1/2/4。 |
+| HJ-04 | P1 | duplicate build/probe 的 many-to-many output prefix sum。 | duplicate 矩阵。 |
+| HJ-05 | P1 | CUDA device test：bucket/probe/output indices 全部在 GPU。 | CUDA-only tests，缺 CUDA skip。 |
+| HJ-06 | P2 | 自适应 join strategy：sorted/unique 走 lookup，低重复走 sort，高重复/大表走 hash。 | strategy selection unit tests + benchmark。 |
+| HJ-07 | P2 | 调研是否用 Triton/CUDA extension 实现核心 hash table。 | microbenchmark + correctness。 |
+
+### 6. 当前优先级 TODO 汇总
+
+| 优先级 | TODO | 完成标准 |
+| --- | --- | --- |
+| P0 | Projection 深度×宽度×多精度测试矩阵。 | CPU/GPU 均通过；覆盖 depth=1..4、width=1/4/16/64、INT64/FP32/FP64/DECIMAL。 |
+| P0 | `TensorRecordBatch` filter/projection primitive 与 physical executor 适配。 | 新算子以 `TensorRecordBatch` 为边界；现有 physical tests 不回退。 |
+| P0 | Sort join 完整 key/payload 矩阵。 | 指定 key/payload 列数和 dtype 后可生成参数化测试。 |
+| P0 | Single group-by SUM 完整矩阵。 | group key 列数/type、SUM 个数/type 参数化。 |
+| P0 | CPU/GPU offload 断言规范。 | 每个新增算子测试 output.device；CUDA 不可用显式 skip。 |
+| P1 | 变长 string dictionary 管理完善。 | dictionary merge/filter/gather/project 稳定；string predicate fast path。 |
+| P1 | 多 key sort join 与 multi-key group-by。 | lexicographic/key-packing 正确，DuckDB baseline 通过。 |
+| P1 | Hash join multi-key / duplicate 输出。 | many-to-many join index 正确，CPU/GPU 一致。 |
+| P1 | DECIMAL overflow/rounding policy。 | 超界显式错误或文档化规则；测试覆盖。 |
+| P2 | offsets+values 变长字符串 prototype。 | 不依赖 Python string object hot path。 |
+| P2 | 自适应 sort/hash join strategy。 | 根据 metadata/cardinality 选择策略，有 benchmark 记录。 |
+| P2 | compressed alignment / compressed join-agg。 | 与 P3 roadmap 合并，保留 output encoding，不静默 materialize。 |
