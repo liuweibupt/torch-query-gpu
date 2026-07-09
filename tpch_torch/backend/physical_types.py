@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
+from collections.abc import Iterator
 from typing import Any, Mapping, Sequence
 
 import torch
@@ -20,7 +21,7 @@ from tpch_torch.record_batch import (
 
 
 @dataclass(frozen=True)
-class PhysicalValue:
+class TensorColumn:
     """A tensor column or scalar literal plus optional decoding metadata."""
 
     tensor: torch.Tensor | None = None
@@ -41,9 +42,9 @@ class PhysicalValue:
             raise TypeError("physical value is a scalar literal, not a tensor column")
         return self.tensor
 
-    def gather(self, indices: torch.Tensor) -> "PhysicalValue":
+    def gather(self, indices: torch.Tensor) -> "TensorColumn":
         valid = None if self.valid is None else self.valid.index_select(0, indices)
-        return PhysicalValue(
+        return TensorColumn(
             tensor=self.require_tensor().index_select(0, indices),
             dictionary=self.dictionary,
             is_date=self.is_date,
@@ -51,12 +52,12 @@ class PhysicalValue:
             meta=self.meta,
         )
 
-    def gather_optional(self, indices: torch.Tensor, valid: torch.Tensor) -> "PhysicalValue":
+    def gather_optional(self, indices: torch.Tensor, valid: torch.Tensor) -> "TensorColumn":
         if valid.dtype is not torch.bool:
             raise TypeError("optional gather validity mask must be boolean")
         safe_indices = torch.where(valid, indices, torch.zeros_like(indices))
         base_valid = self.valid.index_select(0, safe_indices) if self.valid is not None else valid
-        return PhysicalValue(
+        return TensorColumn(
             tensor=self.require_tensor().index_select(0, safe_indices),
             dictionary=self.dictionary,
             is_date=self.is_date,
@@ -64,9 +65,9 @@ class PhysicalValue:
             meta=self.meta,
         )
 
-    def filter(self, mask: torch.Tensor) -> "PhysicalValue":
+    def filter(self, mask: torch.Tensor) -> "TensorColumn":
         valid = None if self.valid is None else self.valid[mask]
-        return PhysicalValue(
+        return TensorColumn(
             tensor=self.require_tensor()[mask],
             dictionary=self.dictionary,
             is_date=self.is_date,
@@ -81,8 +82,8 @@ class PhysicalValue:
         *,
         sorted_non_decreasing: bool | None = None,
         unique: bool | None = None,
-    ) -> "PhysicalValue":
-        return PhysicalValue(
+    ) -> "TensorColumn":
+        return TensorColumn(
             tensor=self.tensor,
             dictionary=self.dictionary,
             is_date=self.is_date,
@@ -114,21 +115,70 @@ class PhysicalValue:
         return int(raw)
 
 
+class _ColumnMapping(Mapping[str, TensorColumn]):
+    """Canonical column mapping with alias-aware lookup."""
+
+    def __init__(self, columns: Mapping[str, TensorColumn], aliases: Mapping[str, str]) -> None:
+        self._columns = MappingProxyType(dict(columns))
+        self._aliases = MappingProxyType(dict(aliases))
+
+    def __getitem__(self, key: str) -> TensorColumn:
+        if key in self._columns:
+            return self._columns[key]
+        canonical = self._aliases.get(key, key)
+        return self._columns[canonical]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._columns)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and (key in self._columns or key in self._aliases)
+
+    def canonical_name(self, key: str) -> str:
+        return key if key in self._columns else self._aliases.get(key, key)
+
+
+def _canonicalize_columns(
+    columns: dict[str, TensorColumn],
+    order: tuple[str, ...],
+    explicit_aliases: dict[str, str],
+) -> tuple[dict[str, TensorColumn], dict[str, str]]:
+    canonical = {name: columns[name] for name in order if name in columns}
+    aliases = dict(explicit_aliases)
+    id_to_name = {id(value): name for name, value in canonical.items()}
+    for name, value in columns.items():
+        if name in canonical:
+            continue
+        target = aliases.get(name) or id_to_name.get(id(value))
+        if target is None:
+            canonical[name] = value
+            id_to_name[id(value)] = name
+            continue
+        if target != name:
+            aliases[name] = target
+    return canonical, aliases
+
+
 @dataclass(frozen=True)
-class PhysicalTable:
+class TensorTable:
     """A relation flowing between interpreted DuckDB physical nodes."""
 
     name: str
-    columns: Mapping[str, PhysicalValue]
+    columns: Mapping[str, TensorColumn]
     order: tuple[str, ...]
     row_count: int
     batch: TensorRecordBatch | None = None
+    aliases: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
-        columns = dict(self.columns)
         order = tuple(self.order)
-        object.__setattr__(self, "columns", MappingProxyType(columns))
+        columns, aliases = _canonicalize_columns(dict(self.columns), order, dict(self.aliases or {}))
+        object.__setattr__(self, "columns", _ColumnMapping(columns, aliases))
         object.__setattr__(self, "order", order)
+        object.__setattr__(self, "aliases", MappingProxyType(aliases))
         if self.batch is None:
             object.__setattr__(self, "batch", _batch_from_ordered_values(columns, order, self.row_count))
 
@@ -140,20 +190,18 @@ class PhysicalTable:
         *,
         order: Sequence[str] | None = None,
         aliases: Mapping[str, str] | None = None,
-    ) -> "PhysicalTable":
+    ) -> "TensorTable":
         table_order = tuple(order or batch.columns.keys())
         columns = _physical_values_from_batch(batch, table_order)
-        for alias, source in (aliases or {}).items():
-            columns[alias] = columns[source]
-        return cls(name, columns, table_order, batch.row_count, batch)
+        return cls(name, columns, table_order, batch.row_count, batch, aliases)
 
-    def value_at(self, index: int) -> PhysicalValue:
+    def value_at(self, index: int) -> TensorColumn:
         try:
             return self.columns[self.order[index]]
         except IndexError as exc:
             raise KeyError(f"projection index out of range: #{index}") from exc
 
-    def value_named(self, name: str) -> PhysicalValue:
+    def value_named(self, name: str) -> TensorColumn:
         candidates = _name_candidates(name)
         for candidate in candidates:
             if candidate in self.columns:
@@ -163,54 +211,55 @@ class PhysicalTable:
             return self.columns[unique_match]
         raise KeyError(f"unknown physical column: {name}")
 
-    def filter(self, mask: torch.Tensor, name: str | None = None) -> "PhysicalTable":
+    def filter(self, mask: torch.Tensor, name: str | None = None) -> "TensorTable":
         if mask.dtype is not torch.bool:
             raise TypeError("physical filter mask must be boolean")
         if mask.ndim != 1 or mask.numel() != self.row_count:
             raise ValueError("physical filter mask must match row count")
         row_count = int(mask.sum().cpu().item())
-        return PhysicalTable(
+        return TensorTable(
             name or self.name,
             _transform_unique_values(self.columns, lambda value: value.filter(mask)),
             self.order,
             row_count,
             self.batch.filter(mask) if self.batch is not None else None,
+            self.aliases,
         )
 
-    def gather(self, indices: torch.Tensor, name: str | None = None) -> "PhysicalTable":
+    def gather(self, indices: torch.Tensor, name: str | None = None) -> "TensorTable":
         if indices.dtype != torch.int64:
             indices = indices.to(dtype=torch.int64)
-        return PhysicalTable(
+        return TensorTable(
             name or self.name,
             _transform_unique_values(self.columns, lambda value: value.gather(indices)),
             self.order,
             int(indices.numel()),
             self.batch.gather(indices) if self.batch is not None else None,
+            self.aliases,
         )
 
     @classmethod
     def projected(
         cls,
         name: str,
-        items: Sequence[tuple[str, PhysicalValue, Sequence[str]]],
+        items: Sequence[tuple[str, TensorColumn, Sequence[str]]],
         row_count: int,
-    ) -> "PhysicalTable":
-        columns: dict[str, PhysicalValue] = {}
+    ) -> "TensorTable":
+        columns: dict[str, TensorColumn] = {}
+        alias_map: dict[str, str] = {}
         order: list[str] = []
         for index, (raw_name, value, aliases) in enumerate(items):
             column_name = _unique_name(raw_name, columns, index)
             columns[column_name] = value
             order.append(column_name)
             for alias in aliases:
-                if _is_projection_position(alias):
-                    columns[alias] = value
-                else:
-                    columns.setdefault(alias, value)
-        return cls(name, columns, tuple(order), row_count)
+                if alias != column_name:
+                    alias_map[alias] = column_name
+        return cls(name, columns, tuple(order), row_count, aliases=alias_map)
 
 
 def _batch_from_ordered_values(
-    columns: Mapping[str, PhysicalValue],
+    columns: Mapping[str, TensorColumn],
     order: tuple[str, ...],
     row_count: int,
 ) -> TensorRecordBatch | None:
@@ -234,14 +283,14 @@ def _batch_from_ordered_values(
 def _physical_values_from_batch(
     batch: TensorRecordBatch,
     order: tuple[str, ...],
-) -> dict[str, PhysicalValue]:
+) -> dict[str, TensorColumn]:
     return {name: _physical_value_from_batch(batch, name) for name in order}
 
 
-def _physical_value_from_batch(batch: TensorRecordBatch, name: str) -> PhysicalValue:
+def _physical_value_from_batch(batch: TensorRecordBatch, name: str) -> TensorColumn:
     storage = batch.storage[name]
     meta = batch.meta[name]
-    return PhysicalValue(
+    return TensorColumn(
         tensor=storage.data,
         dictionary=storage.dictionary,
         is_date=meta.logical_dtype == LogicalDType.DATE,
@@ -250,7 +299,7 @@ def _physical_value_from_batch(batch: TensorRecordBatch, name: str) -> PhysicalV
     )
 
 
-def _storage_from_physical_value(value: PhysicalValue) -> ColumnStorage:
+def _storage_from_physical_value(value: TensorColumn) -> ColumnStorage:
     tensor = value.require_tensor()
     if value.dictionary is not None:
         return ColumnStorage.dictionary_ids(tensor, value.dictionary, validity=value.valid)
@@ -259,7 +308,7 @@ def _storage_from_physical_value(value: PhysicalValue) -> ColumnStorage:
     return ColumnStorage.fixed(tensor, validity=value.valid)
 
 
-def _type_from_physical_value(name: str, value: PhysicalValue) -> ColumnType:
+def _type_from_physical_value(name: str, value: TensorColumn) -> ColumnType:
     if value.meta is not None:
         return ColumnType.from_column_meta(name, value.meta)
     tensor = value.require_tensor()
@@ -272,7 +321,7 @@ def _type_from_physical_value(name: str, value: PhysicalValue) -> ColumnType:
     return ColumnType.date(name) if value.is_date else ColumnType.int64(name)
 
 
-def materialize_literal(value: PhysicalValue, row_count: int, device: torch.device) -> PhysicalValue:
+def materialize_literal(value: TensorColumn, row_count: int, device: torch.device) -> TensorColumn:
     """Broadcast a scalar literal into a tensor column."""
 
     if value.tensor is not None:
@@ -285,10 +334,10 @@ def materialize_literal(value: PhysicalValue, row_count: int, device: torch.devi
         tensor = torch.full((row_count,), float(value.literal), dtype=torch.float64, device=device)
     else:
         raise TypeError(f"cannot materialize non-numeric literal: {value.literal!r}")
-    return PhysicalValue(tensor=tensor)
+    return TensorColumn(tensor=tensor)
 
 
-def table_device(table: PhysicalTable) -> torch.device:
+def table_device(table: TensorTable) -> torch.device:
     for value in table.columns.values():
         if value.tensor is not None:
             return value.tensor.device
@@ -296,11 +345,11 @@ def table_device(table: PhysicalTable) -> torch.device:
 
 
 def _transform_unique_values(
-    columns: Mapping[str, PhysicalValue],
+    columns: Mapping[str, TensorColumn],
     transform,
-) -> dict[str, PhysicalValue]:
-    transformed: dict[int, PhysicalValue] = {}
-    result: dict[str, PhysicalValue] = {}
+) -> dict[str, TensorColumn]:
+    transformed: dict[int, TensorColumn] = {}
+    result: dict[str, TensorColumn] = {}
     for name, value in columns.items():
         key = id(value)
         if key not in transformed:
@@ -318,13 +367,13 @@ def _name_candidates(name: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
-def _unique_name(name: str, columns: Mapping[str, PhysicalValue], index: int) -> str:
+def _unique_name(name: str, columns: Mapping[str, TensorColumn], index: int) -> str:
     if name not in columns:
         return name
     return f"{name}__{index}"
 
 
-def _unique_base_match(columns: Mapping[str, PhysicalValue], candidates: tuple[str, ...]) -> str | None:
+def _unique_base_match(columns: Mapping[str, TensorColumn], candidates: tuple[str, ...]) -> str | None:
     matches = [
         name
         for name in columns
@@ -344,3 +393,8 @@ def _strip_unique_suffix(name: str) -> str:
 
 def _is_projection_position(name: str) -> bool:
     return name.startswith("#") and name[1:].isdigit()
+
+
+# Backward-compatible names for older call sites.
+PhysicalValue = TensorColumn
+PhysicalTable = TensorTable

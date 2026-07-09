@@ -80,17 +80,40 @@ def fetch_physical_table(
     order = order_columns or (_ROW_ID,)
     if not order_columns:
         values[_ROW_ID] = values[_DUCKDB_ROW_ID]
+    canonical_names = _scan_canonical_names(fetched_columns, values)
     batch = _scan_batch(
         values,
         batch_types,
-        order,
+        canonical_names,
         row_count,
         device,
         source_offset=offset,
         chunk_size=chunk_size or row_count,
         chunk_index=_scan_chunk_index(offset, chunk_size or row_count, chunk_index),
     )
-    return PhysicalTable(table_name, values, order, row_count, batch)
+    aliases = {f"{table_name}.{column}": column for column in fetched_columns if column in values}
+    if _DUCKDB_ROW_ID in values and _DUCKDB_ROW_ID in order:
+        aliases[f"{table_name}.{_DUCKDB_ROW_ID}"] = _DUCKDB_ROW_ID
+    return PhysicalTable(
+        table_name,
+        {name: values[name] for name in canonical_names},
+        order,
+        row_count,
+        batch,
+        aliases,
+    )
+
+
+def _scan_canonical_names(
+    fetched_columns: tuple[str, ...],
+    values: dict[str, PhysicalValue],
+) -> tuple[str, ...]:
+    names = list(fetched_columns)
+    if _DUCKDB_ROW_ID in values:
+        names.append(_DUCKDB_ROW_ID)
+    if _ROW_ID in values and _ROW_ID not in names:
+        names.append(_ROW_ID)
+    return tuple(dict.fromkeys(name for name in names if name in values))
 
 
 def fetch_physical_table_chunks(

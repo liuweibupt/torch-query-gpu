@@ -10,6 +10,13 @@ import torch
 from tpch_torch.backend.physical_aliases import qualified_aliases_for_join_side
 from tpch_torch.backend.physical_decimal_expr import decimal_comparison_tensors
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_join_aliases import (
+    existing_aliases as _existing_aliases,
+    has_positional_reference as _has_positional_reference,
+    matches_any_key as _matches_any_key,
+    same_column as _same_column,
+    unqualified as _unqualified,
+)
 from tpch_torch.backend.physical_key_ops import (
     comparable_key_tensors,
     comparable_value_tensors,
@@ -423,14 +430,16 @@ def _refresh_inner_join_key_aliases(
     right_keys: Sequence[str],
 ) -> PhysicalTable:
     columns = dict(table.columns)
+    aliases = dict(getattr(table, "aliases", {}) or {})
     for left_key, right_key in zip(left_keys, right_keys):
-        _assign_equivalent_key_alias(columns, table, left_key, right_key)
-        _assign_equivalent_key_alias(columns, table, right_key, left_key)
-    return PhysicalTable(table.name, columns, table.order, table.row_count)
+        _assign_equivalent_key_alias(columns, aliases, table, left_key, right_key)
+        _assign_equivalent_key_alias(columns, aliases, table, right_key, left_key)
+    return PhysicalTable(table.name, columns, table.order, table.row_count, table.batch, aliases)
 
 
 def _assign_equivalent_key_alias(
     columns: dict[str, PhysicalValue],
+    aliases: dict[str, str],
     table: PhysicalTable,
     source_key: str,
     alias_key: str,
@@ -438,7 +447,9 @@ def _assign_equivalent_key_alias(
     source_name = _matching_order_name(table, source_key)
     if source_name is None:
         return
-    columns[_unqualified(alias_key)] = table.columns[source_name]
+    alias_name = _unqualified(alias_key)
+    columns[alias_name] = table.columns[source_name]
+    aliases.pop(alias_name, None)
 
 
 def _matching_order_name(table: PhysicalTable, key: str) -> str | None:
@@ -485,34 +496,3 @@ def _join_aliases(
         aliases.extend(other for own, other in zip(own_keys, other_keys) if _same_column(column, own))
     aliases.extend(qualified_aliases_for_join_side(source_sql, table.name, column, own_keys, other_keys))
     return tuple(dict.fromkeys(aliases))
-
-
-def _existing_aliases(table: PhysicalTable, value: PhysicalValue) -> tuple[str, ...]:
-    return tuple(name for name, candidate in table.columns.items() if candidate is value)
-
-
-def _matches_any_key(column: str, keys: Sequence[str]) -> bool:
-    return any(_same_column(column, key) for key in keys)
-
-
-def _same_column(left: str, right: str) -> bool:
-    left_name = _strip_unique_suffix(_unqualified(left))
-    right_name = _strip_unique_suffix(_unqualified(right))
-    return left == right or left_name == right_name or left_name in _identifier_tokens(right)
-
-
-def _unqualified(expression: str) -> str:
-    return expression.replace('"', "").strip().rsplit(".", 1)[-1]
-
-
-def _strip_unique_suffix(name: str) -> str:
-    base, separator, suffix = name.rpartition("__")
-    return base if separator and suffix.isdigit() else name
-
-
-def _identifier_tokens(expression: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[A-Za-z_][\w]*", expression.replace('"', "")))
-
-
-def _has_positional_reference(expressions: Sequence[str]) -> bool:
-    return any(re.search(r"#\d+", expression) is not None for expression in expressions)

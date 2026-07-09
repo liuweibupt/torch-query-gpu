@@ -375,3 +375,11 @@ class TensorPrimitivePlan:
 - `fetch_physical_table()` 现在从 scan 入口构造 `TensorRecordBatch`，保留 DuckDB type、storage kind、`BatchMeta.source_offset/chunk_size/chunk_index/device`。
 - 新增 `fetch_physical_table_chunks(..., chunk_size=N)`，用于显式 chunk scan；当前 partitionable executor 仍可继续使用 `scan_range`，后续可统一到 chunk API。
 - 当前阶段仍保留 `PhysicalValue` 作为 compatibility façade；下一阶段目标是让 expression/join/agg 直接消费 `TensorRecordBatch`。
+
+## 11. 2026-07-09 深化实现状态：TensorTable/TensorColumn 替换
+
+- 新 runtime 类型为 `TensorTable` / `TensorColumn`；旧 `PhysicalTable` / `PhysicalValue` 仅作为 compatibility alias 保留。
+- `TensorTable.columns` 现在是 alias-aware mapping：迭代只返回 canonical batch columns，`__getitem__` 可解析 alias，且 canonical 名优先于 alias，避免 self-join 中 alias 覆盖真实列。
+- `fetch_physical_table()` 改为构造 canonical scan columns + alias map；qualified names 不再复制为额外物理列。
+- projection/join alias helper 已改为 alias-aware，修复 `COUNT(DISTINCT ...)`、self join `n1/n2`、等价 join key alias 的回归。
+- 下一步是把 expression/join/agg 函数签名从 `PhysicalTable` 命名迁移为 `TensorTable`，并逐步删除 compatibility alias。

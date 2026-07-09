@@ -77,3 +77,19 @@ def test_fetch_physical_table_chunks_emits_tensor_record_batches_with_chunk_indi
     assert [chunk.batch.batch_meta.chunk_index for chunk in chunks] == [0, 1, 2]
     assert [chunk.batch.batch_meta.source_offset for chunk in chunks] == [0, 2, 4]
     assert [chunk.batch.row_count for chunk in chunks] == [2, 2, 1]
+
+
+def test_physical_scan_uses_tensor_table_alias_map_without_duplicate_alias_columns():
+    from tpch_torch.backend.physical_types import TensorTable
+
+    con = duckdb.connect()
+    con.execute("create table t(id bigint, amount decimal(15,2))")
+    con.execute("insert into t values (1, 10.00), (2, 20.00)")
+
+    table = fetch_physical_table(con, "t", ("id", "amount"), ("id", "amount"), "cpu")
+
+    assert isinstance(table, TensorTable)
+    assert set(table.batch.columns) == {"id", "amount", "rowid"}
+    assert set(table.columns) == {"id", "amount", "rowid"}
+    assert table.aliases == {"t.id": "id", "t.amount": "amount"}
+    assert table.value_named("t.amount").require_tensor().tolist() == [1000, 2000]

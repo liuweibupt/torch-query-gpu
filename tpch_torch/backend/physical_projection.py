@@ -177,8 +177,20 @@ def _is_split_scalar_subquery_guard(expression: str) -> bool:
     return "scalar subqueries can only return a single row" in expression and " ELSE " not in expression
 
 
+def _all_column_names(table: PhysicalTable) -> tuple[str, ...]:
+    aliases = getattr(table, "aliases", {}) or {}
+    return tuple(dict.fromkeys((*tuple(table.columns), *tuple(aliases))))
+
+
 def _existing_aliases(table: PhysicalTable, value: PhysicalValue) -> tuple[str, ...]:
-    return tuple(name for name, candidate in table.columns.items() if candidate is value)
+    names = []
+    for name in _all_column_names(table):
+        try:
+            if table.columns[name] is value:
+                names.append(name)
+        except KeyError:
+            continue
+    return tuple(dict.fromkeys(names))
 
 
 def _preferred_projection_ref_name(table: PhysicalTable, index: int, value: PhysicalValue) -> str:
@@ -217,7 +229,7 @@ def _equivalent_key_aliases(
     output_tail = _tail_base(output_base)
     if not output_tail.endswith("key"):
         return ()
-    for alias in _without_positional(tuple(table.columns)):
+    for alias in _without_positional(_all_column_names(table)):
         alias_base = _alias_base(alias)
         if alias_base == output_base or _tail_base(alias_base) == output_tail:
             aliases.append(alias)
@@ -286,7 +298,7 @@ def _select_alias_matching_expression(select_aliases: dict[str, str], expression
 
 def _matching_expression_alias(table: PhysicalTable, expression: str) -> str | None:
     target = _normalize_expression(expression)
-    for candidate in table.columns:
+    for candidate in _all_column_names(table):
         if _is_projection_position(candidate):
             continue
         if _normalize_expression(candidate) == target:
@@ -328,7 +340,7 @@ def _matching_aggregate_alias(table: PhysicalTable, expression: str) -> str | No
     target = _aggregate_signature(expression)
     if target is None:
         return None
-    for candidate in table.columns:
+    for candidate in _all_column_names(table):
         if _aggregate_signature(candidate) == target:
             return candidate
     return None
@@ -347,7 +359,12 @@ def _aggregate_signature(expression: str) -> tuple[str, str] | None:
     match = re.fullmatch(r"\s*(sum|avg|min|max|count)\s*\((.*)\)\s*", expression, re.I | re.S)
     if match is None:
         return None
-    return match.group(1).lower(), _normalize_expression(match.group(2))
+    return match.group(1).lower(), _normalize_expression(_strip_distinct_prefix(match.group(2)))
+
+
+def _strip_distinct_prefix(expression: str) -> str:
+    stripped = expression.strip()
+    return stripped[8:].strip() if stripped.upper().startswith("DISTINCT ") else expression
 
 
 def _strip_cast_wrapper(expression: str) -> str:

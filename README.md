@@ -771,3 +771,14 @@ AST 设计要求：
 | 兼容性 | Q1-Q22 physical / partitionable / Q17 回归仍走原 executor API。 | 这是 “TRB-backed façade” 阶段，还不是删除 `PhysicalValue` 的最终形态。 |
 
 新增测试：`tests/test_physical_record_batch_backing.py`；全量测试当前为 353 个。
+
+### 9. 2026-07-09 深化：TensorTable/TensorColumn 替换旧 physical 数据结构
+
+| 方向 | 已实现 | 说明 |
+| --- | --- | --- |
+| 新 runtime 类型 | 新增/启用 `TensorTable`、`TensorColumn`，`PhysicalTable/PhysicalValue` 仅作为兼容别名。 | backend hot path 的表结构语义改为 TensorRecordBatch-backed table/column。 |
+| Alias 存储 | `TensorTable.columns` 迭代只返回 canonical batch 列；qualified/positional/semantic alias 进入 `TensorTable.aliases`。 | `table.columns[alias]` 和 `value_named(alias)` 仍可解析，但不会把 `table.column` 复制成额外物理列。 |
+| Scan 重写 | `fetch_physical_table()` 直接构造 canonical scan batch + alias map。 | fetched/filter-needed 列、rowid、chunk metadata 都在 batch/table 中保留；`fetch_physical_table_chunks()` 沿用同一结构。 |
+| Join/projection alias 修复 | projection/join helper 改为 alias-aware，支持 canonical 优先、alias 次之。 | 覆盖 Q16 `COUNT(DISTINCT ...)`、self join `n1/n2` alias、等价 join key alias。 |
+
+新增/更新测试后全量测试当前为 354 个。
