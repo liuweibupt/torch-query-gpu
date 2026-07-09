@@ -9,7 +9,7 @@ from typing import Iterable
 import numpy as np
 import torch
 
-from tpch_torch.record_batch import ColumnMeta, LogicalDType
+from tpch_torch.record_batch import ColumnMeta, ColumnType, LogicalDType
 
 DECIMAL_BASE = 10
 _DECIMAL_RE = re.compile(r"DECIMAL\((\d+),(\d+)\)", re.I)
@@ -37,6 +37,35 @@ def column_meta_from_duckdb_type(duckdb_type: str, *, nullable: bool = False) ->
     if normalized in {"VARCHAR", "TEXT", "CHAR"} or normalized.startswith("VARCHAR"):
         return ColumnMeta.string_dict(nullable=nullable)
     return ColumnMeta(LogicalDType.UNKNOWN, torch.float64, nullable=nullable)
+
+
+def column_type_from_duckdb_type(
+    name: str,
+    duckdb_type: str,
+    *,
+    nullable: bool = False,
+) -> ColumnType:
+    """Return the v2 logical type while preserving the DuckDB type spelling."""
+
+    normalized = duckdb_type.strip().upper()
+    decimal_match = _DECIMAL_RE.fullmatch(normalized)
+    if decimal_match is not None:
+        precision = int(decimal_match.group(1))
+        scale = int(decimal_match.group(2))
+        return ColumnType.decimal(name, precision=precision, scale=scale, nullable=nullable)
+    if normalized in {"BIGINT", "INTEGER", "INT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER"}:
+        return ColumnType.int64(name, nullable=nullable)
+    if normalized in {"FLOAT", "REAL"}:
+        return ColumnType.fp32(name, nullable=nullable)
+    if normalized in {"DOUBLE", "DOUBLE PRECISION"}:
+        return ColumnType.fp64(name, nullable=nullable)
+    if normalized == "BOOLEAN":
+        return ColumnType.boolean(name, nullable=nullable)
+    if normalized == "DATE":
+        return ColumnType.date(name, nullable=nullable)
+    if normalized in {"VARCHAR", "TEXT", "CHAR"} or normalized.startswith("VARCHAR"):
+        return ColumnType.varchar(name, nullable=nullable)
+    return ColumnType(name, normalized or "UNKNOWN", normalized or "UNKNOWN", LogicalDType.UNKNOWN, nullable)
 
 
 def encode_decimal_array(values: Iterable[object] | np.ndarray, meta: ColumnMeta, device: str) -> torch.Tensor:

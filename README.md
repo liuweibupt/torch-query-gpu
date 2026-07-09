@@ -749,3 +749,14 @@ AST 设计要求：
 | P2 | offsets+values 变长字符串 prototype。 | 不依赖 Python string object hot path。 |
 | P2 | 自适应 sort/hash join strategy。 | 根据 metadata/cardinality 选择策略，有 benchmark 记录。 |
 | P2 | compressed alignment / compressed join-agg。 | 与 P3 roadmap 合并，保留 output encoding，不静默 materialize。 |
+
+### 7. 2026-07-09 实现进展：P0/P1/P2 第一版
+
+| 阶段 | 已实现 | 仍需继续 |
+| --- | --- | --- |
+| P0 ABI | `ColumnType`、`ColumnStorage`、`BatchMeta`、`AllocationOwner`、`StorageKind`；`TensorRecordBatch.from_storages()`；v1 `ColumnMeta` 兼容；DuckDB type → `ColumnType`。 | `physical_scan.py` 还未默认直接返回 `TensorRecordBatch v2`；当前仍通过 adapter/兼容字段与 `PhysicalTable` 并存。 |
+| P0 filter/projection AST/DAG | 新增 `tpch_torch/backend/expression_plan.py`，支持 programmatic `TypedExpr` AST、constant folding、CSE、DECIMAL add/sub scale alignment、tensor primitive plan execution。 | DuckDB expression string/JSON → TypedExpr binder 尚未替换 `physical_expr.py`；predicate normalization/validity propagation/fusion 仍待做。 |
+| P1 变长数据 + lifecycle | 新增 UTF8 `offsets + chars + validity` storage prototype；区分 empty string 与 NULL；`filter/gather/project` 可处理 CPU UTF8；owner/view 元数据字段已预留。 | UTF8 CUDA compaction 显式 `NotImplementedError`，没有静默 CPU fallback；dictionary merge/unknown policy/LIKE kernel 仍待做。 |
+| P2 typed batch join/agg | 新增 `batch_join.inner_join_indices_batch()` 与 `batch_aggregate.grouped_sum_batch()`；typed batch 单 key inner join、single group-by SUM 可运行并保留 DECIMAL scale/chunk metadata。 | join/agg 尚未替换 physical executor 默认路径；multi-key decimal normalization、outer/semi/anti/hash join、COUNT/MIN/MAX/AVG typed-batch API 仍待做。 |
+
+新增测试：`tests/test_record_batch_v2.py`、`tests/test_expression_ast_plan.py`、`tests/test_typed_batch_join_agg.py`；全量测试当前为 350 个。

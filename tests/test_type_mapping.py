@@ -63,3 +63,21 @@ def test_dynamic_string_dictionary_preserves_existing_ids():
 
     assert meta.dictionary == ("B", "A", "C")
     assert tensor.tolist() == [2, 0]
+
+
+def test_column_type_from_duckdb_type_preserves_duckdb_repr_and_decimal_scale():
+    from tpch_torch.backend.type_mapping import column_type_from_duckdb_type
+    from tpch_torch.record_batch import LogicalDType
+
+    amount = column_type_from_duckdb_type("amount", "DECIMAL(15,2)", nullable=True)
+    text = column_type_from_duckdb_type("comment", "VARCHAR", nullable=False)
+
+    assert amount.name == "amount"
+    assert amount.duckdb_type_id == "DECIMAL"
+    assert amount.duckdb_type_repr == "DECIMAL(15,2)"
+    assert amount.logical_dtype == LogicalDType.DECIMAL
+    assert amount.precision == 15
+    assert amount.scale == 2
+    assert amount.nullable is True
+    assert text.duckdb_type_id == "VARCHAR"
+    assert text.logical_dtype == LogicalDType.STRING

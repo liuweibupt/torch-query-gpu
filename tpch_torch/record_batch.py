@@ -1,148 +1,189 @@
-"""Typed tensor record batches used as the P1 column metadata substrate."""
+"""Typed tensor record batches used as the columnar metadata substrate."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
-from enum import Enum
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import torch
 
-
-class LogicalDType(str, Enum):
-    INT64 = "int64"
-    FP32 = "fp32"
-    FP64 = "fp64"
-    DECIMAL = "decimal"
-    STRING_DICT = "string_dict"
-    BOOL = "bool"
-    DATE = "date"
-    UNKNOWN = "unknown"
+from tpch_torch.record_batch_storage import ColumnStorage
+from tpch_torch.record_batch_types import (
+    AllocationOwner,
+    ColumnMeta,
+    ColumnType,
+    LogicalDType,
+    StorageKind,
+)
 
 
 @dataclass(frozen=True)
-class ColumnMeta:
-    """Logical and physical metadata for one tensor column."""
+class BatchMeta:
+    row_count: int
+    chunk_size: int
+    chunk_index: int
+    source_offset: int
+    device: torch.device
+    schema_version: int = 2
 
-    logical_dtype: LogicalDType
-    torch_dtype: torch.dtype
-    nullable: bool = False
-    scale: int | None = None
-    precision: int | None = None
-    dictionary: tuple[str, ...] | None = None
-
-    @classmethod
-    def int64(cls, *, nullable: bool = False) -> "ColumnMeta":
-        return cls(LogicalDType.INT64, torch.int64, nullable=nullable)
-
-    @classmethod
-    def fp32(cls, *, nullable: bool = False) -> "ColumnMeta":
-        return cls(LogicalDType.FP32, torch.float32, nullable=nullable)
-
-    @classmethod
-    def fp64(cls, *, nullable: bool = False) -> "ColumnMeta":
-        return cls(LogicalDType.FP64, torch.float64, nullable=nullable)
-
-    @classmethod
-    def boolean(cls, *, nullable: bool = False) -> "ColumnMeta":
-        return cls(LogicalDType.BOOL, torch.bool, nullable=nullable)
-
-    @classmethod
-    def date(cls, *, nullable: bool = False) -> "ColumnMeta":
-        return cls(LogicalDType.DATE, torch.int32, nullable=nullable)
-
-    @classmethod
-    def decimal(
-        cls,
-        *,
-        precision: int,
-        scale: int,
-        nullable: bool = False,
-    ) -> "ColumnMeta":
-        if precision <= 0 or scale < 0:
-            raise ValueError("decimal precision must be positive and scale non-negative")
-        return cls(
-            LogicalDType.DECIMAL,
-            torch.int64,
-            nullable=nullable,
-            precision=precision,
-            scale=scale,
+    def with_row_count(self, row_count: int) -> "BatchMeta":
+        return BatchMeta(
+            row_count=row_count,
+            chunk_size=self.chunk_size,
+            chunk_index=self.chunk_index,
+            source_offset=self.source_offset,
+            device=self.device,
+            schema_version=self.schema_version,
         )
-
-    @classmethod
-    def string_dict(
-        cls,
-        dictionary: Sequence[str] = (),
-        *,
-        nullable: bool = False,
-    ) -> "ColumnMeta":
-        return cls(
-            LogicalDType.STRING_DICT,
-            torch.int64,
-            nullable=nullable,
-            dictionary=tuple(dictionary),
-        )
-
-    def decode_scalar(self, value: int | float | bool) -> int | float | bool | str | Decimal:
-        if self.logical_dtype == LogicalDType.DECIMAL:
-            return Decimal(int(value)).scaleb(-int(self.scale or 0))
-        if self.logical_dtype == LogicalDType.STRING_DICT and self.dictionary is not None:
-            return self.dictionary[int(value)]
-        return value
 
 
 @dataclass(frozen=True)
 class TensorRecordBatch:
-    """Columnar tensor batch plus per-column metadata and validity masks."""
+    """Columnar tensor batch plus per-column type, storage, and validity metadata."""
 
     columns: Mapping[str, torch.Tensor]
     meta: Mapping[str, ColumnMeta]
     validity: Mapping[str, torch.Tensor | None] | None = None
+    types: Mapping[str, ColumnType] | None = None
+    storage: Mapping[str, ColumnStorage] | None = None
+    batch_meta: BatchMeta | None = None
 
     def __post_init__(self) -> None:
-        columns = dict(self.columns)
-        meta = dict(self.meta)
-        validity = dict(self.validity or {})
-        _validate_batch(columns, meta, validity)
-        object.__setattr__(self, "columns", MappingProxyType(columns))
-        object.__setattr__(self, "meta", MappingProxyType(meta))
-        object.__setattr__(self, "validity", MappingProxyType(validity))
+        normalized = _normalize_batch(self)
+        object.__setattr__(self, "columns", MappingProxyType(normalized.columns))
+        object.__setattr__(self, "meta", MappingProxyType(normalized.meta))
+        object.__setattr__(self, "validity", MappingProxyType(normalized.validity))
+        object.__setattr__(self, "types", MappingProxyType(normalized.types))
+        object.__setattr__(self, "storage", MappingProxyType(normalized.storage))
+        object.__setattr__(self, "batch_meta", normalized.batch_meta)
+
+    @classmethod
+    def from_storages(
+        cls,
+        *,
+        columns: Mapping[str, ColumnStorage],
+        types: Mapping[str, ColumnType],
+        batch_meta: BatchMeta,
+    ) -> "TensorRecordBatch":
+        meta = {
+            name: types[name].to_column_meta(storage.dictionary)
+            for name, storage in columns.items()
+        }
+        tensors = {name: storage.data for name, storage in columns.items()}
+        validity = {name: storage.validity for name, storage in columns.items()}
+        return cls(tensors, meta, validity, types=types, storage=columns, batch_meta=batch_meta)
 
     @property
     def row_count(self) -> int:
-        if not self.columns:
-            return 0
-        return int(next(iter(self.columns.values())).shape[0])
+        return int(self.batch_meta.row_count)
 
     def filter(self, mask: torch.Tensor) -> "TensorRecordBatch":
         if mask.dtype is not torch.bool:
             raise TypeError("record batch filter mask must be boolean")
-        return TensorRecordBatch(
-            columns={name: tensor[mask] for name, tensor in self.columns.items()},
-            meta=self.meta,
-            validity=_transform_validity(self.validity, lambda valid: valid[mask]),
+        if mask.numel() != self.row_count:
+            raise ValueError("record batch filter mask must match row count")
+        row_count = int(mask.sum().cpu().item())
+        return self._with_storage(
+            {name: column.filter(mask) for name, column in self.storage.items()},
+            self.batch_meta.with_row_count(row_count),
         )
 
     def gather(self, indices: torch.Tensor) -> "TensorRecordBatch":
         if indices.dtype != torch.int64:
             indices = indices.to(dtype=torch.int64)
-        return TensorRecordBatch(
-            columns={name: tensor.index_select(0, indices) for name, tensor in self.columns.items()},
-            meta=self.meta,
-            validity=_transform_validity(self.validity, lambda valid: valid.index_select(0, indices)),
+        return self._with_storage(
+            {name: column.gather(indices) for name, column in self.storage.items()},
+            self.batch_meta.with_row_count(int(indices.numel())),
         )
 
     def project(self, names: Sequence[str]) -> "TensorRecordBatch":
-        return TensorRecordBatch(
-            columns={name: self.columns[name] for name in names},
-            meta={name: self.meta[name] for name in names},
-            validity={name: self.validity.get(name) for name in names},
+        return self._with_storage(
+            {name: self.storage[name] for name in names},
+            self.batch_meta,
+            types={name: self.types[name] for name in names},
+        )
+
+    def _with_storage(
+        self,
+        storage: Mapping[str, ColumnStorage],
+        batch_meta: BatchMeta,
+        *,
+        types: Mapping[str, ColumnType] | None = None,
+    ) -> "TensorRecordBatch":
+        selected_types = types or {name: self.types[name] for name in storage}
+        return TensorRecordBatch.from_storages(
+            columns=storage,
+            types=selected_types,
+            batch_meta=batch_meta,
         )
 
 
-def _validate_batch(
+@dataclass(frozen=True)
+class _NormalizedBatch:
+    columns: dict[str, torch.Tensor]
+    meta: dict[str, ColumnMeta]
+    validity: dict[str, torch.Tensor | None]
+    types: dict[str, ColumnType]
+    storage: dict[str, ColumnStorage]
+    batch_meta: BatchMeta
+
+
+def _normalize_batch(batch: TensorRecordBatch) -> _NormalizedBatch:
+    columns = dict(batch.columns)
+    meta = dict(batch.meta)
+    validity = dict(batch.validity or {})
+    if batch.storage is not None:
+        return _normalize_storage_batch(batch)
+    _validate_tensor_batch(columns, meta, validity)
+    storage = _storage_from_v1(columns, meta, validity)
+    types = dict(batch.types or _types_from_meta(meta))
+    batch_meta = batch.batch_meta or _infer_batch_meta(columns)
+    _validate_storage_batch(storage, types, batch_meta)
+    return _NormalizedBatch(columns, meta, validity, types, storage, batch_meta)
+
+
+def _normalize_storage_batch(batch: TensorRecordBatch) -> _NormalizedBatch:
+    storage = dict(batch.storage or {})
+    types = dict(batch.types or {})
+    if batch.batch_meta is None:
+        raise ValueError("batch_meta is required when storage is provided")
+    _validate_storage_batch(storage, types, batch.batch_meta)
+    columns = {name: column.data for name, column in storage.items()}
+    validity = {name: column.validity for name, column in storage.items()}
+    meta = {name: types[name].to_column_meta(storage[name].dictionary) for name in storage}
+    return _NormalizedBatch(columns, meta, validity, types, storage, batch.batch_meta)
+
+
+def _storage_from_v1(
+    columns: Mapping[str, torch.Tensor],
+    meta: Mapping[str, ColumnMeta],
+    validity: Mapping[str, torch.Tensor | None],
+) -> dict[str, ColumnStorage]:
+    result: dict[str, ColumnStorage] = {}
+    for name, tensor in columns.items():
+        column_meta = meta[name]
+        valid = validity.get(name)
+        if column_meta.logical_dtype == LogicalDType.DECIMAL:
+            result[name] = ColumnStorage.decimal64(tensor, validity=valid)
+        elif column_meta.logical_dtype == LogicalDType.STRING_DICT:
+            result[name] = ColumnStorage.dictionary_ids(tensor, column_meta.dictionary or (), validity=valid)
+        else:
+            result[name] = ColumnStorage.fixed(tensor, validity=valid)
+    return result
+
+
+def _types_from_meta(meta: Mapping[str, ColumnMeta]) -> dict[str, ColumnType]:
+    return {name: ColumnType.from_column_meta(name, column_meta) for name, column_meta in meta.items()}
+
+
+def _infer_batch_meta(columns: Mapping[str, torch.Tensor]) -> BatchMeta:
+    row_count = 0 if not columns else int(next(iter(columns.values())).shape[0])
+    device = torch.device("cpu") if not columns else next(iter(columns.values())).device
+    return BatchMeta(row_count, row_count, 0, 0, device)
+
+
+def _validate_tensor_batch(
     columns: Mapping[str, torch.Tensor],
     meta: Mapping[str, ColumnMeta],
     validity: Mapping[str, torch.Tensor | None],
@@ -157,10 +198,26 @@ def _validate_batch(
         row_count = int(tensor.shape[0]) if row_count is None else row_count
         if int(tensor.shape[0]) != row_count:
             raise ValueError("record batch columns must have equal row count")
-        valid = validity.get(name)
-        if valid is not None and (valid.dtype is not torch.bool or valid.shape[0] != tensor.shape[0]):
-            raise ValueError(f"invalid validity mask for column: {name}")
+        _validate_validity_shape(name, validity.get(name), int(tensor.shape[0]))
 
 
-def _transform_validity(validity: Mapping[str, torch.Tensor | None], transform) -> dict[str, torch.Tensor | None]:
-    return {name: None if valid is None else transform(valid) for name, valid in validity.items()}
+def _validate_storage_batch(
+    storage: Mapping[str, ColumnStorage],
+    types: Mapping[str, ColumnType],
+    batch_meta: BatchMeta,
+) -> None:
+    if set(storage) != set(types):
+        raise ValueError("record batch storage and types must have identical columns")
+    for name, column in storage.items():
+        if column.row_count != batch_meta.row_count:
+            raise ValueError(f"storage row count mismatch for column: {name}")
+        if column.device != batch_meta.device:
+            raise ValueError(f"storage device mismatch for column: {name}")
+        _validate_validity_shape(name, column.validity, column.row_count)
+
+
+def _validate_validity_shape(name: str, valid: torch.Tensor | None, row_count: int) -> None:
+    if valid is None:
+        return
+    if valid.dtype is not torch.bool or valid.ndim != 1 or valid.shape[0] != row_count:
+        raise ValueError(f"invalid validity mask for column: {name}")

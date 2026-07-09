@@ -57,20 +57,26 @@
 - [x] Plain columnar tensor table representation。
 - [x] 第一版 `TensorRecordBatch` / `ColumnMeta` metadata substrate，包含 DuckDB
       type mapping，以及 DECIMAL 的 scaled `int64 + scale` 表示。
-- [ ] `TensorRecordBatch v2` ABI：拆分 DuckDB logical type、physical storage、batch metadata、lifecycle owner；设计见 `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`。
+- [x] `TensorRecordBatch v2` ABI 第一版：拆分 DuckDB logical type、physical storage、batch metadata、lifecycle owner；设计见 `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`。
 - [ ] Batch/chunk metadata：`row_count/chunk_size/chunk_index/source_offset/device/schema_version` 从 scan 入口保留并随 filter/gather/project 更新。
-- [ ] 变长数据 storage：dictionary ids 完整化，并新增 UTF8 `offsets + chars + validity` prototype。
+- [x] 变长数据 storage 第一版：新增 UTF8 `offsets + chars + validity` prototype，CPU filter/gather/project 显式可用。
+- [ ] Dictionary ids 完整化：merge、unknown policy、batch append 后 id 稳定。
+- [ ] UTF8 CUDA compaction/string kernels：当前 CUDA 路径显式 `NotImplementedError`，无静默 fallback。
 - [x] 当前 TPC-H executor 的 bitmap-style filter masks。
 - [x] Generic SQL boolean filter tree：`AND` / `OR` / `NOT`。
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
 - [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、multi-branch/simple `CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
-- [ ] Filter/projection TypedExpr AST：从 DuckDB expression 绑定类型、nullable、scale 与 storage kind。
-- [ ] Expression DAG optimizer：constant folding、CSE、decimal scale hoisting、predicate normalization、validity propagation。
-- [ ] Tensor primitive plan executor：projection/filter 多表达式批执行，输出 `TensorRecordBatch`，禁止 hot path row-level Python loop。
+- [x] Filter/projection programmatic TypedExpr AST 第一版：支持 column/literal/arithmetic 并绑定 `ColumnType`。
+- [ ] DuckDB expression string/JSON → TypedExpr binder：替换 `physical_expr.py` 的字符串递归入口。
+- [x] Expression DAG optimizer 第一版：constant folding、CSE、DECIMAL add/sub scale hoisting。
+- [ ] Expression DAG optimizer 完整版：predicate normalization、validity propagation、更多 DECIMAL/STRING 规则。
+- [x] Tensor primitive plan executor 第一版：projection 多表达式批执行，输出 `TensorRecordBatch`。
+- [ ] Filter primitive plan executor：boolean mask DAG 与 projection plan 统一。
 - [x] 第一版多精度 physical expression：覆盖 INT64/FP32/FP64 以及 DECIMAL
       arithmetic/comparison/CASE/scalar-subquery。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
+- [x] Typed-batch inner join indices 第一版：`inner_join_indices_batch()` 接收 `TensorRecordBatch` key columns。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。
 - [x] 第一版多精度 join：覆盖 INT64/FP32/FP64/DECIMAL key；DECIMAL join
       在 probe 前做 scale alignment。
@@ -78,6 +84,7 @@
 - [ ] Join variants：non-equi、left outer、left semi、left anti。
 - [x] 第一版 sorted-input group-by fast path：`unique_consecutive`、inverse ids、scatter reductions。
 - [ ] 完整 sort-based group-by aggregation：concatenated keys、sort、`unique_consecutive`、inverse ids、scatter reductions。
+- [x] Typed-batch single group-by SUM 第一版：`grouped_sum_batch()` 保留 DECIMAL scale 与 chunk metadata。
 - [x] 当前 query templates 的 sum/count group reductions。
 - [x] 可复用 min/max/mean group reductions。
 - [x] 第一版 DECIMAL aggregate：SUM/MIN/MAX 保留 scaled int64 metadata，

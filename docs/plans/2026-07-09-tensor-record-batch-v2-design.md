@@ -359,3 +359,11 @@ class TensorPrimitivePlan:
 - 不为“能跑”添加静默 CPU fallback 或 mock 成功路径。
 - 不一次性把 Q1-Q22 executor 全部替换成新 batch ABI。
 - 不把 DECIMAL 隐式转 fp64 来掩盖 overflow/rounding 问题。
+
+## 9. 2026-07-09 第一版实现状态
+
+- 已新增 `record_batch_types.py`、`record_batch_storage.py`，并保持 `record_batch.py` re-export 兼容。
+- 已实现 `ColumnType`、`ColumnStorage`、`BatchMeta`、`AllocationOwner`、UTF8 offsets storage、`TensorRecordBatch.from_storages()`。
+- 已新增 `backend/expression_plan.py`：programmatic AST、constant folding、CSE、DECIMAL add/sub scale alignment、projection primitive plan execution。
+- 已新增 `batch_join.py` / `batch_aggregate.py`：typed-batch inner join indices 与 single group-by SUM 第一版。
+- 尚未完成 DuckDB expression string/JSON binder、physical executor 默认迁移、UTF8 CUDA compaction、完整 typed-batch join/agg 算子族。

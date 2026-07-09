@@ -70,22 +70,28 @@ until a readable full paper/appendix is available.
 - [x] Columnar tensor table representation for plain columns.
 - [x] First `TensorRecordBatch` / `ColumnMeta` metadata substrate with DuckDB
       type mapping, including DECIMAL as scaled `int64 + scale`.
-- [ ] `TensorRecordBatch v2` ABI: split DuckDB logical type, physical storage, batch metadata, and lifecycle owner; see `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`.
+- [x] First `TensorRecordBatch v2` ABI: split DuckDB logical type, physical storage, batch metadata, and lifecycle owner; see `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`.
 - [ ] Batch/chunk metadata: preserve `row_count/chunk_size/chunk_index/source_offset/device/schema_version` at scan and update it through filter/gather/project.
-- [ ] Variable-length storage: complete dictionary ids and add a UTF8 `offsets + chars + validity` prototype.
+- [x] First variable-length storage: UTF8 `offsets + chars + validity` prototype with explicit CPU filter/gather/project.
+- [ ] Complete dictionary ids: merge, unknown policy, and stable ids after batch append.
+- [ ] UTF8 CUDA compaction/string kernels: current CUDA path raises explicit `NotImplementedError`, with no silent fallback.
 - [x] Bitmap-style filter masks for current TPC-H executors.
 - [x] First Batch 2 step: boolean filter tree for `AND`, `OR`, and `NOT` in generic SQL.
 - [x] First Batch 2 step: generic bitmap selection for comparisons, `IN`, and `LIKE`.
 - [x] DuckDB physical projection expression subset: column refs, `#N`, arithmetic, comparisons, `CASE`, `prefix`/`contains`/`suffix`, `NOT LIKE`/`!~~`, `CAST`, `EXTRACT(year FROM date)`, internal compress/decompress wrappers.
-- [ ] Filter/projection TypedExpr AST: bind DuckDB type, nullable, scale, and storage kind from DuckDB expressions.
-- [ ] Expression DAG optimizer: constant folding, CSE, decimal scale hoisting, predicate normalization, and validity propagation.
-- [ ] Tensor primitive plan executor: batch multi-expression filter/projection execution that returns `TensorRecordBatch` and forbids hot-path row-level Python loops.
+- [x] First programmatic TypedExpr AST for filter/projection: column/literal/arithmetic with `ColumnType` binding.
+- [ ] DuckDB expression string/JSON → TypedExpr binder to replace the recursive string path in `physical_expr.py`.
+- [x] First Expression DAG optimizer: constant folding, CSE, and DECIMAL add/sub scale hoisting.
+- [ ] Complete Expression DAG optimizer: predicate normalization, validity propagation, and more DECIMAL/STRING rules.
+- [x] First tensor primitive plan executor: batch multi-expression projection execution that returns `TensorRecordBatch`.
+- [ ] Filter primitive plan executor: unify boolean mask DAG with projection plans.
 - [x] First multi-precision physical expressions: INT64/FP32/FP64 plus
       DECIMAL arithmetic/comparison/CASE/scalar-subquery handling.
 - [ ] Full generic projection operator with SQL parser-level expression-tree lowering.
 - [x] First Batch 2 step: generic stable multi-key `ORDER BY` with `ASC`/`DESC`.
 - [ ] Generic sort-based equi-join using sort, histograms, prefix sums,
       `bucketize`, quotient/remainder output-index generation.
+- [x] First typed-batch inner join indices: `inner_join_indices_batch()` accepts `TensorRecordBatch` key columns.
 - [x] Correctness-first generic inner equi-join through DuckDB physical `HASH_JOIN`.
 - [x] First multi-precision join coverage for INT64/FP32/FP64/DECIMAL keys;
       DECIMAL join comparisons align scale before probing.
@@ -96,6 +102,7 @@ until a readable full paper/appendix is available.
 - [x] First sorted-input group-by fast path using `unique_consecutive`, inverse ids, and scatter reductions.
 - [ ] Full sort-based group-by aggregation using concatenated keys, sort,
       `unique_consecutive`, inverse ids, and scatter reductions.
+- [x] First typed-batch single group-by SUM: `grouped_sum_batch()` preserves DECIMAL scale and chunk metadata.
 - [x] Sum/count group reductions for current query templates.
 - [x] First batch: min/max/mean group reductions as reusable primitives.
 - [x] First DECIMAL aggregate coverage: SUM/MIN/MAX preserve scaled int64
