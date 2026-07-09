@@ -9,7 +9,14 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from tpch_torch.relational import yyyymmdd_to_iso
-from tpch_torch.record_batch import ColumnMeta, LogicalDType
+from tpch_torch.record_batch import (
+    BatchMeta,
+    ColumnMeta,
+    ColumnStorage,
+    ColumnType,
+    LogicalDType,
+    TensorRecordBatch,
+)
 
 
 @dataclass(frozen=True)
@@ -115,10 +122,30 @@ class PhysicalTable:
     columns: Mapping[str, PhysicalValue]
     order: tuple[str, ...]
     row_count: int
+    batch: TensorRecordBatch | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "columns", MappingProxyType(dict(self.columns)))
-        object.__setattr__(self, "order", tuple(self.order))
+        columns = dict(self.columns)
+        order = tuple(self.order)
+        object.__setattr__(self, "columns", MappingProxyType(columns))
+        object.__setattr__(self, "order", order)
+        if self.batch is None:
+            object.__setattr__(self, "batch", _batch_from_ordered_values(columns, order, self.row_count))
+
+    @classmethod
+    def from_batch(
+        cls,
+        name: str,
+        batch: TensorRecordBatch,
+        *,
+        order: Sequence[str] | None = None,
+        aliases: Mapping[str, str] | None = None,
+    ) -> "PhysicalTable":
+        table_order = tuple(order or batch.columns.keys())
+        columns = _physical_values_from_batch(batch, table_order)
+        for alias, source in (aliases or {}).items():
+            columns[alias] = columns[source]
+        return cls(name, columns, table_order, batch.row_count, batch)
 
     def value_at(self, index: int) -> PhysicalValue:
         try:
@@ -141,11 +168,13 @@ class PhysicalTable:
             raise TypeError("physical filter mask must be boolean")
         if mask.ndim != 1 or mask.numel() != self.row_count:
             raise ValueError("physical filter mask must match row count")
+        row_count = int(mask.sum().cpu().item())
         return PhysicalTable(
             name or self.name,
             _transform_unique_values(self.columns, lambda value: value.filter(mask)),
             self.order,
-            int(mask.sum().cpu().item()),
+            row_count,
+            self.batch.filter(mask) if self.batch is not None else None,
         )
 
     def gather(self, indices: torch.Tensor, name: str | None = None) -> "PhysicalTable":
@@ -156,6 +185,7 @@ class PhysicalTable:
             _transform_unique_values(self.columns, lambda value: value.gather(indices)),
             self.order,
             int(indices.numel()),
+            self.batch.gather(indices) if self.batch is not None else None,
         )
 
     @classmethod
@@ -177,6 +207,69 @@ class PhysicalTable:
                 else:
                     columns.setdefault(alias, value)
         return cls(name, columns, tuple(order), row_count)
+
+
+def _batch_from_ordered_values(
+    columns: Mapping[str, PhysicalValue],
+    order: tuple[str, ...],
+    row_count: int,
+) -> TensorRecordBatch | None:
+    storages: dict[str, ColumnStorage] = {}
+    types: dict[str, ColumnType] = {}
+    device: torch.device | None = None
+    for name in order:
+        value = columns.get(name)
+        if value is None or value.tensor is None:
+            return None
+        tensor = value.require_tensor()
+        device = tensor.device if device is None else device
+        if tensor.device != device:
+            return None
+        storages[name] = _storage_from_physical_value(value)
+        types[name] = _type_from_physical_value(name, value)
+    batch_meta = BatchMeta(row_count, row_count, 0, 0, device or torch.device("cpu"))
+    return TensorRecordBatch.from_storages(columns=storages, types=types, batch_meta=batch_meta)
+
+
+def _physical_values_from_batch(
+    batch: TensorRecordBatch,
+    order: tuple[str, ...],
+) -> dict[str, PhysicalValue]:
+    return {name: _physical_value_from_batch(batch, name) for name in order}
+
+
+def _physical_value_from_batch(batch: TensorRecordBatch, name: str) -> PhysicalValue:
+    storage = batch.storage[name]
+    meta = batch.meta[name]
+    return PhysicalValue(
+        tensor=storage.data,
+        dictionary=storage.dictionary,
+        is_date=meta.logical_dtype == LogicalDType.DATE,
+        valid=storage.validity,
+        meta=meta,
+    )
+
+
+def _storage_from_physical_value(value: PhysicalValue) -> ColumnStorage:
+    tensor = value.require_tensor()
+    if value.dictionary is not None:
+        return ColumnStorage.dictionary_ids(tensor, value.dictionary, validity=value.valid)
+    if value.meta is not None and value.meta.logical_dtype == LogicalDType.DECIMAL:
+        return ColumnStorage.decimal64(tensor, validity=value.valid)
+    return ColumnStorage.fixed(tensor, validity=value.valid)
+
+
+def _type_from_physical_value(name: str, value: PhysicalValue) -> ColumnType:
+    if value.meta is not None:
+        return ColumnType.from_column_meta(name, value.meta)
+    tensor = value.require_tensor()
+    if tensor.dtype == torch.float32:
+        return ColumnType.fp32(name)
+    if tensor.dtype == torch.float64:
+        return ColumnType.fp64(name)
+    if tensor.dtype == torch.bool:
+        return ColumnType.boolean(name)
+    return ColumnType.date(name) if value.is_date else ColumnType.int64(name)
 
 
 def materialize_literal(value: PhysicalValue, row_count: int, device: torch.device) -> PhysicalValue:

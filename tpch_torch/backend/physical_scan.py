@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from typing import Iterator
+
 import duckdb
 import torch
 
 from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
-from tpch_torch.backend.type_mapping import column_meta_from_duckdb_type, encode_decimal_array
+from tpch_torch.backend.type_mapping import (
+    column_meta_from_duckdb_type,
+    column_type_from_duckdb_type,
+    encode_decimal_array,
+)
 from tpch_torch.relational import DATE_COLUMNS_EXTENDED
-from tpch_torch.record_batch import ColumnMeta, LogicalDType
+from tpch_torch.record_batch import (
+    BatchMeta,
+    ColumnMeta,
+    ColumnStorage,
+    ColumnType,
+    LogicalDType,
+    TensorRecordBatch,
+)
 
 _ROW_ID = "__rowid__"
 _DUCKDB_ROW_ID = "rowid"
@@ -31,6 +44,8 @@ def fetch_physical_table(
     device: str,
     *,
     scan_range: tuple[int, int] | None = None,
+    chunk_size: int | None = None,
+    chunk_index: int | None = None,
 ) -> PhysicalTable:
     """Fetch a possibly ranged table slice into physical tensor columns."""
 
@@ -39,8 +54,11 @@ def fetch_physical_table(
     columnar = con.execute(f"select {select_list} from {table_name}{limit}").fetchnumpy()
     column_types = _table_column_type_map(con, table_name)
     values: dict[str, PhysicalValue] = {}
+    batch_types: dict[str, ColumnType] = {}
     for column in fetched_columns:
-        meta = column_meta_from_duckdb_type(column_types.get(column, ""), nullable=True)
+        duckdb_type = column_types.get(column, "")
+        meta = column_meta_from_duckdb_type(duckdb_type, nullable=True)
+        batch_types[column] = column_type_from_duckdb_type(column, duckdb_type, nullable=True)
         tensor, vocabulary, meta = _encode_physical_column(
             columnar[column],
             device,
@@ -62,7 +80,91 @@ def fetch_physical_table(
     order = order_columns or (_ROW_ID,)
     if not order_columns:
         values[_ROW_ID] = values[_DUCKDB_ROW_ID]
-    return PhysicalTable(table_name, values, order, row_count)
+    batch = _scan_batch(
+        values,
+        batch_types,
+        order,
+        row_count,
+        device,
+        source_offset=offset,
+        chunk_size=chunk_size or row_count,
+        chunk_index=_scan_chunk_index(offset, chunk_size or row_count, chunk_index),
+    )
+    return PhysicalTable(table_name, values, order, row_count, batch)
+
+
+def fetch_physical_table_chunks(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    fetched_columns: tuple[str, ...],
+    order_columns: tuple[str, ...],
+    device: str,
+    *,
+    chunk_size: int,
+) -> Iterator[PhysicalTable]:
+    """Yield physical scan chunks backed by TensorRecordBatch metadata."""
+
+    if chunk_size <= 0:
+        raise ValueError("scan chunk_size must be positive")
+    total, _ = scan_row_count(con, table_name, None)
+    for chunk_index, start in enumerate(range(0, total, chunk_size)):
+        end = min(start + chunk_size, total)
+        yield fetch_physical_table(
+            con,
+            table_name,
+            fetched_columns,
+            order_columns,
+            device,
+            scan_range=(start, end),
+            chunk_size=chunk_size,
+            chunk_index=chunk_index,
+        )
+
+
+def _scan_batch(
+    values: dict[str, PhysicalValue],
+    column_types: dict[str, ColumnType],
+    order: tuple[str, ...],
+    row_count: int,
+    device: str,
+    source_offset: int,
+    chunk_size: int,
+    chunk_index: int,
+) -> TensorRecordBatch:
+    storages: dict[str, ColumnStorage] = {}
+    types: dict[str, ColumnType] = {}
+    for name in order:
+        value = values[name]
+        storages[name] = _storage_from_value(value)
+        types[name] = column_types.get(name, ColumnType.int64(name))
+    return TensorRecordBatch.from_storages(
+        columns=storages,
+        types=types,
+        batch_meta=BatchMeta(
+            row_count=row_count,
+            chunk_size=chunk_size,
+            chunk_index=chunk_index,
+            source_offset=source_offset,
+            device=torch.device(device),
+        ),
+    )
+
+
+def _storage_from_value(value: PhysicalValue) -> ColumnStorage:
+    tensor = value.require_tensor()
+    if value.dictionary is not None:
+        return ColumnStorage.dictionary_ids(tensor, value.dictionary, validity=value.valid)
+    if value.meta is not None and value.meta.logical_dtype == LogicalDType.DECIMAL:
+        return ColumnStorage.decimal64(tensor, validity=value.valid)
+    return ColumnStorage.fixed(tensor, validity=value.valid)
+
+
+def _scan_chunk_index(offset: int, chunk_size: int, explicit: int | None) -> int:
+    if explicit is not None:
+        return explicit
+    if offset <= 0 or chunk_size <= 0:
+        return 0
+    return offset // chunk_size
 
 
 def scan_row_count(

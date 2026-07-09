@@ -71,7 +71,10 @@ until a readable full paper/appendix is available.
 - [x] First `TensorRecordBatch` / `ColumnMeta` metadata substrate with DuckDB
       type mapping, including DECIMAL as scaled `int64 + scale`.
 - [x] First `TensorRecordBatch v2` ABI: split DuckDB logical type, physical storage, batch metadata, and lifecycle owner; see `docs/plans/2026-07-09-tensor-record-batch-v2-design.md`.
-- [ ] Batch/chunk metadata: preserve `row_count/chunk_size/chunk_index/source_offset/device/schema_version` at scan and update it through filter/gather/project.
+- [x] First batch/chunk metadata: preserve `row_count/chunk_size/chunk_index/source_offset/device/schema_version` at scan and update it through filter/gather/project.
+- [x] `PhysicalTable` TensorRecordBatch-backed façade: keep the legacy `PhysicalValue` API while carrying a default `TensorRecordBatch`.
+- [x] First scan chunk API: `fetch_physical_table_chunks(..., chunk_size=N)` yields typed batch-backed physical tables.
+- [ ] Fully remove the PhysicalValue hot path: make expression/join/agg consume `TensorRecordBatch` directly and keep `PhysicalTable` as a transitional adapter only.
 - [x] First variable-length storage: UTF8 `offsets + chars + validity` prototype with explicit CPU filter/gather/project.
 - [ ] Complete dictionary ids: merge, unknown policy, and stable ids after batch append.
 - [ ] UTF8 CUDA compaction/string kernels: current CUDA path raises explicit `NotImplementedError`, with no silent fallback.

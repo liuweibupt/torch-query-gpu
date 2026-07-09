@@ -760,3 +760,14 @@ AST 设计要求：
 | P2 typed batch join/agg | 新增 `batch_join.inner_join_indices_batch()` 与 `batch_aggregate.grouped_sum_batch()`；typed batch 单 key inner join、single group-by SUM 可运行并保留 DECIMAL scale/chunk metadata。 | join/agg 尚未替换 physical executor 默认路径；multi-key decimal normalization、outer/semi/anti/hash join、COUNT/MIN/MAX/AVG typed-batch API 仍待做。 |
 
 新增测试：`tests/test_record_batch_v2.py`、`tests/test_expression_ast_plan.py`、`tests/test_typed_batch_join_agg.py`；全量测试当前为 350 个。
+
+### 8. 2026-07-09 深化：PhysicalTable TensorRecordBatch-backed 与 chunk scan
+
+| 方向 | 已实现 | 说明 |
+| --- | --- | --- |
+| Physical runtime 数据结构 | `PhysicalTable` 新增 `batch: TensorRecordBatch`，并提供 `PhysicalTable.from_batch()`。 | 现有 `PhysicalValue/PhysicalTable` API 继续作为兼容 façade；新 scan/filter/gather/project 会维护 backing batch。 |
+| Scan chunk metadata | `fetch_physical_table()` 构造 `BatchMeta(row_count, chunk_size, chunk_index, source_offset, device)`。 | `scan_range=(start,end)` 会写入 `source_offset`；显式 chunk API 会写入稳定 `chunk_index`。 |
+| Chunk scan API | 新增 `fetch_physical_table_chunks(..., chunk_size=N)`。 | 每个 chunk 直接返回 TensorRecordBatch-backed `PhysicalTable`，为后续 pipeline scheduler / partitionable execution 统一 scan 边界。 |
+| 兼容性 | Q1-Q22 physical / partitionable / Q17 回归仍走原 executor API。 | 这是 “TRB-backed façade” 阶段，还不是删除 `PhysicalValue` 的最终形态。 |
+
+新增测试：`tests/test_physical_record_batch_backing.py`；全量测试当前为 353 个。

@@ -367,3 +367,11 @@ class TensorPrimitivePlan:
 - 已新增 `backend/expression_plan.py`：programmatic AST、constant folding、CSE、DECIMAL add/sub scale alignment、projection primitive plan execution。
 - 已新增 `batch_join.py` / `batch_aggregate.py`：typed-batch inner join indices 与 single group-by SUM 第一版。
 - 尚未完成 DuckDB expression string/JSON binder、physical executor 默认迁移、UTF8 CUDA compaction、完整 typed-batch join/agg 算子族。
+
+## 10. 2026-07-09 深化实现状态：Physical façade 与 scan chunk
+
+- `PhysicalTable` 已新增 `batch: TensorRecordBatch | None`，并在未传入 batch 时从 ordered `PhysicalValue` 自动构造 typed batch。
+- `PhysicalTable.from_batch()` 可从 `TensorRecordBatch` 构造兼容 physical table；filter/gather/projected 会继续维护 backing batch。
+- `fetch_physical_table()` 现在从 scan 入口构造 `TensorRecordBatch`，保留 DuckDB type、storage kind、`BatchMeta.source_offset/chunk_size/chunk_index/device`。
+- 新增 `fetch_physical_table_chunks(..., chunk_size=N)`，用于显式 chunk scan；当前 partitionable executor 仍可继续使用 `scan_range`，后续可统一到 chunk API。
+- 当前阶段仍保留 `PhysicalValue` 作为 compatibility façade；下一阶段目标是让 expression/join/agg 直接消费 `TensorRecordBatch`。
