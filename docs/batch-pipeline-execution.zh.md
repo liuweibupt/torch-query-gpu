@@ -4,7 +4,7 @@
 
 ## 当前落地范围
 
-已落地的第一阶段只覆盖安全的单表局部链路：
+已落地的第一阶段覆盖安全的单表局部链路：
 
 ```text
 ScanBatchOperator.next_batch()
@@ -25,7 +25,18 @@ SQL
   -> PyTorch tensor operators
 ```
 
-这意味着 `ScanChunkConfig` 不再通过每个 chunk 重建并执行整棵 `PhysicalPlanExecutor`；它会构造 pull-based batch operators，然后逐个调用 `next_batch()`。
+ 这意味着 `ScanChunkConfig` 不再通过每个 chunk 重建并执行整棵 `PhysicalPlanExecutor`；它会构造 pull-based batch operators，然后逐个调用 `next_batch()`。
+
+第二阶段已把 `PartitionConfig` 的单表 aggregate fragments 并入同一套 batch pipeline：
+
+```text
+ScanBatchOperator
+  -> FilterBatchOperator
+  -> ProjectBatchOperator
+  -> LocalAggregateBatchOperator
+  -> optional local Project/Sort
+  -> FinalMerge on host
+```
 
 ## 对成熟数据库方案的对应
 
@@ -36,7 +47,7 @@ SQL
 | Pipeline-friendly operator | scan / filter / project |
 | Pipeline breaker | aggregate / join build / sort / distinct / window |
 | Morsel/chunk scheduling | `ScanChunkConfig.chunk_size` + scan row ranges |
-| Local + global 两阶段执行 | 已有 `PartitionConfig` aggregate prototype，后续并入 pipeline |
+| Local + global 两阶段执行 | `PartitionConfig` 已使用 `LocalAggregateBatchOperator -> FinalMerge` |
 
 ## 算子分类
 
@@ -91,11 +102,22 @@ Scan chunks -> local operator state -> final merge operator -> output batches
   - `ScanBatchOperator`
   - `FilterBatchOperator`
   - `ProjectBatchOperator`
+  - `SortBatchOperator`
   - `execute_batch_pipeline()`
+- `tpch_torch/backend/physical_pipeline_aggregate.py`
+  - `LocalAggregateBatchOperator`
 - `tpch_torch/backend/physical_chunked.py`
   - `ScanChunkConfig`
   - safe plan analysis
   - batch pipeline dispatch
+- `tpch_torch/backend/physical_partitionable.py`
+  - `PartitionConfig`
+  - partial rows from batch pipeline
+  - final aggregate merge
+- `tpch_torch/backend/triton_hash_join.py`
+  - explicit unique-key Triton hash join primitive
+  - atomicCAS build + double hashing
+  - 4-thread group probe
 - `tests/test_scan_chunk_execution.py`
   - 验证 scan/filter/project correctness
   - 验证 scan chunk metadata
@@ -105,7 +127,8 @@ Scan chunks -> local operator state -> final merge operator -> output batches
 ## 下一步演进 TODO
 
 1. 把 `PhysicalTable.projected()` 扩展为可保留 child batch metadata，避免 projection 后 batch_meta 重置。
-2. 实现 `LocalAggregateBatchOperator` 与 `FinalAggregateBatchOperator`，把 Q1/Q6 aggregate chunk 统一到 pipeline。
-3. 实现 hash join 的 build/probe batch pipeline：build side 先构建全局 tensor hash state，probe side 按 chunk 输出 joined batches。
-4. 实现 local top-k + final top-k merge，替代对全局 sort/limit 的显式拒绝。
-5. 增加 pipeline scheduler，把 chunk 级任务调度从串行 pull 发展到 CPU thread / GPU stream 可配置执行。
+2. 把 FinalMerge 也封装成显式 `FinalAggregateOperator`，减少 row-dict host merge。
+3. 实现完整 hash join 的 build/probe batch pipeline：build side 构建全局 tensor hash state，probe side 按 chunk 输出 joined batches。
+4. 将 Triton hash join primitive 从 unique build key 扩展到 SQL multimap：duplicate key chaining / prefix-sum output sizing / NULL policy。
+5. 实现 local top-k + final top-k merge，替代对全局 sort/limit 的显式拒绝。
+6. 增加 pipeline scheduler，把 chunk 级任务调度从串行 pull 发展到 CPU thread / GPU stream 可配置执行。

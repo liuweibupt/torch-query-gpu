@@ -31,7 +31,8 @@ SQL
   → PyTorchBackend.execute(..., partition_config)
   → PyTorchGraphExecutor
   → execute_partitionable_physical_plan()
-  → PhysicalPlanExecutor(scan_ranges={table: (start, end)}, enable_fusion=True)
+  → BatchOperator pipeline
+  → Scan/Filter/Project → LocalAggregateBatchOperator
   → host merge partial aggregate rows
 ```
 
@@ -42,31 +43,33 @@ SQL
   - `row_ranges(row_count, chunk_size)`
   - `execute_partitionable_physical_plan(...)`
   - graph shape 校验与 partial aggregate merge
-- `tpch_torch/backend/physical.py`
-  - `PhysicalPlanExecutor(..., scan_ranges=..., enable_fusion=True)`
-  - scan node 根据 row range 追加 `LIMIT/OFFSET`
+- `tpch_torch/backend/physical_pipeline.py`
+  - `BatchOperator.next_batch()`
+  - `ScanBatchOperator` / `FilterBatchOperator` / `ProjectBatchOperator`
+  - chunk scan 生成 TensorRecordBatch-backed table
+- `tpch_torch/backend/physical_pipeline_aggregate.py`
+  - `LocalAggregateBatchOperator`
 - `tpch_torch/backend/graph.py`
   - 显式 `partition_config` 分发到 partitionable executor
 - `tpch_torch/benchmark.py` 与 `scripts/benchmark_query.py`
   - 冷/热 benchmark 支持 `--partition-table` / `--partition-chunk-size`
 
-## 3. 为什么关闭 Q1 fused fast path
+## 3. 为什么迁移到 batch pipeline
 
-Q1 默认 hot path 会识别 canonical Q1 graph，并通过 resident tensor cache 一次性读取整个 `lineitem`，再用 fused `torch.bincount` 完成聚合。partitionable path 不能复用整表 resident tensor cache，但可以把 `scan_range` 传给 Q1 fusion hook，让每个 chunk 仍执行 fused local aggregate。
+早期 partitionable path 是对每个 chunk 构造 `PhysicalPlanExecutor(scan_ranges=...)`，等价于“按 chunk 重跑整棵 physical executor”。这能验证 CoddSpeed-style host/chunk 边界，但不是成熟数据库的 vectorized pipeline 形态。
 
-因此 partitionable path 会把 row range 注入 physical executor：
+当前实现改为：
 
-```python
-PhysicalPlanExecutor(
-    con,
-    graph,
-    device=device,
-    scan_ranges={analysis.table: (start, end)},
-    enable_fusion=True,
-)
+```text
+ScanBatchOperator.next_batch()
+  -> FilterBatchOperator.next_batch()
+  -> ProjectBatchOperator.next_batch()
+  -> LocalAggregateBatchOperator.next_batch()
+  -> optional local Project/Sort
+  -> FinalMerge
 ```
 
-Q1 的 fusion hook 已支持 `scan_range`，所以每个 chunk 可以走 chunked fused local aggregate；其他 graph 仍回到普通 physical interpreter。这样 Q1/Q6 都不是退回 query-specific 脚本，而是从同一个 frontend-lowered physical graph 进入 PyTorch tensor operators。
+这样 Q1/Q6 都不是退回 query-specific 脚本，而是从同一个 frontend-lowered physical graph 构造 batch operators；aggregate 作为 pipeline breaker 被拆成 local aggregate 和 final merge。
 
 ## 4. 支持范围
 
@@ -157,7 +160,7 @@ partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更
 - 整表 tensor 无法放入 GPU 显存；
 - 小表或 common fragment 可以 `Prepare` 后复用；
 - chunk fetch 与 GPU compute 可以 overlap；
-- local/global aggregate 都下沉为 tensor graph，减少 Python merge 开销；
+- local aggregate 已下沉到 batch pipeline；final merge 后续可继续从 Python row merge 改成 tensor merge；
 - join fragment 能对大事实表分片、小维表常驻。
 
 当前版本先把 CoddSpeed 的系统边界和正确性链路接入 engine，后续优化再围绕 runtime 并发、显存统计、non-partitionable table residency、join partitioning 展开。
@@ -171,6 +174,6 @@ partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更
 | Q6 | 默认 physical interpreter | 461.311 ms | 1.00× |
 | Q6 | partitionable over `lineitem` | 784.060 ms | 0.59× |
 | Q1 | 默认 fused physical primitive + resident tensor cache | 111.731 ms | 1.00× |
-| Q1 | partitionable over `lineitem` + chunked fused local aggregate | 1920.953 ms | 0.058× |
+| Q1 | partitionable over `lineitem` + local aggregate pipeline | 1920.953 ms | 0.058× |
 
-解释：当前版本为了严格遵守 partitionable execution 的内存边界，每个 chunk 都重新从 DuckDB 拉取列、转换 tensor、执行 fragment，并在 host Python 合并 partial aggregates。Q1 默认路径有 resident tensor cache 和整表 fused `bincount`；partitionable Q1 虽然也使用 chunked fused local aggregate，但无法复用整表 resident tensor cache，因此在 SF=1 CPU 上显著更慢。partitionable path 当前主要证明 CoddSpeed-style host/chunk/coprocessor 执行边界是通的；它的价值在整表无法放入 GPU 显存、或未来实现 non-partitionable table residency、chunk prefetch/overlap、多 runtime 并发后才会体现。
+解释：当前版本为了严格遵守 partitionable execution 的内存边界，每个 chunk 都重新从 DuckDB 拉取列、转换 tensor、执行 local fragment，并在 host Python 合并 partial aggregates。Q1 默认路径有 resident tensor cache 和整表 fused `bincount`；partitionable Q1 无法复用整表 resident tensor cache，因此在 SF=1 CPU 上显著更慢。partitionable path 当前主要证明 CoddSpeed-style host/chunk/coprocessor 执行边界和 mature DB-style local/final aggregate pipeline 是通的；它的价值在整表无法放入 GPU 显存、或未来实现 non-partitionable table residency、chunk prefetch/overlap、多 runtime 并发后才会体现。

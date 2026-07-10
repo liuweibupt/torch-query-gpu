@@ -7,6 +7,7 @@ import torch
 from tpch_torch.backend.physical_key_ops import comparable_value_tensors
 from tpch_torch.backend.physical_join import inner_join_indices
 from tpch_torch.backend.physical_types import PhysicalValue
+from tpch_torch.backend.triton_hash_join import TritonHashJoinConfig, triton_hash_join_indices
 
 
 def hash_join_indices_for_values(
@@ -18,6 +19,18 @@ def hash_join_indices_for_values(
     left_key, right_key = comparable_value_tensors(left_value, right_value)
     left_ids, right_ids = _dictionary_encode_pair(left_key, right_key)
     return inner_join_indices(left_ids, right_ids)
+
+
+def triton_hash_join_indices_for_values(
+    left_value: PhysicalValue,
+    right_value: PhysicalValue,
+    *,
+    config: TritonHashJoinConfig | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return equi-join indices through the explicit Triton atomic-CAS backend."""
+
+    left_key, right_key = comparable_value_tensors(left_value, right_value)
+    return triton_hash_join_indices(left_key.to(dtype=torch.int64), right_key.to(dtype=torch.int64), config=config)
 
 
 def _dictionary_encode_pair(

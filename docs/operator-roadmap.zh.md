@@ -116,6 +116,7 @@
 - [x] 第一批 sorted/unique 感知：已排序唯一 build-side join key 跳过冗余 sort。
 - [x] `PhysicalValue` sorted/unique metadata：scan/filter/single-key sort/single-key group-by 保守传播，PK/FK join 复用 metadata 跳过动态 sortedness 探测。
 - [ ] optimizer 感知更多 sorted/unique columns，避免冗余 `sort` / `unique` / `unique_consecutive`。
+- [x] 显式 Triton hash join primitive 原型：atomicCAS + double hashing + 4-thread probe group，当前仅 unique build-side INT64 key。
 - [ ] 基于 collision degree、key cardinality、device 选择 hash join 或 sort join。
 - [ ] 跟踪 backend bottlenecks：`unique`、indexing、`masked_select`、`scatter_add`、`nonzero` 同步、sort 成本。
 - [ ] 分离 pipeline/capture 中的数据移动与查询执行。
