@@ -19,8 +19,9 @@
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
-- ✅ 新增 CoddSpeed-style partitionable execution 原型：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N`，当前覆盖单表 aggregate fragments（Q6、Q1），每个 chunk 仍走 DuckDB physical graph → PyTorch tensor operators，再由 host merge partial aggregates。
+- ✅ CoddSpeed-style partitionable execution 已并入 batch pipeline：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N` 覆盖单表 aggregate fragments（Q6、Q1），执行形态为 `Scan/Filter/Project -> LocalAggregateBatchOperator -> FinalMerge`。
 - ✅ 显式 scan chunk execution 已演进为 pull-based batch pipeline：`ScanChunkConfig(table, chunk_size)` 会构造 `ScanBatchOperator -> FilterBatchOperator -> ProjectBatchOperator`，以 `next_batch()` 逐个处理 `TensorRecordBatch` chunk；join/aggregate/sort/limit 等需要全局语义的 plan 会显式拒绝，不做静默整表 fallback。
+- ✅ 新增显式 Triton hash join primitive 原型：unique build-side INT64 key，build 阶段使用 atomicCAS + double hashing，probe 阶段采用 4-thread group；当前不自动替换 SQL join，避免 duplicate-key / multimap 语义未完成时误用。
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
 - ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
@@ -41,7 +42,7 @@ flowchart LR
     Backend --> GraphExec["PyTorchGraphExecutor.forward-like execute"]
     GraphExec -->|Q1-Q22 + generic joins| Physical["DuckDB physical-plan interpreter<br/>backend/physical*.py"]
     GraphExec -->|Q6 --compressed-masks| Primitives["Q6 compressed mask experimental primitive"]
-    GraphExec -->|explicit PartitionConfig| Partitionable["CoddSpeed-style partitionable executor<br/>chunk scan · local aggregate · host merge"]
+    GraphExec -->|explicit PartitionConfig| Partitionable["partitionable batch pipeline<br/>local aggregate · final merge"]
     GraphExec -->|explicit ScanChunkConfig| ScanChunk["pull-based batch pipeline<br/>ScanBatch · FilterBatch · ProjectBatch"]
     GraphExec -->|single-table generic subset| Generic["tpch_torch/backend/generic.py"]
     Physical --> Nodes["Physical tensor nodes<br/>Scan · Filter · Project · Join · Aggregate · Sort/TopN"]
@@ -63,7 +64,7 @@ flowchart LR
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
 | IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
 | Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py`, `tpch_torch/backend/physical*.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q1-Q22 与 generic joins 可由 DuckDB physical-plan interpreter 执行；不执行 compiled TPC-H fallback root。 |
-| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives、pull-based scan chunk batch pipeline，以及 partitionable chunk scan + host partial aggregate merge。 |
+| Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives、pull-based scan chunk batch pipeline、partitionable local/final aggregate pipeline、显式 Triton atomicCAS hash join primitive。 |
 
 ## Q1 是怎么实现的
 
@@ -112,7 +113,7 @@ if fused_rows is not None:
 
 ## CoddSpeed-style partitionable execution
 
-当前 engine 支持显式启用的 partitionable execution，用于模拟 CoddSpeed 中 host/coprocessor 按 chunk 执行 query fragment 的模型。默认执行路径不变；只有传入 `PartitionConfig` 或 benchmark CLI 参数时才启用。
+当前 engine 支持显式启用的 partitionable execution，用于模拟 CoddSpeed 中 host/coprocessor 按 chunk 执行 query fragment 的模型。默认执行路径不变；只有传入 `PartitionConfig` 或 benchmark CLI 参数时才启用。该路径现在使用成熟数据库式 local/final aggregate pipeline，而不是每个 chunk 重跑整棵 physical executor。
 
 ```bash
 python -m scripts.benchmark_query \
@@ -124,7 +125,25 @@ python -m scripts.benchmark_query \
   --partition-chunk-size 100000
 ```
 
-当前覆盖单表 aggregate physical fragments（例如 TPC-H Q6/Q1）：每个 chunk 通过同一个 DuckDB physical graph interpreter 调用 PyTorch tensor 算子，host 端再合并 `SUM/COUNT/MIN/MAX/AVG` partial aggregate。详细说明见 [`docs/partitionable-execution.zh.md`](docs/partitionable-execution.zh.md)。
+当前覆盖单表 aggregate physical fragments（例如 TPC-H Q6/Q1）：每个 chunk 通过 `BatchOperator.next_batch()` 流经 scan/filter/project/local aggregate，host 端再合并 `SUM/COUNT/MIN/MAX/AVG` partial aggregate。详细说明见 [`docs/partitionable-execution.zh.md`](docs/partitionable-execution.zh.md) 与 [`docs/batch-pipeline-execution.zh.md`](docs/batch-pipeline-execution.zh.md)。
+
+## 显式 Triton Hash Join Primitive
+
+`tpch_torch/backend/triton_hash_join.py` 提供第一版 GPU hash join primitive：
+
+- build side：unique INT64 key，open addressing hash table。
+- collision resolution：double hashing。
+- slot claim：`tl.atomic_cas(states + slot, 0, 1)`。
+- probe side：每个 probe key 使用 4-thread group 并行检查 4 个候选 slot。
+- 当前限制：不支持 duplicate build key / SQL multimap 输出；因此不会自动替换默认 SQL join。
+
+显式调用：
+
+```python
+from tpch_torch.backend.triton_hash_join import triton_hash_join_indices
+
+left_rows, right_rows = triton_hash_join_indices(left_key_cuda_i64, right_key_cuda_i64)
+```
 
 ## 显式 Scan Chunk Execution
 
@@ -490,28 +509,30 @@ timeout 60 python -m compileall -q tpch_torch scripts
 15. [x] agg 第一批测试：INT64/FP32/FP64/DECIMAL SUM + DECIMAL MIN/MAX/AVG；完整多 key/SUM 矩阵待扩展
 16. [x] hash-style join 第一版接口：tensor dictionary/probe prototype（不是成熟 GPU hash table）
 17. [x] hash join 第一批测试：DECIMAL scale-aligned probe；完整 key/payload 矩阵待扩展
-18. [ ] aggregate pipeline 化：`LocalAggregateBatchOperator -> FinalAggregateBatchOperator`，把 `PartitionConfig` 原型并入 batch pipeline
+18. [x] aggregate pipeline 化第一版：`LocalAggregateBatchOperator -> FinalMerge`，`PartitionConfig` 已并入 batch pipeline，Q1/Q6 覆盖
+19. [x] 显式 Triton hash join primitive 原型：atomicCAS + double hashing + 4-thread probe group，unique build key INT64
+20. [ ] 完整 SQL hash join multimap：duplicate build key、payload chaining / prefix-sum output sizing、NULL 语义、多 key
 
 ### P3 — 压缩数据执行（远期）
 
-19. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
-20. 压缩数据 alignment、compressed join/agg
-21. 压缩感知 optimizer rules、encoding 选择策略
+21. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
+22. 压缩数据 alignment、compressed join/agg
+23. 压缩感知 optimizer rules、encoding 选择策略
 
 ### P4 — 编译器/融合/优化（远期）
 
-22. 更多 fusion passes（projection/filter/agg 链）
-23. `torch.compile` / Antares / TVM 编译执行
-24. hash join vs sort join 自适应选择
-25. sorted/unique 元数据感知优化
-26. hot path 去 Python loops
-27. batch scheduler：chunk 级 CPU thread / CUDA stream 调度
+24. 更多 fusion passes（projection/filter/agg 链）
+25. `torch.compile` / Antares / TVM 编译执行
+26. hash join vs sort join 自适应选择
+27. sorted/unique 元数据感知优化
+28. hot path 去 Python loops
+29. batch scheduler：chunk 级 CPU thread / CUDA stream 调度
 
 ### P5 — 论文对齐（远期）
 
-28. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
-29. TQP++：ML-compiler lowering、tiered scheduling
-30. CoddSpeed：数据移动建模、accelerator placement
+30. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
+31. TQP++：ML-compiler lowering、tiered scheduling
+32. CoddSpeed：数据移动建模、accelerator placement
 
 ---
 
@@ -755,8 +776,10 @@ AST 设计要求：
 
 - 第一阶段保持 correctness-first tensor API：输入 key columns，输出 `left_rows/right_rows` join indices。
 - 第二阶段实现真正 GPU hash join：
-  - build side hash bucket / offset / next arrays 或 sort-free dictionary ids。
-  - probe side parallel lookup。
+  - [x] 第一版显式 Triton primitive：unique build INT64 key，atomicCAS claim slot，double hashing collision resolution，4-thread group probe。
+  - [ ] SQL multimap hash join：duplicate build key、payload chaining / prefix-sum output sizing、NULL policy。
+  - [ ] build side hash bucket / offset / next arrays 或 sort-free dictionary ids。
+  - [ ] probe side parallel lookup 后直接输出 joined batches。
   - duplicate key 使用 prefix sum / offsets 生成 many-to-many output。
   - payload 延迟 materialize。
 - 与 CoddSpeed 对齐：把 hash join 作为可替换算子，planner/strategy 根据 cardinality、collision degree、sorted/unique metadata、device 选择 sort join 或 hash join。

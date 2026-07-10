@@ -60,23 +60,29 @@ def execute_partitionable_physical_plan(
     config: PartitionConfig,
     device: str = "cpu",
 ) -> list[dict[str, Any]]:
-    """Execute a supported physical graph one partition at a time."""
-
-    from tpch_torch.backend.physical import PhysicalPlanExecutor
+    """Execute a supported aggregate graph through local/final batch aggregation."""
 
     analysis = _analyze_partitionable_graph(con, graph, config)
-    partial_rows: list[dict[str, Any]] = []
-    for start, end in row_ranges(_table_row_count(con, analysis.table), config.chunk_size):
-        executor = PhysicalPlanExecutor(
-            con,
-            graph,
-            device=device,
-            scan_ranges={analysis.table: (start, end)},
-            scan_chunk_sizes={analysis.table: config.chunk_size},
-            enable_fusion=True,
-        )
-        partial_rows.extend(executor.execute())
+    partial_rows = _execute_partitionable_batch_pipeline(
+        con,
+        graph,
+        analysis.table,
+        config.chunk_size,
+        device,
+    )
     return _merge_partial_rows(partial_rows, analysis)
+
+
+def _execute_partitionable_batch_pipeline(
+    con: duckdb.DuckDBPyConnection,
+    graph: TQPOperatorGraph,
+    table: str,
+    chunk_size: int,
+    device: str,
+) -> list[dict[str, Any]]:
+    from tpch_torch.backend.physical_pipeline import execute_batch_pipeline
+
+    return execute_batch_pipeline(con, graph, table=table, chunk_size=chunk_size, device=device)
 
 
 def _analyze_partitionable_graph(

@@ -146,21 +146,18 @@ def test_partitionable_execution_rejects_descending_group_key_order():
         )
 
 
-def test_partitionable_q1_uses_chunked_fused_physical_primitive(monkeypatch):
-    import tpch_torch.backend.physical_fusion as physical_fusion
+def test_partitionable_q1_uses_batch_pipeline_not_per_chunk_physical_executor(monkeypatch):
     from tpch_torch.backend.graph import PyTorchGraphExecutor
+    from tpch_torch.backend.physical import PhysicalPlanExecutor
 
     con = duckdb.connect()
     create_lineitem_fixture(con, Q1_FIXTURE_ROWS)
     plan = compile_tqp_plan(con, TPC_H_Q1_SQL, "sirius")
-    original = physical_fusion._execute_q1_fused
-    calls = []
 
-    def tracked_q1_fused(con_arg, device, *, scan_range=None):
-        calls.append(scan_range)
-        return original(con_arg, device, scan_range=scan_range)
+    def fail_executor_execute(self):
+        raise AssertionError("partitionable aggregate execution should use batch pipeline")
 
-    monkeypatch.setattr(physical_fusion, "_execute_q1_fused", tracked_q1_fused)
+    monkeypatch.setattr(PhysicalPlanExecutor, "execute", fail_executor_execute)
 
     rows = PyTorchGraphExecutor().execute(
         con,
@@ -169,5 +166,27 @@ def test_partitionable_q1_uses_chunked_fused_physical_primitive(monkeypatch):
         partition_config=PartitionConfig(table="lineitem", chunk_size=2),
     )
 
-    assert calls == [(0, 2), (2, 4)]
     assert [row["count_order"] for row in rows] == [1, 2]
+
+
+def test_partitionable_q6_uses_batch_pipeline_not_per_chunk_physical_executor(monkeypatch):
+    from tpch_torch.backend.graph import PyTorchGraphExecutor
+    from tpch_torch.backend.physical import PhysicalPlanExecutor
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    plan = compile_tqp_plan(con, Q6_SQL, "sirius")
+
+    def fail_executor_execute(self):
+        raise AssertionError("partitionable aggregate execution should use batch pipeline")
+
+    monkeypatch.setattr(PhysicalPlanExecutor, "execute", fail_executor_execute)
+
+    rows = PyTorchGraphExecutor().execute(
+        con,
+        plan,
+        device="cpu",
+        partition_config=PartitionConfig(table="lineitem", chunk_size=2),
+    )
+
+    assert rows == [{"revenue": pytest.approx(19.0)}]

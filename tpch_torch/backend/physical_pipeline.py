@@ -9,7 +9,12 @@ import duckdb
 import torch
 
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_expr import expression_sort_key_name, strip_order_direction
+from tpch_torch.backend.physical_pipeline_aggregate import LocalAggregateBatchOperator
 from tpch_torch.backend.physical_projection import (
+    aggregate_order_alias,
+    matching_expression_alias,
+    order_alias_value,
     normalize_projection_expressions,
     projection_output_name,
     projection_value_expression,
@@ -117,6 +122,20 @@ class ProjectBatchOperator:
         return _project_batch(self.context, self.node, batch)
 
 
+@dataclass(frozen=True)
+class SortBatchOperator:
+    context: PipelineContext
+    node: TQPOperatorNode
+    child: BatchOperator
+
+    def next_batch(self) -> PhysicalTable | None:
+        batch = self.child.next_batch()
+        if batch is None:
+            return None
+        order_items = _metadata_list(self.node, "Order By")
+        return batch if not order_items else _sort_table(self.context, batch, order_items)
+
+
 def execute_batch_pipeline(
     con: duckdb.DuckDBPyConnection,
     graph: TQPOperatorGraph,
@@ -167,6 +186,10 @@ def _build_operator(context: PipelineContext, node_id: str, table: str) -> Batch
         return FilterBatchOperator(_single_child_operator(context, node, table), _required_string(node, "Expression"))
     if node.kind == OperatorKind.PROJECT:
         return ProjectBatchOperator(context, node, _single_child_operator(context, node, table))
+    if node.kind == OperatorKind.AGGREGATE:
+        return LocalAggregateBatchOperator(_single_child_operator(context, node, table), node)
+    if node.kind == OperatorKind.SORT:
+        return SortBatchOperator(context, node, _single_child_operator(context, node, table))
     raise UnsupportedPlanError(f"batch pipeline does not support node: {node.name}")
 
 
@@ -231,6 +254,42 @@ def _project_batch(context: PipelineContext, node: TQPOperatorNode, child: Physi
         name, aliases = projection_output_name(child, expression, index, value, context.select_aliases)
         items.append((name, value, aliases))
     return PhysicalTable.projected("projection", items, child.row_count)
+
+
+def _sort_table(
+    context: PipelineContext,
+    table: PhysicalTable,
+    order_items: Sequence[str],
+) -> PhysicalTable:
+    result = table
+    for raw_item in reversed(tuple(order_items)):
+        expr, descending = strip_order_direction(raw_item)
+        key_name = expression_sort_key_name(expr)
+        key = _sort_value(context, result, expr, key_name).require_tensor()
+        order = torch.argsort(key, descending=descending, stable=True)
+        result = result.gather(order)
+    return result
+
+
+def _sort_value(
+    context: PipelineContext,
+    table: PhysicalTable,
+    expression: str,
+    key_name: str,
+) -> PhysicalValue:
+    try:
+        return table.value_named(key_name)
+    except KeyError:
+        alias = aggregate_order_alias(context.select_aliases, table, expression)
+        if alias is not None:
+            return table.value_named(alias)
+        expression_alias = matching_expression_alias(table, expression)
+        if expression_alias is not None:
+            return table.value_named(expression_alias)
+        alias_value = order_alias_value(context.select_aliases, table, key_name)
+        if alias_value is not None:
+            return evaluate_expression(table, alias_value)
+        return evaluate_expression(table, expression)
 
 
 def _apply_scan_filters(table: PhysicalTable, filters: Sequence[str]) -> PhysicalTable:
