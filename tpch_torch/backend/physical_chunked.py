@@ -7,8 +7,7 @@ from typing import Any
 
 import duckdb
 
-from tpch_torch.backend.physical_partitionable import row_ranges
-from tpch_torch.backend.physical_scan import scan_row_count
+from tpch_torch.backend.physical_pipeline import execute_batch_pipeline
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
 
@@ -35,24 +34,10 @@ def execute_chunked_physical_plan(
     config: ScanChunkConfig,
     device: str = "cpu",
 ) -> list[dict[str, Any]]:
-    """Execute a safe physical graph one scan chunk at a time."""
-
-    from tpch_torch.backend.physical import PhysicalPlanExecutor
+    """Execute a safe physical graph through a pull-based batch pipeline."""
 
     table = _analyze_chunked_scan_graph(graph, config)
-    rows: list[dict[str, Any]] = []
-    total, _ = scan_row_count(con, table, None)
-    for start, end in row_ranges(total, config.chunk_size):
-        executor = PhysicalPlanExecutor(
-            con,
-            graph,
-            device=device,
-            scan_ranges={table: (start, end)},
-            scan_chunk_sizes={table: config.chunk_size},
-            enable_fusion=False,
-        )
-        rows.extend(executor.execute())
-    return rows
+    return execute_batch_pipeline(con, graph, table=table, chunk_size=config.chunk_size, device=device)
 
 
 def _analyze_chunked_scan_graph(graph: TQPOperatorGraph, config: ScanChunkConfig) -> str:
