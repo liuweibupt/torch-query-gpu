@@ -7,6 +7,7 @@ from typing import Any
 
 import duckdb
 
+from tpch_torch.backend.physical_metadata import metadata_string as _metadata_string
 from tpch_torch.backend.physical_pipeline import execute_batch_pipeline
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
@@ -77,17 +78,3 @@ def _scan_tables(graph: TQPOperatorGraph) -> tuple[str, ...]:
         if table is not None:
             tables.append(table.lower())
     return tuple(dict.fromkeys(tables))
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
-
-
-def _metadata_string(node: TQPOperatorNode, key: str) -> str | None:
-    values = _metadata_list(node, key)
-    return values[0] if values else None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list
 from tpch_torch.backend.physical_aggregate import (
     aggregate_specs,
     execute_grouped_aggregate,
@@ -29,12 +30,3 @@ class LocalAggregateBatchOperator:
         if group_exprs:
             return execute_grouped_aggregate(batch, group_exprs, specs)
         return execute_ungrouped_aggregate(batch, specs)
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)

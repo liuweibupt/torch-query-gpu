@@ -1,6 +1,6 @@
 # 当前架构：DuckDB/Sirius-like 前端 → TQP IR → PyTorch Graph Nodes
 
-本文档描述当前仓库的真实执行链路。DuckDB 负责 SQL 解析、绑定、计划准入和 JSON physical plan 输出；Sirius-like 前端 lowering 成 `TQPOperatorGraph`；PyTorch 后端在 CPU/CUDA tensor 上执行 graph nodes。DuckDB 只在 validation 中作为 baseline，不是执行 fallback。
+本文档描述当前仓库的真实执行链路。DuckDB 负责 SQL 解析、绑定、schema 推导、计划准入和 JSON physical plan 输出；Sirius-like 前端把 parser AST alias、DESCRIBE output schema 与 physical JSON lowering 成 typed `TQPOperatorGraph`；PyTorch 后端在 CPU/CUDA tensor 上执行 graph nodes。DuckDB 只在 validation 中作为 baseline，不是执行 fallback。
 
 如果需要逐行理解 Q1 从 SQL 到 PyTorch tensor operators 的具体执行过程，请阅读 [`docs/q1-end-to-end-execution.zh.md`](q1-end-to-end-execution.zh.md)。如果需要理解本项目与 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 的软件栈差异，请阅读 [`docs/gpu-sql-ecosystem-analysis.zh.md`](gpu-sql-ecosystem-analysis.zh.md)。
 
@@ -10,7 +10,7 @@
 flowchart LR
     SQL["SQL 文本<br/>--query / --sql / --sql-file"] --> Runner["runner.load_sql"]
     Runner --> Frontend{"frontend"}
-    Frontend -->|默认 sirius| Sirius["DuckDB parser/binder/planner<br/>EXPLAIN + JSON physical plan"]
+    Frontend -->|默认 sirius| Sirius["DuckDB parser AST / DESCRIBE schema<br/>EXPLAIN + JSON physical plan"]
     Frontend -->|严格 substrait| Substrait["DuckDB native Substrait exporter"]
     Sirius --> Graph["TQPOperatorGraph"]
     Substrait --> Plan["TQPPlan"]
@@ -44,7 +44,7 @@ flowchart LR
 | CLI | `scripts/run_query.py`, `scripts/validate_query.py`, `scripts/benchmark_query.py` | 解析 SQL 来源、frontend、device、validation/benchmark 参数。 |
 | Runner | `tpch_torch/runner.py` | 薄编排：读取 SQL，编译 frontend plan，调用 backend，必要时 validation。 |
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`。 |
-| DuckDB lowering | `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 `TQPOperatorGraph`。 |
+| DuckDB lowering | `tpch_torch/frontend/duckdb_ast.py`, `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 用 DuckDB parser JSON 提取 SELECT alias，用 DESCRIBE 获取 output schema，导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 typed `TQPOperatorGraph`。 |
 | IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | 不可变前后端边界。 |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1-Q22 physical interpreter、显式 Q6 compressed-mask primitive 实验和 generic SQL。 |
 | Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner 与 multi-column equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、SEMI/ANTI membership probe、sorted group-by fast path、membership folding、static dictionary encoding 和 alias 去重 selection。 |
@@ -57,7 +57,13 @@ Sirius-like 前端把 DuckDB JSON physical plan 挂到 `TQPPlan.operator_graph`�
 
 ```python
 physical_plan_json = export_duckdb_physical_plan_json(con, sql)
-operator_graph = lower_duckdb_json_to_operator_graph(sql, query_id, physical_plan_json)
+operator_graph = lower_duckdb_json_to_operator_graph(
+    sql,
+    query_id,
+    physical_plan_json,
+    output_schema=describe_output_schema(con, sql),
+    select_aliases=select_expressions_by_alias(con, sql),
+)
 return TQPPlan(..., operator_graph=operator_graph)
 ```
 

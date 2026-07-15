@@ -9,6 +9,7 @@ import torch
 from tpch_torch.backend.physical_expr import evaluate_expression, projection_name
 from tpch_torch.backend.physical_join import anti_join_indices, combine_join_tables, semi_join_indices, semi_join_table
 from tpch_torch.backend.physical_join_exec import join_conditions
+from tpch_torch.backend.physical_metadata import metadata_string
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import TQPOperatorNode
@@ -125,8 +126,7 @@ def _matches_any_key(column: str, keys: Sequence[str]) -> bool:
 
 
 def _join_type(node: TQPOperatorNode) -> str:
-    value = node.metadata.get("Join Type")
-    return str(value or "").upper()
+    return (metadata_string(node, "join_type") or "").upper()
 
 
 def _correlated_conditions(
