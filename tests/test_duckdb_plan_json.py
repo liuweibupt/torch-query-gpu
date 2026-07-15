@@ -57,6 +57,9 @@ def test_output_aliases_come_from_duckdb_describe_not_sql_alias_regex():
     assert aggregate.refs[0].name == "b"
     assert aggregate.refs[0].slot_id == "n0_0.s0"
     assert aggregate.output_slot.name == "total"
+    assert aggregate.expression.kind == "call"
+    assert aggregate.expression.value == "sum_no_overflow"
+    assert aggregate.expression.children[0].ref.name == "b"
 
 
 def test_sirius_frontend_carries_schema_and_alias_metadata_before_execution(monkeypatch):
@@ -75,8 +78,15 @@ def test_sirius_frontend_carries_schema_and_alias_metadata_before_execution(monk
     project = plan.operator_graph.root
     assert project.metadata["slot_projections"][0].canonical == "a"
     assert project.metadata["slot_projections"][0].refs[0].name == "a"
+    assert project.metadata["slot_projections"][0].expression.kind == "slot_ref"
     assert project.metadata["slot_projections"][1].canonical == "(b + 1)"
     assert project.metadata["slot_projections"][1].refs[0].name == "b"
+    expression = project.metadata["slot_projections"][1].expression
+    assert expression.kind == "binary"
+    assert expression.value == "+"
+    assert expression.children[0].ref.name == "b"
+    assert expression.children[1].kind == "literal"
+    assert expression.children[1].value == 1
 
     def fail_late_sql_alias_parse(sql_text):
         raise AssertionError("backend should use graph.select_aliases")
@@ -90,3 +100,24 @@ def test_sirius_frontend_carries_schema_and_alias_metadata_before_execution(monk
     result = run_sql_with_frontend(con, sql, device="cpu", frontend="sirius")
 
     assert result.rows == [{"x": 1, "y": 3}]
+
+
+def test_slot_bound_join_condition_has_expression_ast():
+    from tpch_torch.runner import compile_tqp_plan
+    from tpch_torch.operator_graph import OperatorKind
+
+    con = duckdb.connect()
+    con.execute("create table t(a int, b int)")
+    con.execute("create table u(c int, d int)")
+    con.execute("insert into t values (1, 2)")
+    con.execute("insert into u values (1, 3)")
+
+    graph = compile_tqp_plan(con, "select a, c from t join u on t.a = u.c", "sirius").operator_graph
+    join = next(node for node in graph.nodes if node.kind == OperatorKind.JOIN)
+    condition = join.metadata["slot_conditions"][0]
+
+    assert condition.raw == "a = c"
+    assert [ref.name for ref in condition.refs] == ["a", "c"]
+    assert condition.expression.kind == "binary"
+    assert condition.expression.value == "="
+    assert [child.ref.name for child in condition.expression.children] == ["a", "c"]

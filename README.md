@@ -18,7 +18,7 @@
 - ✅ Q2-Q22 已从早期 graph recipes 继续推进到 DuckDB physical-plan interpreter；旧 `queries/qXX` 模板和 `compiled_tpch` root 均不再作为执行 fallback。
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
 - ✅ Sirius-grade frontend 第一阶段：`AS`/SELECT alias 由 DuckDB `json_serialize_sql` parser AST 提取，输出 names/types 由 DuckDB `DESCRIBE` 推导，并写入 `TQPOperatorGraph.output_schema`；backend 正常路径不再末端解析 SQL alias。
-- ✅ TQP op graph 引用统一第一阶段：每个 node 生成 `TQPSlot` output schema，projection/aggregate/group/join condition 额外生成 `TQPBoundExpression.refs`，把列名和 `#0/#1` child ordinal 统一成 `SlotRef`。
+- ✅ TQP op graph 引用统一第一阶段：每个 node 生成 `TQPSlot` output schema，projection/aggregate/group/join condition 额外生成 `TQPBoundExpression.refs` 与 slot-aware `TQPExprNode`，把列名和 `#0/#1` child ordinal 统一成结构化 `SlotRef`/表达式 AST。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ CoddSpeed-style partitionable execution 已并入 batch pipeline：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N` 覆盖单表 aggregate fragments（Q6、Q1），执行形态为 `Scan/Filter/Project -> LocalAggregateBatchOperator -> FinalMerge`。

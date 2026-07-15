@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
+from tpch_torch.operator_expression_binding import parse_expression_tree
 from tpch_torch.operator_graph import OperatorKind, TQPOutputColumn
 from tpch_torch.operator_refs import TQPBoundExpression, TQPSlot, TQPSlotRef
 
 _SLOT_REF_PATTERN = re.compile(r"#(?P<ordinal>\d+)")
 _IDENTIFIER_PATTERN = re.compile(r'(?<![#."])([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?)')
+_COMPARISON_OPERATORS = ("!~~", "~~", ">=", "<=", "!=", "<>", "=", ">", "<")
 _RESERVED_IDENTIFIERS = frozenset(
     {
         "and",
@@ -202,7 +204,9 @@ def _bound_expression(
     output_slot: TQPSlot | None,
 ) -> TQPBoundExpression:
     refs, unresolved = _resolve_expression_refs(canonical, input_slots)
-    return TQPBoundExpression(raw, canonical, refs, unresolved, output_slot)
+    expression = parse_expression_tree(canonical, input_slots)
+    return TQPBoundExpression(raw, canonical, refs, unresolved, output_slot, expression)
+
 
 
 def _resolve_expression_refs(expression: str, slots: Sequence[TQPSlot]) -> tuple[tuple[TQPSlotRef, ...], tuple[str, ...]]:

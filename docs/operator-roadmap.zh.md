@@ -73,7 +73,7 @@
 - [x] Filter/projection programmatic TypedExpr AST 第一版：支持 column/literal/arithmetic 并绑定 `ColumnType`。
 - [x] DuckDB parser JSON alias extraction：`AS`/SELECT alias 不再由 backend regex 在执行末端解析。
 - [x] DuckDB DESCRIBE output schema：`TQPOperatorGraph.output_schema` 携带输出列名、类型和 nullable。
-- [x] TQP slot reference view 第一版：`TQPSlot` / `TQPSlotRef` / `TQPBoundExpression` 把 projection、aggregate、group、join condition 中的列名和 `#0/#1` ordinal 统一为 graph-level slot refs。
+- [x] TQP slot reference / expression view 第一版：`TQPSlot` / `TQPSlotRef` / `TQPBoundExpression` / `TQPExprNode` 把 projection、aggregate、group、join condition 中的列名和 `#0/#1` ordinal 统一为 graph-level slot refs 与基础表达式 AST。
 - [ ] DuckDB expression string/JSON → TypedExpr binder：替换 `physical_expr.py` 的字符串递归入口。
 - [x] Expression DAG optimizer 第一版：constant folding、CSE、DECIMAL add/sub scale hoisting。
 - [ ] Expression DAG optimizer 完整版：predicate normalization、validity propagation、更多 DECIMAL/STRING 规则。

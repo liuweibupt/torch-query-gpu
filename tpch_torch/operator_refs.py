@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,19 @@ class TQPSlot:
 
 
 @dataclass(frozen=True)
+class TQPExprNode:
+    """Small slot-aware expression AST node for graph metadata."""
+
+    kind: str
+    value: Any = None
+    children: tuple["TQPExprNode", ...] = ()
+    ref: TQPSlotRef | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "children", tuple(self.children))
+
+
+@dataclass(frozen=True)
 class TQPBoundExpression:
     """Expression text plus resolved input slot references."""
 
@@ -44,6 +58,7 @@ class TQPBoundExpression:
     refs: tuple[TQPSlotRef, ...]
     unresolved: tuple[str, ...] = ()
     output_slot: TQPSlot | None = None
+    expression: TQPExprNode | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "refs", tuple(self.refs))

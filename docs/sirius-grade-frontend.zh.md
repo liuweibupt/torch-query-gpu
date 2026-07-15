@@ -161,12 +161,20 @@ class TQPSlot:
     aliases: tuple[str, ...]
 
 @dataclass(frozen=True)
+class TQPExprNode:
+    kind: str         # slot_ref / literal / binary / call / cast / logical / unknown
+    value: Any
+    children: tuple[TQPExprNode, ...]
+    ref: TQPSlotRef | None
+
+@dataclass(frozen=True)
 class TQPBoundExpression:
     raw: str          # DuckDB raw expression，例如 sum_no_overflow(#0)
     canonical: str    # frontend canonical expression，例如 (b + 1)
     refs: tuple[TQPSlotRef, ...]
     unresolved: tuple[str, ...]
     output_slot: TQPSlot | None
+    expression: TQPExprNode | None
 ```
 
 lowering 阶段会为每个 node 生成 `node.output_slots`，并在 metadata 里补充结构化字段：
@@ -202,4 +210,37 @@ TQPBoundExpression(
 )
 ```
 
-也就是说，raw DuckDB 字符串会保留作兼容和调试；新的 graph 语义层统一用 `TQPSlot` / `TQPSlotRef`。后续 executor 可以逐步从字符串解释迁移到 slot-bound expression evaluator。
+也就是说，raw DuckDB 字符串会保留作兼容和调试；新的 graph 语义层统一用 `TQPSlot` / `TQPSlotRef`。同时 `expression` 字段会把基础表达式解析成小型 AST，当前覆盖 slot ref、literal、binary arithmetic/comparison、logical AND/OR/NOT、function call、CAST、EXTRACT(year)。后续 executor 可以逐步从字符串解释迁移到 slot-bound expression evaluator。
+
+
+## 6. 表达式解析第一阶段
+
+新增 `tpch_torch/operator_expression_binding.py`，它在 slot binding 之后解析 canonical expression，并生成 slot-aware `TQPExprNode`：
+
+```python
+# select a as x, b + 1 as y from t
+slot_projections[1].expression
+# TQPExprNode(
+#   kind="binary",
+#   value="+",
+#   children=(SlotRef(b), Literal(1)),
+# )
+
+# select sum(b) as total from t
+slot_aggregates[0].expression
+# TQPExprNode(
+#   kind="call",
+#   value="sum_no_overflow",
+#   children=(SlotRef(b),),
+# )
+
+# join condition: t.a = u.c
+slot_conditions[0].expression
+# TQPExprNode(
+#   kind="binary",
+#   value="=",
+#   children=(SlotRef(a), SlotRef(c)),
+# )
+```
+
+这一步仍不替换现有 executor 的字符串求值入口，只是在 graph IR 上建立结构化表达式视图，避免后续继续依赖列名和 `#N` 混杂的 raw string。
