@@ -464,6 +464,7 @@ Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
 | [`docs/architecture.zh.md`](docs/architecture.zh.md) | 中文架构说明、关键代码片段、Q1 分层图。 |
 | [`docs/q1-end-to-end-execution.zh.md`](docs/q1-end-to-end-execution.zh.md) | 以 TPC-H Q1 为例，详细解释 SQL 解析、DuckDB JSON physical plan、TQPOperatorGraph、PyTorch backend/operator 与冷/热执行口径。 |
 | [`docs/sirius-grade-frontend.zh.md`](docs/sirius-grade-frontend.zh.md) | Sirius-grade frontend 演进说明：DuckDB parser AST、DESCRIBE schema、normalized physical metadata 与当前边界。 |
+| [`docs/slot-expression-binding.zh.md`](docs/slot-expression-binding.zh.md) | 说明 TQP op graph 如何把列名与 `#0/#1` child ordinal 统一为 `TQPSlotRef`，以及 frontend/lowering 阶段的表达式 AST 解析。 |
 | [`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md) | 对比 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 与本项目 PyTorch 路线，分析软件栈、显存管理和复用 CUDA 算子的工程取舍。 |
 | [`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html) | 可浏览 HTML：评估 GPU 数据库引擎为什么难写，以及当前简化 TQP/PyTorch 版本距离成熟引擎还需要补齐的能力。 |
 | [`docs/ai-tensor-db-on-domestic-gpu.zh.md`](docs/ai-tensor-db-on-domestic-gpu.zh.md) | 面向分享的完整视图：以当前 demo、TQP 和 CoddSpeed 为参考，说明如何在国产卡上复用 AI tensor / PyTorch 生态实现关系代数与数据库执行。 |
