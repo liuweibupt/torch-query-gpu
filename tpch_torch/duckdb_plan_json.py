@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+from typing import Any, Mapping
 
 import duckdb
 
@@ -11,6 +12,29 @@ from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperato
 from tpch_torch.planner import DuckDBPlannerError
 
 _PLAN_JSON_COLUMN_INDEX = 1
+
+
+_CANONICAL_SEQUENCE_KEYS = {
+    "Projections": "projections",
+    "Filters": "filters",
+    "Aggregates": "aggregates",
+    "Groups": "groups",
+    "Order By": "order_by",
+    "Conditions": "conditions",
+    "Expressions": "expressions",
+}
+
+_CANONICAL_SCALAR_KEYS = {
+    "Table": "table",
+    "Type": "scan_type",
+    "Join Type": "join_type",
+    "Delim Index": "delim_index",
+    "Table Index": "table_index",
+    "CTE Index": "cte_index",
+    "Top": "top",
+    "Limit": "limit",
+    "Expression": "expression",
+}
 
 
 def export_duckdb_physical_plan_json(con: duckdb.DuckDBPyConnection, sql: str) -> list[dict[str, Any]]:
@@ -30,10 +54,23 @@ def export_duckdb_physical_plan_json(con: duckdb.DuckDBPyConnection, sql: str) -
     return loaded
 
 
+def describe_output_columns(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[str, ...]:
+    """Return output names from DuckDB binding instead of backend SQL text parsing."""
+
+    try:
+        rows = con.execute(f"DESCRIBE {sql}").fetchall()
+    except duckdb.Error as exc:
+        raise DuckDBPlannerError(f"DuckDB DESCRIBE failed: {exc}") from exc
+    return tuple(str(row[0]) for row in rows)
+
+
 def lower_duckdb_json_to_operator_graph(
     source_sql: str,
     query_id: int | None,
     plan_json: list[dict[str, Any]],
+    *,
+    output_names: tuple[str, ...] = (),
+    select_aliases: Mapping[str, str] | None = None,
 ) -> TQPOperatorGraph:
     """Lower DuckDB JSON physical-plan nodes to the repository's graph IR."""
 
@@ -52,7 +89,11 @@ def lower_duckdb_json_to_operator_graph(
                 kind=_operator_kind(name),
                 name=name,
                 children=child_ids,
-                metadata=dict(raw_node.get("extra_info") or {}),
+                metadata=_normalized_metadata(
+                    raw_node.get("extra_info") or {},
+                    is_root=path == (0,),
+                    output_names=output_names,
+                ),
             )
         )
         return node_id
@@ -65,7 +106,50 @@ def lower_duckdb_json_to_operator_graph(
         query_id=query_id,
         root_id=root_id,
         nodes=tuple(nodes),
+        output_names=output_names,
+        select_aliases=select_aliases or {},
     )
+
+
+def _normalized_metadata(
+    extra_info: dict[str, Any],
+    *,
+    is_root: bool,
+    output_names: tuple[str, ...],
+) -> dict[str, Any]:
+    metadata = dict(extra_info)
+    for raw_key, canonical_key in _CANONICAL_SEQUENCE_KEYS.items():
+        if raw_key in extra_info:
+            metadata[canonical_key] = _metadata_tuple(extra_info[raw_key])
+    for raw_key, canonical_key in _CANONICAL_SCALAR_KEYS.items():
+        if raw_key in extra_info:
+            metadata[canonical_key] = _metadata_scalar(extra_info[raw_key])
+    if "Estimated Cardinality" in extra_info:
+        metadata["estimated_cardinality"] = _metadata_int(extra_info["Estimated Cardinality"])
+    if "Projections" in extra_info:
+        metadata["projection_count"] = len(metadata["projections"])
+    if is_root and output_names:
+        metadata["output_names"] = output_names
+    return metadata
+
+
+def _metadata_tuple(value: Any) -> tuple[str, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return (str(value).strip(),)
+
+
+def _metadata_scalar(value: Any) -> str:
+    return str(value).strip()
+
+
+def _metadata_int(value: Any) -> int | None:
+    text = str(value).strip()
+    if not re.fullmatch(r"-?\d+", text):
+        return None
+    return int(text)
 
 
 def _node_id(path: tuple[int, ...]) -> str:

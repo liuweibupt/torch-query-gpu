@@ -47,9 +47,13 @@ class TQPOperatorGraph:
     query_id: int | None
     root_id: str
     nodes: tuple[TQPOperatorNode, ...]
+    output_names: tuple[str, ...] = ()
+    select_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
+        object.__setattr__(self, "output_names", tuple(self.output_names))
+        object.__setattr__(self, "select_aliases", MappingProxyType(dict(self.select_aliases)))
         if self.root_id not in {node.node_id for node in self.nodes}:
             raise ValueError(f"root node is missing: {self.root_id}")
 

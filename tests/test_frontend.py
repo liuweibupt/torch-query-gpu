@@ -14,9 +14,22 @@ class DummyLogicalPlan:
     physical_plan: str = "physical"
 
 
-def _dummy_graph(sql: str, query_id: int | None = 1) -> TQPOperatorGraph:
+def _dummy_graph(
+    sql: str,
+    query_id: int | None = 1,
+    *,
+    output_names: tuple[str, ...] = (),
+    select_aliases: dict[str, str] | None = None,
+) -> TQPOperatorGraph:
     node = TQPOperatorNode(node_id="n0", kind=OperatorKind.SCAN, name="SEQ_SCAN")
-    return TQPOperatorGraph(source_sql=sql, query_id=query_id, root_id="n0", nodes=(node,))
+    return TQPOperatorGraph(
+        source_sql=sql,
+        query_id=query_id,
+        root_id="n0",
+        nodes=(node,),
+        output_names=output_names,
+        select_aliases=select_aliases or {},
+    )
 
 
 
@@ -29,7 +42,16 @@ def test_sirius_frontend_returns_tqp_plan_with_duckdb_metadata(monkeypatch):
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
-    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
+    monkeypatch.setattr("tpch_torch.frontend.sirius.describe_output_columns", lambda con, sql: ("sum_qty",))
+    monkeypatch.setattr(
+        "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
+        lambda sql, query_id, plan_json, *, output_names, select_aliases: _dummy_graph(
+            sql,
+            query_id,
+            output_names=output_names,
+            select_aliases=select_aliases,
+        ),
+    )
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, TPC_H_Q1_SQL)
@@ -40,6 +62,7 @@ def test_sirius_frontend_returns_tqp_plan_with_duckdb_metadata(monkeypatch):
     assert plan.duckdb_metadata is not None
     assert plan.duckdb_metadata.logical_opt == "optimized"
     assert plan.plan_json is None
+    assert plan.operator_graph.output_names == ("sum_qty",)
     assert calls == [(con, TPC_H_Q1_SQL)]
 
 
@@ -71,7 +94,16 @@ def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
-    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
+    monkeypatch.setattr("tpch_torch.frontend.sirius.describe_output_columns", lambda con, sql: ("n",))
+    monkeypatch.setattr(
+        "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
+        lambda sql, query_id, plan_json, *, output_names, select_aliases: _dummy_graph(
+            sql,
+            query_id,
+            output_names=output_names,
+            select_aliases=select_aliases,
+        ),
+    )
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, "select count(*) as n from lineitem")
@@ -79,6 +111,8 @@ def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch
     assert plan.query_id is None
     assert plan.frontend == "sirius"
     assert plan.source_sql == "select count(*) as n from lineitem"
+    assert plan.operator_graph.output_names == ("n",)
+    assert plan.operator_graph.select_aliases == {"n": "count(*)"}
     assert calls == ["select count(*) as n from lineitem"]
 
 
@@ -88,7 +122,16 @@ def test_sirius_frontend_admits_non_executable_generic_sql(monkeypatch):
 
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_logical_plan", export_logical)
     monkeypatch.setattr("tpch_torch.frontend.sirius.export_duckdb_physical_plan_json", lambda con, sql: [{"name": "SEQ_SCAN"}])
-    monkeypatch.setattr("tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph", lambda sql, query_id, plan_json: _dummy_graph(sql, query_id))
+    monkeypatch.setattr("tpch_torch.frontend.sirius.describe_output_columns", lambda con, sql: ("id",))
+    monkeypatch.setattr(
+        "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
+        lambda sql, query_id, plan_json, *, output_names, select_aliases: _dummy_graph(
+            sql,
+            query_id,
+            output_names=output_names,
+            select_aliases=select_aliases,
+        ),
+    )
 
     con = duckdb.connect()
     plan = compile_sirius_plan(con, "select * from t join u on t.id = u.id")

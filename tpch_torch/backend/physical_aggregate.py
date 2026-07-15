@@ -9,6 +9,7 @@ from typing import Sequence
 import torch
 
 from tpch_torch.backend.physical_expr import aggregate_output_aliases, evaluate_expression, projection_name
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import TQPOperatorNode
@@ -174,14 +175,6 @@ def _validity_or_ones(value: PhysicalValue, tensor: torch.Tensor) -> torch.Tenso
         return value.valid
     return torch.ones(tensor.shape, dtype=torch.bool, device=tensor.device)
 
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
 
 
 def aggregate_specs(node: TQPOperatorNode, child: PhysicalTable) -> tuple[AggregateSpec, ...]:

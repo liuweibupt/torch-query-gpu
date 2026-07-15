@@ -7,6 +7,7 @@ from typing import Sequence
 import torch
 
 from tpch_torch.backend.physical_expr import evaluate_expression
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list, metadata_string as _metadata_string
 from tpch_torch.backend.physical_join import (
     anti_join_indices,
     combine_join_tables,
@@ -187,17 +188,3 @@ def _evaluate_residual(left: PhysicalTable, right: PhysicalTable, condition: str
         right_tensor = evaluate_expression(right, right_expr.strip()).require_tensor()
         return left_tensor != right_tensor
     raise UnsupportedPlanError(f"unsupported join residual condition: {condition}")
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
-
-
-def _metadata_string(node: TQPOperatorNode, key: str) -> str | None:
-    values = _metadata_list(node, key)
-    return values[0] if values else None

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 
 import duckdb
 
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list, metadata_string as _metadata_string
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
 
@@ -92,7 +93,7 @@ def _analyze_partitionable_graph(
             f"requested={table!r} plan_tables={scan_tables!r}"
         )
     aggregate_node = _single_aggregate_node(graph)
-    aliases = _describe_aliases(con, graph.source_sql)
+    aliases = graph.output_names or _describe_aliases(con, graph.source_sql)
     group_columns = aliases[: len(_metadata_list(aggregate_node, "Groups"))]
     aggregates = _aggregate_columns(aggregate_node, aliases, len(group_columns))
     count_column = _count_column(aggregates)
@@ -264,17 +265,3 @@ def _table_row_count(con: duckdb.DuckDBPyConnection, table: str) -> int:
 def _describe_aliases(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[str, ...]:
     rows = con.execute(f"DESCRIBE {sql}").fetchall()
     return tuple(str(row[0]) for row in rows)
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
-
-
-def _metadata_string(node: TQPOperatorNode, key: str) -> str | None:
-    values = _metadata_list(node, key)
-    return values[0] if values else None
