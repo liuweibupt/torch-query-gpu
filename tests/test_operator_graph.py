@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tpch_torch.operator_graph import OperatorKind, TQPOutputColumn, TQPOperatorGraph, TQPOperatorNode
+from tpch_torch.operator_refs import TQPSlot
 
 
 def test_operator_graph_returns_root_node() -> None:
@@ -166,7 +167,8 @@ def test_complex_tpch_graph_modules_use_explicit_subquery_nodes() -> None:
 
 
 def test_operator_graph_carries_frontend_output_schema_and_aliases() -> None:
-    scan = TQPOperatorNode(node_id="n1", kind=OperatorKind.SCAN, name="SEQ_SCAN")
+    slot = TQPSlot("n1.s0", "n1", 0, "x", "INTEGER", ("t.x",))
+    scan = TQPOperatorNode(node_id="n1", kind=OperatorKind.SCAN, name="SEQ_SCAN", output_slots=(slot,))
     graph = TQPOperatorGraph(
         source_sql="select a as x from t",
         query_id=None,
@@ -179,3 +181,4 @@ def test_operator_graph_carries_frontend_output_schema_and_aliases() -> None:
     assert graph.output_names == ("x",)
     assert graph.output_types == ("INTEGER",)
     assert graph.select_aliases == {"x": "a"}
+    assert graph.root.output_slots == (slot,)

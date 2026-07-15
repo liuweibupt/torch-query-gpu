@@ -27,8 +27,12 @@ def test_lower_duckdb_json_adds_stable_metadata_and_output_schema():
     assert project.metadata["projection_count"] == 2
     assert project.metadata["output_names"] == ("x", "y")
     assert project.metadata["output_types"] == ("INTEGER", "DECIMAL(13,2)")
+    assert project.output_slots[0].name == "x"
+    assert project.output_slots[0].type_name == "INTEGER"
     assert scan.metadata["table"] == "t"
     assert scan.metadata["projections"] == ("a", "b")
+    assert scan.output_slots[0].slot_id == "n0_0.s0"
+    assert scan.output_slots[0].aliases == ("a", "t.a")
     assert isinstance(scan.metadata["estimated_cardinality"], int)
 
 
@@ -48,6 +52,11 @@ def test_output_aliases_come_from_duckdb_describe_not_sql_alias_regex():
     assert graph.output_types == ("HUGEINT",)
     assert graph.root.metadata["output_names"] == ("total",)
     assert graph.root.metadata["aggregates"] == ("sum_no_overflow(#0)",)
+    aggregate = graph.root.metadata["slot_aggregates"][0]
+    assert aggregate.raw == "sum_no_overflow(#0)"
+    assert aggregate.refs[0].name == "b"
+    assert aggregate.refs[0].slot_id == "n0_0.s0"
+    assert aggregate.output_slot.name == "total"
 
 
 def test_sirius_frontend_carries_schema_and_alias_metadata_before_execution(monkeypatch):
@@ -63,6 +72,11 @@ def test_sirius_frontend_carries_schema_and_alias_metadata_before_execution(monk
     assert plan.operator_graph.output_names == ("x", "y")
     assert plan.operator_graph.output_types == ("INTEGER", "INTEGER")
     assert plan.operator_graph.select_aliases == {"x": "a", "y": "(b + 1)"}
+    project = plan.operator_graph.root
+    assert project.metadata["slot_projections"][0].canonical == "a"
+    assert project.metadata["slot_projections"][0].refs[0].name == "a"
+    assert project.metadata["slot_projections"][1].canonical == "(b + 1)"
+    assert project.metadata["slot_projections"][1].refs[0].name == "b"
 
     def fail_late_sql_alias_parse(sql_text):
         raise AssertionError("backend should use graph.select_aliases")

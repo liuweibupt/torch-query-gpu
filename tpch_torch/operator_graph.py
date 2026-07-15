@@ -7,6 +7,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from tpch_torch.operator_refs import TQPSlot
+
 
 class OperatorKind(StrEnum):
     """Backend-visible operator categories."""
@@ -46,10 +48,12 @@ class TQPOperatorNode:
     name: str
     children: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    output_slots: tuple[TQPSlot, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "children", tuple(self.children))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "output_slots", tuple(self.output_slots))
 
 
 @dataclass(frozen=True)

@@ -45,7 +45,7 @@ flowchart LR
 | Runner | `tpch_torch/runner.py` | 薄编排：读取 SQL，编译 frontend plan，调用 backend，必要时 validation。 |
 | Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`。 |
 | DuckDB lowering | `tpch_torch/frontend/duckdb_ast.py`, `tpch_torch/duckdb_plan_json.py`, `tpch_torch/planner.py` | 用 DuckDB parser JSON 提取 SELECT alias，用 DESCRIBE 获取 output schema，导出 DuckDB 文本/JSON plan，并把 JSON node lowering 到 typed `TQPOperatorGraph`。 |
-| IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py` | 不可变前后端边界。 |
+| IR | `tpch_torch/ir/plan.py`, `tpch_torch/operator_graph.py`, `tpch_torch/operator_refs.py`, `tpch_torch/operator_slot_binding.py` | 不可变前后端边界；每个 node 携带 typed output slots，slot-bound expressions 把列名和 `#N` ordinal 统一成 `SlotRef`。 |
 | Backend dispatch | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py` | TPC-H 强制走 graph；分发 Q1-Q22 physical interpreter、显式 Q6 compressed-mask primitive 实验和 generic SQL。 |
 | Physical interpreter | `tpch_torch/backend/physical.py`, `physical_expr.py`, `physical_projection.py`, `physical_required.py`, `physical_join.py`, `physical_sql*.py`, `physical_types.py`, `static_dictionaries.py` | 解释 DuckDB `SEQ_SCAN`、`FILTER`、`PROJECTION`、inner 与 multi-column equi `HASH_JOIN`、grouped/ungrouped aggregate、`ORDER_BY`、`TOP_N`、`LIMIT`、final aggregate expression；包含 tensor join index、SEMI/ANTI membership probe、sorted group-by fast path、membership folding、static dictionary encoding 和 alias 去重 selection。 |
 | Graph nodes | `tpch_torch/backend/graph_nodes.py` | Scan、filter、lookup join、semi/anti join、scalar subquery、grouped scalar subquery、CTE materialization、aggregate、sort/limit helpers。 |

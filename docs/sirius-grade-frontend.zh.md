@@ -140,3 +140,66 @@ operator_graph = lower_duckdb_json_to_operator_graph(
 - backend expression evaluator 仍消费 expression text；只是这些 text 现在来自 DuckDB parser AST renderer，而不是 backend regex。
 
 因此当前状态是 Sirius-grade frontend 的 Python API 第一阶段：frontend 边界更清晰，SQL 字符串解析不再散落在 backend；完整对齐 Sirius 还需要 C++ logical-plan exporter。
+
+## 5. Slot/SlotRef 引用统一
+
+DuckDB physical JSON 里天然会混用两种引用：
+
+- 列名：例如 scan/project 中的 `b`。
+- child ordinal：例如 aggregate 中的 `sum_no_overflow(#0)`。
+
+成熟数据库通常允许 physical plan 使用 ordinal，但 ordinal 不应该裸露在字符串里让后端猜。当前实现新增了 graph-level typed slot view：
+
+```python
+@dataclass(frozen=True)
+class TQPSlot:
+    slot_id: str      # 例如 n0_0.s0
+    node_id: str
+    ordinal: int
+    name: str
+    type_name: str | None
+    aliases: tuple[str, ...]
+
+@dataclass(frozen=True)
+class TQPBoundExpression:
+    raw: str          # DuckDB raw expression，例如 sum_no_overflow(#0)
+    canonical: str    # frontend canonical expression，例如 (b + 1)
+    refs: tuple[TQPSlotRef, ...]
+    unresolved: tuple[str, ...]
+    output_slot: TQPSlot | None
+```
+
+lowering 阶段会为每个 node 生成 `node.output_slots`，并在 metadata 里补充结构化字段：
+
+| metadata 字段 | 含义 |
+| --- | --- |
+| `slot_projections` | projection expression 的输入 `SlotRef` 与输出 `TQPSlot` |
+| `slot_aggregates` | aggregate argument 中 `#0/#1` 解析后的 `SlotRef` |
+| `slot_groups` | group-by expression 的 `SlotRef` |
+| `slot_conditions` | join condition 解析后的左右输入 slot refs |
+| `output_slots` | 当前 node 的 typed output slots |
+
+例如：
+
+```sql
+select sum(b) as total from t
+```
+
+DuckDB raw physical aggregate 仍是：
+
+```text
+sum_no_overflow(#0)
+```
+
+但 TQP graph 的 canonical slot view 是：
+
+```python
+TQPBoundExpression(
+    raw="sum_no_overflow(#0)",
+    canonical="sum_no_overflow(#0)",
+    refs=(TQPSlotRef(slot_id="n0_0.s0", name="b", ordinal=0),),
+    output_slot=TQPSlot(slot_id="n0.s0", name="total", type_name="HUGEINT"),
+)
+```
+
+也就是说，raw DuckDB 字符串会保留作兼容和调试；新的 graph 语义层统一用 `TQPSlot` / `TQPSlotRef`。后续 executor 可以逐步从字符串解释迁移到 slot-bound expression evaluator。

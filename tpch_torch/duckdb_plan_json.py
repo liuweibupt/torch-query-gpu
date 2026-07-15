@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 import duckdb
 
 from tpch_torch.operator_graph import OperatorKind, TQPOutputColumn, TQPOperatorGraph, TQPOperatorNode
+from tpch_torch.operator_slot_binding import bind_node_slots
 from tpch_torch.planner import DuckDBPlannerError
 
 _PLAN_JSON_COLUMN_INDEX = 1
@@ -81,6 +82,7 @@ def lower_duckdb_json_to_operator_graph(
 
     nodes: list[TQPOperatorNode] = []
     schema = tuple(output_schema)
+    slots_by_node: dict[str, tuple[Any, ...]] = {}
 
     def lower_node(raw_node: dict[str, Any], path: tuple[int, ...]) -> str:
         node_id = _node_id(path)
@@ -89,19 +91,32 @@ def lower_duckdb_json_to_operator_graph(
             for child_index, child in enumerate(raw_node.get("children") or ())
         )
         name = str(raw_node.get("name", "UNKNOWN")).strip()
+        kind = _operator_kind(name)
+        raw_metadata = _normalized_metadata(
+            raw_node.get("extra_info") or {},
+            is_root=path == (0,),
+            output_schema=schema,
+        )
+        metadata, output_slots = bind_node_slots(
+            node_id=node_id,
+            kind=kind,
+            metadata=raw_metadata,
+            child_slots=tuple(slots_by_node[child_id] for child_id in child_ids),
+            output_schema=schema,
+            select_aliases=select_aliases or {},
+            is_root=path == (0,),
+        )
         nodes.append(
             TQPOperatorNode(
                 node_id=node_id,
-                kind=_operator_kind(name),
+                kind=kind,
                 name=name,
                 children=child_ids,
-                metadata=_normalized_metadata(
-                    raw_node.get("extra_info") or {},
-                    is_root=path == (0,),
-                    output_schema=schema,
-                ),
+                metadata=metadata,
+                output_slots=output_slots,
             )
         )
+        slots_by_node[node_id] = output_slots
         return node_id
 
     if len(plan_json) != 1:
