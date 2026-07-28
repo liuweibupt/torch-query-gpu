@@ -1,6 +1,8 @@
+from decimal import Decimal
+
 import torch
 
-from tpch_torch.backend.expression_plan import add, col, compile_projection, lit, mul, project_expressions
+from tpch_torch.backend.expression_plan import add, col, compile_projection, div, lit, mul, project_expressions
 from tpch_torch.record_batch import BatchMeta, ColumnStorage, ColumnType, LogicalDType, TensorRecordBatch
 
 
@@ -57,3 +59,38 @@ def test_projection_plan_aligns_decimal_scales_in_ast_lowering():
     assert result.types["sum_ab"].logical_dtype == LogicalDType.DECIMAL
     assert result.types["sum_ab"].scale == 4
     assert result.columns["sum_ab"].tolist() == [123500, 200250]
+
+
+def test_projection_plan_materializes_decimal_literals_with_scale():
+    batch = TensorRecordBatch.from_storages(
+        columns={"amount": ColumnStorage.decimal64(torch.tensor([1234, 2000], dtype=torch.int64))},
+        types={"amount": ColumnType.decimal("amount", precision=10, scale=2)},
+        batch_meta=BatchMeta(row_count=2, chunk_size=2, chunk_index=0, source_offset=0, device=torch.device("cpu")),
+    )
+
+    result = project_expressions(batch, {"plus_tax": add(col("amount"), lit(Decimal("0.0500")))})
+
+    assert result.types["plus_tax"].logical_dtype == LogicalDType.DECIMAL
+    assert result.types["plus_tax"].scale == 4
+    assert result.columns["plus_tax"].dtype == torch.int64
+    assert result.columns["plus_tax"].tolist() == [123900, 200500]
+
+
+def test_projection_plan_decimal_division_uses_real_values_not_scaled_payloads():
+    batch = TensorRecordBatch.from_storages(
+        columns={
+            "amount": ColumnStorage.decimal64(torch.tensor([1234, 2000], dtype=torch.int64)),
+            "rate": ColumnStorage.decimal64(torch.tensor([10, 25], dtype=torch.int64)),
+        },
+        types={
+            "amount": ColumnType.decimal("amount", precision=10, scale=2),
+            "rate": ColumnType.decimal("rate", precision=10, scale=1),
+        },
+        batch_meta=BatchMeta(row_count=2, chunk_size=2, chunk_index=0, source_offset=0, device=torch.device("cpu")),
+    )
+
+    result = project_expressions(batch, {"ratio": div(col("amount"), col("rate"))})
+
+    assert result.types["ratio"].logical_dtype == LogicalDType.FP64
+    assert result.columns["ratio"].dtype == torch.float64
+    assert torch.allclose(result.columns["ratio"], torch.tensor([12.34, 8.0], dtype=torch.float64))

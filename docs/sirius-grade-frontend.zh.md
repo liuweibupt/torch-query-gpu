@@ -21,6 +21,7 @@ SQL
   -> DuckDB parser JSON: json_serialize_sql(sql)
   -> DuckDB binder schema: DESCRIBE sql
   -> DuckDB physical JSON: EXPLAIN (FORMAT JSON) sql
+  -> DuckDB catalog schema: pragma_table_info(scan_table)
   -> TQPOperatorGraph(output_schema, select_aliases, normalized metadata)
   -> PyTorch physical executor
 ```
@@ -108,6 +109,39 @@ frontend 生成：
 
 backend 统一通过 `tpch_torch/backend/physical_metadata.py` 读取，优先 canonical key，再兼容 raw key。
 
+### 2.4 scan column type / DECIMAL 元数据
+
+`DESCRIBE sql` 只能给最终输出列的类型；对于 scan node，还需要 base table column type。现在 frontend 会从 DuckDB physical JSON 收集 scan table，再查 DuckDB catalog：
+
+```python
+def describe_scan_table_schemas(con, plan_json):
+    ...
+```
+
+lowering 后 scan node 会携带：
+
+```python
+metadata["scan_output_types"]      # {"amount": "DECIMAL(10,2)"}
+metadata["scan_output_nullable"]
+node.output_slots[0].type_name     # "DECIMAL(10,2)"
+```
+
+这使得 `TQPSlot` 层可以保留 DECIMAL 精度/scale 信息，而不是只剩列名或 `#N` ordinal。
+
+同时，slot-aware expression AST 会把 decimal literal 保留为 Python `Decimal`：
+
+```sql
+select amount + 0.05::decimal(3,2) as adjusted from t
+```
+
+对应：
+
+```python
+TQPExprNode(kind="literal", value=Decimal("0.05"))
+```
+
+随后 `TensorRecordBatch` projection DAG 会把它 materialize 成 scaled `int64` tensor。
+
 ## 3. compile_sirius_plan 当前链路
 
 ```python
@@ -118,6 +152,7 @@ operator_graph = lower_duckdb_json_to_operator_graph(
     physical_plan_json,
     output_schema=describe_output_schema(con, sql),
     select_aliases=select_expressions_by_alias(con, sql),
+    table_schemas=describe_scan_table_schemas(con, physical_plan_json),
 )
 ```
 

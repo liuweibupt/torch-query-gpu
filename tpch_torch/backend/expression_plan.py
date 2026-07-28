@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Mapping
 
 import torch
 
-from tpch_torch.backend.type_mapping import rescale_decimal_tensor
+from tpch_torch.backend.type_mapping import (
+    DECIMAL_BASE,
+    decimal_literal_scale,
+    encode_decimal_literal,
+    rescale_decimal_tensor,
+)
 from tpch_torch.record_batch import (
     BatchMeta,
     ColumnStorage,
@@ -183,6 +189,9 @@ def _literal_type(name: str, value: object) -> ColumnType:
         return ColumnType.boolean(name)
     if isinstance(value, int):
         return ColumnType.int64(name)
+    if isinstance(value, Decimal):
+        scale = decimal_literal_scale(value)
+        return ColumnType.decimal(name, precision=_decimal_literal_precision(value), scale=scale)
     if isinstance(value, float):
         return ColumnType.fp64(name)
     raise TypeError(f"unsupported literal type: {type(value).__name__}")
@@ -204,6 +213,8 @@ def _binary_output_type(
 
 
 def _decimal_output_type(name: str, op: str, left: ColumnType, right: ColumnType) -> ColumnType:
+    if op == "div" or _has_floating_point(left, right):
+        return ColumnType.fp64(name)
     left_scale = int(left.scale or 0)
     right_scale = int(right.scale or 0)
     precision = max(int(left.precision or 18), int(right.precision or 18))
@@ -232,6 +243,9 @@ def _literal_tensor(
     device: torch.device,
     column_type: ColumnType,
 ) -> torch.Tensor:
+    if column_type.logical_dtype == LogicalDType.DECIMAL:
+        scaled = encode_decimal_literal(value, int(column_type.scale or 0))
+        return torch.full((row_count,), scaled, dtype=torch.int64, device=device)
     dtype = _torch_dtype(column_type)
     return torch.full((row_count,), value, dtype=dtype, device=device)
 
@@ -242,17 +256,43 @@ def _execute_primitive(
     env_types: Mapping[str, ColumnType],
 ) -> torch.Tensor:
     left, right = primitive.inputs
-    if _is_decimal(primitive.output_type) and primitive.op in {"add", "sub"}:
-        left_tensor, right_tensor = _align_decimal_inputs(
+    if _has_decimal(env_types[left], env_types[right]):
+        return _execute_decimal_primitive(
+            primitive,
             env[left],
             env_types[left],
             env[right],
             env_types[right],
-            int(primitive.output_type.scale or 0),
         )
-    else:
-        left_tensor, right_tensor = env[left], env[right]
+    left_tensor, right_tensor = env[left], env[right]
     return _apply_binary_op(primitive.op, left_tensor, right_tensor)
+
+
+def _execute_decimal_primitive(
+    primitive: TensorPrimitive,
+    left: torch.Tensor,
+    left_type: ColumnType,
+    right: torch.Tensor,
+    right_type: ColumnType,
+) -> torch.Tensor:
+    if primitive.output_type.logical_dtype == LogicalDType.FP64:
+        return _apply_binary_op(
+            primitive.op,
+            _decimal_real_tensor(left, left_type),
+            _decimal_real_tensor(right, right_type),
+        )
+    if primitive.op in {"add", "sub"}:
+        return _apply_binary_op(
+            primitive.op,
+            *_align_decimal_inputs(
+                left,
+                left_type,
+                right,
+                right_type,
+                int(primitive.output_type.scale or 0),
+            ),
+        )
+    return _apply_binary_op(primitive.op, left, right)
 
 
 def _align_decimal_inputs(
@@ -265,6 +305,13 @@ def _align_decimal_inputs(
     left_aligned = rescale_decimal_tensor(left, int(left_type.scale or 0), target_scale)
     right_aligned = rescale_decimal_tensor(right, int(right_type.scale or 0), target_scale)
     return left_aligned, right_aligned
+
+
+def _decimal_real_tensor(tensor: torch.Tensor, column_type: ColumnType) -> torch.Tensor:
+    values = tensor.to(dtype=torch.float64)
+    if not _is_decimal(column_type):
+        return values
+    return values / float(DECIMAL_BASE ** int(column_type.scale or 0))
 
 
 def _apply_binary_op(op: str, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
@@ -330,3 +377,19 @@ def _rename_type(column_type: ColumnType, name: str) -> ColumnType:
 
 def _is_decimal(column_type: ColumnType) -> bool:
     return column_type.logical_dtype == LogicalDType.DECIMAL
+
+
+def _has_decimal(left: ColumnType, right: ColumnType) -> bool:
+    return _is_decimal(left) or _is_decimal(right)
+
+
+def _has_floating_point(left: ColumnType, right: ColumnType) -> bool:
+    return left.logical_dtype in {LogicalDType.FP32, LogicalDType.FP64} or right.logical_dtype in {
+        LogicalDType.FP32,
+        LogicalDType.FP64,
+    }
+
+
+def _decimal_literal_precision(value: Decimal) -> int:
+    digits = value.as_tuple().digits
+    return max(len(digits), decimal_literal_scale(value) + 1, 1)

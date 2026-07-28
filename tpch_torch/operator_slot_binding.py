@@ -71,7 +71,11 @@ def bind_node_slots(
 def _bind_scan_node(node_id: str, metadata: dict[str, Any]) -> tuple[dict[str, Any], tuple[TQPSlot, ...]]:
     table = _metadata_string(metadata, "table") or _metadata_string(metadata, "Table")
     projections = _metadata_tuple(metadata, "projections") or _metadata_tuple(metadata, "Projections")
-    slots = tuple(_scan_slot(node_id, index, column, table) for index, column in enumerate(projections))
+    type_by_column = _metadata_mapping(metadata, "scan_output_types")
+    slots = tuple(
+        _scan_slot(node_id, index, column, table, type_by_column.get(column))
+        for index, column in enumerate(projections)
+    )
     metadata["output_slots"] = slots
     return metadata, slots
 
@@ -187,9 +191,15 @@ def _joined_output_slots(node_id: str, child_slots: Sequence[Sequence[TQPSlot]])
     return tuple(output)
 
 
-def _scan_slot(node_id: str, index: int, column: str, table: str | None) -> TQPSlot:
+def _scan_slot(
+    node_id: str,
+    index: int,
+    column: str,
+    table: str | None,
+    type_name: str | None,
+) -> TQPSlot:
     aliases = (column,) if table is None else (column, f"{table}.{column}")
-    return TQPSlot(_slot_id(node_id, index), node_id, index, column, None, aliases)
+    return TQPSlot(_slot_id(node_id, index), node_id, index, column, type_name, aliases)
 
 
 def _rebound_slot(node_id: str, index: int, slot: TQPSlot, name: str, type_name: str | None) -> TQPSlot:
@@ -302,6 +312,13 @@ def _metadata_tuple(metadata: Mapping[str, Any], key: str) -> tuple[str, ...]:
 def _metadata_string(metadata: Mapping[str, Any], key: str) -> str | None:
     values = _metadata_tuple(metadata, key)
     return values[0] if values else None
+
+
+def _metadata_mapping(metadata: Mapping[str, Any], key: str) -> Mapping[str, str]:
+    value = metadata.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(map_key): str(map_value) for map_key, map_value in value.items()}
 
 
 def _slot_id(node_id: str, ordinal: int) -> str:

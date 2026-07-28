@@ -70,6 +70,18 @@ def describe_output_columns(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[s
     return tuple(column.name for column in describe_output_schema(con, sql))
 
 
+def describe_scan_table_schemas(
+    con: duckdb.DuckDBPyConnection,
+    plan_json: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[TQPOutputColumn, ...]]:
+    """Return DuckDB catalog schemas for base tables present in a physical plan."""
+
+    return {
+        table_name: _describe_table_schema(con, table_name)
+        for table_name in sorted(_scan_table_names(plan_json))
+    }
+
+
 def lower_duckdb_json_to_operator_graph(
     source_sql: str,
     query_id: int | None,
@@ -77,6 +89,7 @@ def lower_duckdb_json_to_operator_graph(
     *,
     output_schema: Sequence[TQPOutputColumn] = (),
     select_aliases: Mapping[str, str] | None = None,
+    table_schemas: Mapping[str, Sequence[TQPOutputColumn]] | None = None,
 ) -> TQPOperatorGraph:
     """Lower DuckDB JSON physical-plan nodes to the repository's graph IR."""
 
@@ -97,6 +110,7 @@ def lower_duckdb_json_to_operator_graph(
             is_root=path == (0,),
             output_schema=schema,
         )
+        _attach_scan_schema(raw_metadata, kind, table_schemas or {})
         metadata, output_slots = bind_node_slots(
             node_id=node_id,
             kind=kind,
@@ -139,6 +153,48 @@ def _nullable(value: Any) -> bool | None:
     if text == "NO":
         return False
     return None
+
+
+def _describe_table_schema(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+) -> tuple[TQPOutputColumn, ...]:
+    try:
+        rows = con.execute("select * from pragma_table_info(?)", [table_name]).fetchall()
+    except duckdb.Error as exc:
+        raise DuckDBPlannerError(f"DuckDB table schema lookup failed for {table_name}: {exc}") from exc
+    return tuple(TQPOutputColumn(str(row[1]), str(row[2]), not bool(row[3])) for row in rows)
+
+
+def _scan_table_names(plan_json: Sequence[Mapping[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for node in plan_json:
+        extra_info = node.get("extra_info") or {}
+        table_name = extra_info.get("Table")
+        if table_name:
+            names.add(str(table_name).strip())
+        names.update(_scan_table_names(tuple(node.get("children") or ())))
+    return names
+
+
+def _attach_scan_schema(
+    metadata: dict[str, Any],
+    kind: OperatorKind,
+    table_schemas: Mapping[str, Sequence[TQPOutputColumn]],
+) -> None:
+    if kind != OperatorKind.SCAN:
+        return
+    table_name = _metadata_scalar(metadata.get("table") or metadata.get("Table") or "")
+    if not table_name or table_name not in table_schemas:
+        return
+    metadata["scan_output_types"] = {
+        column.name: column.type_name
+        for column in table_schemas[table_name]
+    }
+    metadata["scan_output_nullable"] = {
+        column.name: column.nullable
+        for column in table_schemas[table_name]
+    }
 
 
 def _normalized_metadata(

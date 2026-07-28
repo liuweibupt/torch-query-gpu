@@ -12,7 +12,7 @@ import torch
 from tpch_torch.record_batch import ColumnMeta, ColumnType, LogicalDType
 
 DECIMAL_BASE = 10
-_DECIMAL_RE = re.compile(r"DECIMAL\((\d+),(\d+)\)", re.I)
+_DECIMAL_RE = re.compile(r"DECIMAL\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.I)
 
 
 def column_meta_from_duckdb_type(duckdb_type: str, *, nullable: bool = False) -> ColumnMeta:

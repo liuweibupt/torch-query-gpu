@@ -5,6 +5,7 @@ from __future__ import annotations
 import duckdb
 
 from tpch_torch.duckdb_plan_json import (
+    describe_scan_table_schemas,
     describe_output_schema,
     export_duckdb_physical_plan_json,
     lower_duckdb_json_to_operator_graph,
@@ -38,6 +39,7 @@ def compile_sirius_plan(con: duckdb.DuckDBPyConnection, sql: str) -> TQPPlan:
         physical_plan_json,
         output_schema=describe_output_schema(con, sql),
         select_aliases=select_expressions_by_alias(con, sql),
+        table_schemas=describe_scan_table_schemas(con, physical_plan_json),
     )
     return TQPPlan(
         query_id=query_id,

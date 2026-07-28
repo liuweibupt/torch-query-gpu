@@ -8,6 +8,7 @@
 - TPC-H Q1-Q22 支持矩阵；其中 Q1-Q22 已迁入 physical-plan interpreter。
 - Q1 SF=1 冷/热性能对比与 benchmark 方法。
 - 当前算子优化状态：tensor join index、sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter、Q1 resident tensor hot path、RLE aggregate primitives。
+- DECIMAL 当前实现：DuckDB scan schema 进入 `TQPSlot.type_name`，frontend AST 保留 `Decimal` literal，TensorRecordBatch projection DAG 使用 scaled `int64 + scale` 执行。
 - 中文 Roadmap/TODO 链接。
 
 文档导航：

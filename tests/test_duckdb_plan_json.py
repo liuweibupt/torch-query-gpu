@@ -121,3 +121,36 @@ def test_slot_bound_join_condition_has_expression_ast():
     assert condition.expression.kind == "binary"
     assert condition.expression.value == "="
     assert [child.ref.name for child in condition.expression.children] == ["a", "c"]
+
+
+def test_slot_bound_expression_preserves_decimal_literal():
+    from decimal import Decimal
+    from tpch_torch.frontend import compile_sirius_plan
+
+    con = duckdb.connect()
+    con.execute("create table t(amount decimal(10, 2))")
+    sql = "select amount + 0.05::decimal(3,2) as adjusted from t"
+
+    graph = compile_sirius_plan(con, sql).operator_graph
+    expression = graph.root.metadata["slot_projections"][0].expression
+
+    assert expression.kind == "binary"
+    assert expression.value == "+"
+    assert expression.children[0].ref.name == "amount"
+    assert expression.children[1].kind == "literal"
+    assert expression.children[1].value == Decimal("0.05")
+
+
+def test_sirius_frontend_carries_scan_decimal_type_metadata():
+    from tpch_torch.frontend import compile_sirius_plan
+    from tpch_torch.operator_graph import OperatorKind
+
+    con = duckdb.connect()
+    con.execute("create table t(id bigint, amount decimal(10, 2))")
+    graph = compile_sirius_plan(con, "select amount from t").operator_graph
+
+    scan = next(node for node in graph.nodes if node.kind == OperatorKind.SCAN)
+
+    assert scan.metadata["scan_output_types"] == {"id": "BIGINT", "amount": "DECIMAL(10,2)"}
+    assert scan.output_slots[0].name == "amount"
+    assert scan.output_slots[0].type_name == "DECIMAL(10,2)"

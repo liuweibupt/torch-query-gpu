@@ -73,11 +73,13 @@
 - [x] Filter/projection programmatic TypedExpr AST 第一版：支持 column/literal/arithmetic 并绑定 `ColumnType`。
 - [x] DuckDB parser JSON alias extraction：`AS`/SELECT alias 不再由 backend regex 在执行末端解析。
 - [x] DuckDB DESCRIBE output schema：`TQPOperatorGraph.output_schema` 携带输出列名、类型和 nullable。
+- [x] DuckDB scan table schema：scan node metadata / `TQPSlot.type_name` 携带 base column type，包含 `DECIMAL(p,s)`。
 - [x] TQP slot reference / expression view 第一版：`TQPSlot` / `TQPSlotRef` / `TQPBoundExpression` / `TQPExprNode` 把 projection、aggregate、group、join condition 中的列名和 `#0/#1` ordinal 统一为 graph-level slot refs 与基础表达式 AST。
 - [ ] DuckDB expression string/JSON → TypedExpr binder：替换 `physical_expr.py` 的字符串递归入口。
 - [x] Expression DAG optimizer 第一版：constant folding、CSE、DECIMAL add/sub scale hoisting。
 - [ ] Expression DAG optimizer 完整版：predicate normalization、validity propagation、更多 DECIMAL/STRING 规则。
 - [x] Tensor primitive plan executor 第一版：projection 多表达式批执行，输出 `TensorRecordBatch`。
+- [x] DECIMAL literal / projection DAG 补齐：frontend AST 保留 `Decimal("...")`，projection 常量 materialize 为 scaled int64，DECIMAL `/` 输出真实 fp64。
 - [ ] Filter primitive plan executor：boolean mask DAG 与 projection plan 统一。
 - [x] 第一版多精度 physical expression：覆盖 INT64/FP32/FP64 以及 DECIMAL
       arithmetic/comparison/CASE/scalar-subquery。

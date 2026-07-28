@@ -548,6 +548,8 @@ timeout 60 python -m compileall -q tpch_torch scripts
 - `tpch_torch/backend/type_mapping.py` 负责 DuckDB type → PyTorch dtype / `ColumnMeta`，其中 `DECIMAL(p,s)` 表示为 `torch.int64 + scale=s`。
 - `PhysicalValue.meta` 让现有 physical executor 在 scan/filter/gather/projection/join/agg 中保留 logical dtype。
 - `physical_decimal_expr.py` 负责 DECIMAL 与 literal / numeric tensor 的 scale 对齐、CASE 合并和 scalar-subquery 比较。
+- Sirius-like frontend 现在会把 scan table schema 写进 `scan_output_types` / `TQPSlot.type_name`，因此 base table 的 `DECIMAL(p,s)` 不再只存在于后端 scan 阶段。
+- Slot-aware expression AST 会把 decimal literal 解析为 `Decimal("...")`，`TensorRecordBatch` projection DAG 会 materialize 为 scaled `int64`，decimal `/` 按 correctness-first 输出真实 `fp64`。
 
 ## TensorRecordBatch / 多精度 / Join-Agg 任务分解与验收矩阵
 
@@ -854,3 +856,14 @@ AST 设计要求：
 | Join/projection alias 修复 | projection/join helper 改为 alias-aware，支持 canonical 优先、alias 次之。 | 覆盖 Q16 `COUNT(DISTINCT ...)`、self join `n1/n2` alias、等价 join key alias。 |
 
 新增/更新测试后全量测试当前为 354 个。
+
+### 10. 2026-07-28 深化：DECIMAL 进入 frontend slot 与 TensorRecordBatch projection DAG
+
+| 方向 | 已实现 | 说明 |
+| --- | --- | --- |
+| Scan schema | `compile_sirius_plan()` 从 DuckDB physical JSON 收集 scan table，并通过 DuckDB catalog 查询列类型。 | scan node metadata 新增 `scan_output_types` / `scan_output_nullable`；`TQPSlot.type_name` 可携带 `DECIMAL(10,2)`。 |
+| Decimal literal AST | `operator_expression_binding.py` 将 `0.05` / `CAST(0.05 AS DECIMAL(...))` 解析为 `Decimal("0.05")`。 | 避免 frontend AST 中把 decimal literal 变成 `float`。 |
+| Projection DAG | `expression_plan.py` 支持 `Decimal` literal materialization、DECIMAL mixed int/literal scale alignment、DECIMAL `/` 输出真实 `fp64`。 | `+/-` 对齐到目标 scale，`*` 保留 scaled int64 乘法，`/` 不用 raw scaled payload 相除。 |
+| Type mapping | DuckDB `DECIMAL( p , s )` 带空格/小写形式可规范化为 `DECIMAL(p,s)`。 | 覆盖 parser/catalog 不同格式输出。 |
+
+新增测试覆盖：`tests/test_expression_ast_plan.py`、`tests/test_duckdb_plan_json.py`、`tests/test_type_mapping.py`；当前全量回归为 `378 passed, 2 skipped`。

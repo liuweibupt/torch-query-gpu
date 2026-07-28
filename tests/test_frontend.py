@@ -46,7 +46,7 @@ def test_sirius_frontend_returns_tqp_plan_with_duckdb_metadata(monkeypatch):
     monkeypatch.setattr("tpch_torch.frontend.sirius.select_expressions_by_alias", lambda con, sql: {"sum_qty": "sum(l_quantity)"})
     monkeypatch.setattr(
         "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
-        lambda sql, query_id, plan_json, *, output_schema, select_aliases: _dummy_graph(
+        lambda sql, query_id, plan_json, *, output_schema, select_aliases, table_schemas: _dummy_graph(
             sql, query_id, output_schema=output_schema, select_aliases=select_aliases
         ),
     )
@@ -98,7 +98,7 @@ def test_sirius_frontend_accepts_non_tpch_sql_after_duckdb_admission(monkeypatch
     monkeypatch.setattr("tpch_torch.frontend.sirius.select_expressions_by_alias", lambda con, sql: {"n": "count(*)"})
     monkeypatch.setattr(
         "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
-        lambda sql, query_id, plan_json, *, output_schema, select_aliases: _dummy_graph(
+        lambda sql, query_id, plan_json, *, output_schema, select_aliases, table_schemas: _dummy_graph(
             sql, query_id, output_schema=output_schema, select_aliases=select_aliases
         ),
     )
@@ -124,7 +124,7 @@ def test_sirius_frontend_admits_non_executable_generic_sql(monkeypatch):
     monkeypatch.setattr("tpch_torch.frontend.sirius.select_expressions_by_alias", lambda con, sql: {})
     monkeypatch.setattr(
         "tpch_torch.frontend.sirius.lower_duckdb_json_to_operator_graph",
-        lambda sql, query_id, plan_json, *, output_schema, select_aliases: _dummy_graph(
+        lambda sql, query_id, plan_json, *, output_schema, select_aliases, table_schemas: _dummy_graph(
             sql, query_id, output_schema=output_schema, select_aliases=select_aliases
         ),
     )

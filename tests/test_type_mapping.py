@@ -81,3 +81,17 @@ def test_column_type_from_duckdb_type_preserves_duckdb_repr_and_decimal_scale():
     assert amount.nullable is True
     assert text.duckdb_type_id == "VARCHAR"
     assert text.logical_dtype == LogicalDType.STRING
+
+
+def test_decimal_type_mapping_accepts_spaced_duckdb_repr():
+    from tpch_torch.backend.type_mapping import column_type_from_duckdb_type
+
+    meta = column_meta_from_duckdb_type("decimal( 18 , 4 )")
+    column_type = column_type_from_duckdb_type("amount", "decimal( 18 , 4 )")
+
+    assert meta.logical_dtype == LogicalDType.DECIMAL
+    assert meta.precision == 18
+    assert meta.scale == 4
+    assert column_type.duckdb_type_repr == "DECIMAL(18,4)"
+    assert column_type.precision == 18
+    assert column_type.scale == 4

@@ -75,6 +75,8 @@ until a readable full paper/appendix is available.
 - [x] `TensorTable` / `TensorColumn` replace the old physical runtime structure; `PhysicalTable` / `PhysicalValue` remain compatibility aliases only.
 - [x] First scan chunk API: `fetch_physical_table_chunks(..., chunk_size=N)` yields typed batch-backed physical tables.
 - [x] Scan hot path now uses canonical `TensorRecordBatch` + alias map instead of copying qualified alias physical columns.
+- [x] DuckDB scan table schema is attached to scan node metadata and `TQPSlot.type_name`,
+      including base-table `DECIMAL(p,s)` columns.
 - [ ] Continue renaming expression/join/agg APIs to `TensorTable` and eventually remove compatibility aliases.
 - [x] First variable-length storage: UTF8 `offsets + chars + validity` prototype with explicit CPU filter/gather/project.
 - [ ] Complete dictionary ids: merge, unknown policy, and stable ids after batch append.
@@ -88,6 +90,9 @@ until a readable full paper/appendix is available.
 - [x] First Expression DAG optimizer: constant folding, CSE, and DECIMAL add/sub scale hoisting.
 - [ ] Complete Expression DAG optimizer: predicate normalization, validity propagation, and more DECIMAL/STRING rules.
 - [x] First tensor primitive plan executor: batch multi-expression projection execution that returns `TensorRecordBatch`.
+- [x] DECIMAL literal / projection DAG completion: frontend AST keeps
+      `Decimal("...")`, projection constants materialize as scaled int64, and
+      DECIMAL division returns real fp64 values.
 - [ ] Filter primitive plan executor: unify boolean mask DAG with projection plans.
 - [x] First multi-precision physical expressions: INT64/FP32/FP64 plus
       DECIMAL arithmetic/comparison/CASE/scalar-subquery handling.

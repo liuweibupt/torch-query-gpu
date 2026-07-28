@@ -52,6 +52,8 @@ SQL
        获取 output names / output types / nullable
   -> DuckDB EXPLAIN (FORMAT JSON) sql
        获取 physical operator tree
+  -> DuckDB catalog schema
+       获取 scan table column types，例如 DECIMAL(10,2)
   -> lower_duckdb_json_to_operator_graph(...)
        生成 normalized metadata
        生成 TQPSlot / TQPSlotRef / TQPBoundExpression / TQPExprNode
@@ -63,7 +65,7 @@ SQL
 | 文件 | 职责 |
 | --- | --- |
 | `tpch_torch/frontend/duckdb_ast.py` | 用 DuckDB parser JSON 提取 SELECT alias 和 canonical expression。 |
-| `tpch_torch/duckdb_plan_json.py` | 导出 DuckDB physical JSON，获取 DESCRIBE output schema，lowering 成 `TQPOperatorGraph`。 |
+| `tpch_torch/duckdb_plan_json.py` | 导出 DuckDB physical JSON，获取 DESCRIBE output schema 与 scan table schema，lowering 成 `TQPOperatorGraph`。 |
 | `tpch_torch/operator_refs.py` | 定义 `TQPSlot`、`TQPSlotRef`、`TQPBoundExpression`、`TQPExprNode`。 |
 | `tpch_torch/operator_slot_binding.py` | 根据 parent/child 关系把列名和 `#N` 绑定到 slot refs。 |
 | `tpch_torch/operator_expression_binding.py` | 把 canonical expression 解析成 slot-aware expression AST。 |
@@ -201,6 +203,7 @@ scan slot 会带 aliases：
 TQPSlot(
     slot_id="n0_0.s1",
     name="b",
+    type_name="DECIMAL(10,2)",
     aliases=("b", "t.b"),
 )
 ```
@@ -263,7 +266,27 @@ def describe_output_schema(con, sql):
 TQPOperatorGraph.output_schema
 ```
 
-### 6.3 physical JSON 来源：DuckDB EXPLAIN
+### 6.3 scan table schema 来源：DuckDB catalog
+
+最终输出 schema 只描述 SELECT 结果；scan node 还需要知道 base table column type，特别是 `DECIMAL(p,s)` 不能退化成普通 `INT64`。
+
+现在 `compile_sirius_plan()` 会在拿到 physical JSON 后收集 scan table，并通过 DuckDB catalog 查询表结构：
+
+```python
+table_schemas = describe_scan_table_schemas(con, physical_plan_json)
+```
+
+lowering 时会写入：
+
+```python
+scan.metadata["scan_output_types"]      # 例如 {"amount": "DECIMAL(10,2)"}
+scan.metadata["scan_output_nullable"]
+scan.output_slots[0].type_name          # 例如 "DECIMAL(10,2)"
+```
+
+这样 expression binding 里的 slot 不再只有列名/序号，也能携带 DuckDB logical type。
+
+### 6.4 physical JSON 来源：DuckDB EXPLAIN
 
 physical JSON 仍用于 operator tree：
 
@@ -281,7 +304,7 @@ slot_conditions
 output_slots
 ```
 
-### 6.4 expression AST 示例
+### 6.5 expression AST 示例
 
 Projection：
 
@@ -334,6 +357,27 @@ TQPExprNode(
 )
 ```
 
+DECIMAL literal：
+
+```sql
+select amount + 0.05::decimal(3,2) as adjusted from t
+```
+
+变成：
+
+```python
+TQPExprNode(
+    kind="binary",
+    value="+",
+    children=(
+        TQPExprNode(kind="slot_ref", ref=SlotRef(name="amount")),
+        TQPExprNode(kind="literal", value=Decimal("0.05")),
+    ),
+)
+```
+
+这里不是 `float(0.05)`，而是 `Decimal("0.05")`。后续 lowering 到 `TensorRecordBatch` projection plan 时，会按 `int64 + scale` materialize。
+
 ## 7. 当前兼容策略
 
 当前 executor 仍主要使用 raw/canonical string 执行，原因是 TPC-H Q1-Q22 已经在字符串 evaluator 上跑通，直接替换风险较大。因此目前策略是：
@@ -361,14 +405,17 @@ Executor 兼容层：raw DuckDB expression string
   - DuckDB parser AST alias extraction。
 - `tests/test_duckdb_plan_json.py`
   - output schema。
+  - scan table schema / DECIMAL slot type。
   - aggregate `#0` 到 child slot ref。
   - projection expression AST。
+  - DECIMAL literal AST。
   - join condition expression AST。
 - `tests/test_operator_graph.py`
   - graph 携带 output schema、aliases、output slots。
 
-当前全量验证：
+全量验证由 CI/本地 pytest 回归覆盖：
 
 ```text
-373 passed, 2 skipped
+timeout 60 python -m pytest -q
+# 378 passed, 2 skipped
 ```

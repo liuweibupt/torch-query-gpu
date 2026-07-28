@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import re
 from typing import Sequence
 
@@ -44,6 +45,9 @@ def parse_expression_tree(expression: str, slots: Sequence[TQPSlot]) -> TQPExprN
     cast = _parse_cast_expression(expr)
     if cast is not None:
         child, type_name = cast
+        decimal_literal = _decimal_cast_literal(child, type_name)
+        if decimal_literal is not None:
+            return decimal_literal
         return TQPExprNode("cast", type_name, (parse_expression_tree(child, slots),))
     extract = _parse_extract_year_expression(expr)
     if extract is not None:
@@ -59,7 +63,7 @@ def _literal_node(expr: str) -> TQPExprNode | None:
     if re.fullmatch(r"-?\d+", expr):
         return TQPExprNode("literal", int(expr))
     if re.fullmatch(r"-?\d+\.\d+", expr):
-        return TQPExprNode("literal", float(expr))
+        return TQPExprNode("literal", Decimal(expr))
     if re.fullmatch(r"'[^']*'", expr):
         return TQPExprNode("literal", expr[1:-1].replace("''", "'"))
     if expr.upper() == "NULL":
@@ -134,6 +138,17 @@ def _parse_cast_expression(expr: str) -> tuple[str, str] | None:
     if len(parts) != 2:
         return None
     return parts[0], parts[1]
+
+
+def _decimal_cast_literal(child: str, type_name: str) -> TQPExprNode | None:
+    if not re.fullmatch(r"DECIMAL\s*\(\s*\d+\s*,\s*\d+\s*\)", type_name.strip(), re.I):
+        return None
+    literal = _literal_node(_strip_wrapping_parentheses(child))
+    if literal is None or literal.kind != "literal" or literal.value is None:
+        return None
+    if isinstance(literal.value, bool) or not isinstance(literal.value, int | Decimal):
+        return None
+    return TQPExprNode("literal", Decimal(literal.value))
 
 
 def _parse_extract_year_expression(expr: str) -> str | None:
