@@ -7,6 +7,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from tpch_torch.operator_refs import TQPSlot
+
 
 class OperatorKind(StrEnum):
     """Backend-visible operator categories."""
@@ -25,6 +27,19 @@ class OperatorKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class TQPOutputColumn:
+    """DuckDB-bound output schema column carried across the TQP boundary."""
+
+    name: str
+    type_name: str
+    nullable: bool | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", str(self.name))
+        object.__setattr__(self, "type_name", str(self.type_name))
+
+
+@dataclass(frozen=True)
 class TQPOperatorNode:
     """A single immutable operator node in a TQP graph."""
 
@@ -33,10 +48,12 @@ class TQPOperatorNode:
     name: str
     children: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    output_slots: tuple[TQPSlot, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "children", tuple(self.children))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "output_slots", tuple(self.output_slots))
 
 
 @dataclass(frozen=True)
@@ -47,11 +64,23 @@ class TQPOperatorGraph:
     query_id: int | None
     root_id: str
     nodes: tuple[TQPOperatorNode, ...]
+    output_schema: tuple[TQPOutputColumn, ...] = ()
+    select_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
+        object.__setattr__(self, "output_schema", tuple(self.output_schema))
+        object.__setattr__(self, "select_aliases", MappingProxyType(dict(self.select_aliases)))
         if self.root_id not in {node.node_id for node in self.nodes}:
             raise ValueError(f"root node is missing: {self.root_id}")
+
+    @property
+    def output_names(self) -> tuple[str, ...]:
+        return tuple(column.name for column in self.output_schema)
+
+    @property
+    def output_types(self) -> tuple[str, ...]:
+        return tuple(column.type_name for column in self.output_schema)
 
     @property
     def root(self) -> TQPOperatorNode:

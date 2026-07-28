@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import duckdb
 import torch
 
+from tpch_torch.backend.physical_metadata import metadata_string
 from tpch_torch.duckdb_bridge import fetch_lineitem_tensor_table
 from tpch_torch.operator_graph import TQPOperatorGraph
 from tpch_torch.storage import TensorTable
@@ -55,7 +56,7 @@ def _is_q1_physical_graph(graph: TQPOperatorGraph) -> bool:
     if "ORDER_BY" not in node_names:
         return False
     scan_tables = {
-        str(node.metadata.get("Table", "")).lower()
+        (metadata_string(node, "table") or "").lower()
         for node in graph.nodes
         if node.name.strip().upper().endswith("SCAN")
     }

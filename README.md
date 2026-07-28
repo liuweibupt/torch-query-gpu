@@ -10,13 +10,15 @@
 
 ## 当前状态
 
-- ✅ 默认链路支持 TPC-H Q1-Q22：原始 SQL → DuckDB `EXPLAIN (FORMAT JSON)` lowering → `TQPOperatorGraph` → PyTorch graph executor。
+- ✅ 默认链路支持 TPC-H Q1-Q22：原始 SQL → DuckDB parser/DESCRIBE/`EXPLAIN (FORMAT JSON)` → typed `TQPOperatorGraph` → PyTorch graph executor。
 - ✅ CLI 能直接读取 `--query`、`--sql` 或 `--sql-file`，不需要手工导出 JSON。
 - ✅ strict Substrait 路径仍可显式使用：`--frontend substrait`，只运行 DuckDB 原生 exporter 能导出的 SQL。
 - ✅ Generic SQL subset 已支持单表 projection/filter/aggregate/order/limit。
 - ✅ Q1-Q22 默认路径已迁入 DuckDB physical-plan interpreter：SQL → DuckDB JSON physical plan → `TQPOperatorGraph` → `execute_physical_plan()` → PyTorch tensor operators。
 - ✅ Q2-Q22 已从早期 graph recipes 继续推进到 DuckDB physical-plan interpreter；旧 `queries/qXX` 模板和 `compiled_tpch` root 均不再作为执行 fallback。
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
+- ✅ Sirius-grade frontend 第一阶段：`AS`/SELECT alias 由 DuckDB `json_serialize_sql` parser AST 提取，输出 names/types 由 DuckDB `DESCRIBE` 推导，并写入 `TQPOperatorGraph.output_schema`；backend 正常路径不再末端解析 SQL alias。
+- ✅ TQP op graph 引用统一第一阶段：每个 node 生成 `TQPSlot` output schema，projection/aggregate/group/join condition 额外生成 `TQPBoundExpression.refs` 与 slot-aware `TQPExprNode`，把列名和 `#0/#1` child ordinal 统一成结构化 `SlotRef`/表达式 AST。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
 - ✅ CoddSpeed-style partitionable execution 已并入 batch pipeline：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N` 覆盖单表 aggregate fragments（Q6、Q1），执行形态为 `Scan/Filter/Project -> LocalAggregateBatchOperator -> FinalMerge`。
@@ -33,9 +35,9 @@
 flowchart LR
     SQL["SQL / TPC-H Query<br/>--query / --sql / --sql-file"] --> Runner["runner.load_sql"]
     Runner --> Frontend{"frontend"}
-    Frontend -->|默认 sirius| Sirius["DuckDB/Sirius-like Frontend<br/>Parser · Binder · Planner · Optimizer<br/>EXPLAIN metadata"]
+    Frontend -->|默认 sirius| Sirius["DuckDB/Sirius-like Frontend<br/>Parser AST · DESCRIBE schema · EXPLAIN metadata"]
     Frontend -->|显式 substrait| Substrait["DuckDB Native Substrait<br/>get_substrait_json(original_sql)"]
-    Sirius --> Graph["DuckDB JSON physical plan<br/>→ TQPOperatorGraph"]
+    Sirius --> Graph["DuckDB parser/schema/physical JSON<br/>→ typed TQPOperatorGraph"]
     Substrait --> IR["TQPPlan IR"]
     Graph --> IR["TQPPlan IR<br/>operator_graph boundary"]
     IR --> Backend["PyTorchBackend"]
@@ -61,7 +63,7 @@ flowchart LR
 | --- | --- | --- |
 | CLI | `scripts/run_query.py`, `scripts/validate_query.py`, `scripts/benchmark_query.py` | 接收 SQL 来源、frontend、device、benchmark 参数。 |
 | Runner | `tpch_torch/runner.py` | 读取 SQL，编译 `TQPPlan`，调用后端，validation 时比较 DuckDB baseline。 |
-| Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认是 Sirius-like DuckDB planner admission。 |
+| Frontend | `tpch_torch/frontend/sirius.py`, `tpch_torch/frontend/duckdb_ast.py`, `tpch_torch/frontend/substrait.py` | 把原始 SQL 编译成 `TQPPlan`；默认 Sirius-like 路径使用 DuckDB parser AST 提取 alias、DESCRIBE 推导输出 schema、EXPLAIN JSON 生成 physical graph。 |
 | IR | `tpch_torch/ir/plan.py` | 前端与后端之间的不可变边界对象。 |
 | Backend | `tpch_torch/backend/pytorch.py`, `tpch_torch/backend/graph.py`, `tpch_torch/backend/generic.py`, `tpch_torch/backend/physical*.py` | 只通过 `TQPOperatorGraph` 进入 PyTorch graph executor；Q1-Q22 与 generic joins 可由 DuckDB physical-plan interpreter 执行；不执行 compiled TPC-H fallback root。 |
 | Graph nodes / Operators | `tpch_torch/backend/graph_nodes.py`, `tpch_torch/backend/physical*.py`, `tpch_torch/operators.py`, `tpch_torch/compressed*.py` | Scan、filter、project、lookup/hash/equi join、membership-only semi/anti join、scalar/grouped scalar subquery、CTE、aggregate、sort/top-k、Plain/RLE/Index mask、RLE aggregate primitives、pull-based scan chunk batch pipeline、partitionable local/final aggregate pipeline、显式 Triton atomicCAS hash join primitive。 |
@@ -461,6 +463,8 @@ Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
 | --- | --- |
 | [`docs/architecture.zh.md`](docs/architecture.zh.md) | 中文架构说明、关键代码片段、Q1 分层图。 |
 | [`docs/q1-end-to-end-execution.zh.md`](docs/q1-end-to-end-execution.zh.md) | 以 TPC-H Q1 为例，详细解释 SQL 解析、DuckDB JSON physical plan、TQPOperatorGraph、PyTorch backend/operator 与冷/热执行口径。 |
+| [`docs/sirius-grade-frontend.zh.md`](docs/sirius-grade-frontend.zh.md) | Sirius-grade frontend 演进说明：DuckDB parser AST、DESCRIBE schema、normalized physical metadata 与当前边界。 |
+| [`docs/slot-expression-binding.zh.md`](docs/slot-expression-binding.zh.md) | 说明 TQP op graph 如何把列名与 `#0/#1` child ordinal 统一为 `TQPSlotRef`，以及 frontend/lowering 阶段的表达式 AST 解析。 |
 | [`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md) | 对比 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 与本项目 PyTorch 路线，分析软件栈、显存管理和复用 CUDA 算子的工程取舍。 |
 | [`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html) | 可浏览 HTML：评估 GPU 数据库引擎为什么难写，以及当前简化 TQP/PyTorch 版本距离成熟引擎还需要补齐的能力。 |
 | [`docs/ai-tensor-db-on-domestic-gpu.zh.md`](docs/ai-tensor-db-on-domestic-gpu.zh.md) | 面向分享的完整视图：以当前 demo、TQP 和 CoddSpeed 为参考，说明如何在国产卡上复用 AI tensor / PyTorch 生态实现关系代数与数据库执行。 |

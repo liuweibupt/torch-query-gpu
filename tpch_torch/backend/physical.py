@@ -21,6 +21,7 @@ from tpch_torch.backend.physical_join import (
     try_execute_scalar_nested_loop_join,
 )
 from tpch_torch.backend.physical_join_exec import execute_join_node as _execute_join_node, join_conditions
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list, metadata_string as _metadata_string
 from tpch_torch.backend.physical_mark import execute_literal_mark_join, execute_mark_join
 from tpch_torch.backend.physical_projection import (
     aggregate_order_alias,
@@ -61,7 +62,7 @@ class PhysicalPlanExecutor:
         self._scan_ranges = {key.lower(): value for key, value in (scan_ranges or {}).items()}
         self._scan_chunk_sizes = {key.lower(): value for key, value in (scan_chunk_sizes or {}).items()}
         self._enable_fusion = enable_fusion
-        self._select_aliases = select_expressions_by_alias(graph.source_sql)
+        self._select_aliases = dict(graph.select_aliases) or select_expressions_by_alias(graph.source_sql)
         self._parents = parents_by_child(graph)
         self._delim_tables: dict[str, PhysicalTable] = {}
         self._cte_tables: dict[str, PhysicalTable] = {}
@@ -74,7 +75,7 @@ class PhysicalPlanExecutor:
             if fused_rows is not None:
                 return fused_rows
         table = self._execute_node(self._graph.root_id)
-        aliases = _describe_aliases(self._con, self._graph.source_sql)
+        aliases = _output_aliases(self._con, self._graph)
         table = _trim_to_output_arity(table, len(aliases))
         return _rows_from_table(_rename_for_output(table, aliases))
 
@@ -416,6 +417,10 @@ def _describe_aliases(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[str, ..
     return tuple(str(row[0]) for row in rows)
 
 
+def _output_aliases(con: duckdb.DuckDBPyConnection, graph: TQPOperatorGraph) -> tuple[str, ...]:
+    return graph.output_names or _describe_aliases(con, graph.source_sql)
+
+
 def _filter_columns(
     con: duckdb.DuckDBPyConnection,
     table_name: str,
@@ -450,20 +455,6 @@ def _required_scan_columns(
 
 def _table_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> tuple[str, ...]:
     return tuple(str(row[1]) for row in con.execute(f"pragma table_info('{table_name}')").fetchall())
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
-
-
-def _metadata_string(node: TQPOperatorNode, key: str) -> str | None:
-    values = _metadata_list(node, key)
-    return values[0] if values else None
 
 
 def _is_scalar_subquery_guard_projection(expression: str) -> bool:

@@ -19,7 +19,7 @@
 
 ## 2. 当前仓库基线
 
-- 默认链路：原始 SQL → DuckDB/Sirius-like planner admission → `TQPPlan` → PyTorch CPU/CUDA 算子。
+- 默认链路：原始 SQL → DuckDB/Sirius-like planner admission + DuckDB parser AST alias + DESCRIBE output schema → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
 - TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1-Q22 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；历史 graph recipes 不再是默认执行路径。
 - Generic SQL：单表 projection/filter/aggregate/order/limit 子集；DuckDB physical interpreter 已支持 basic HAVING、multi-branch/simple CASE 和无重复 key 的单 key TOP_N tensor top-k。
@@ -71,6 +71,9 @@
 - [x] Generic bitmap selection：comparison / `IN` / `LIKE`。
 - [x] DuckDB physical projection expression 子集：column refs、`#N`、arithmetic、comparison、multi-branch/simple `CASE`、`prefix`/`contains`/`suffix`、`NOT LIKE`/`!~~`、`CAST`、`EXTRACT(year FROM date)`、internal compress/decompress wrappers。
 - [x] Filter/projection programmatic TypedExpr AST 第一版：支持 column/literal/arithmetic 并绑定 `ColumnType`。
+- [x] DuckDB parser JSON alias extraction：`AS`/SELECT alias 不再由 backend regex 在执行末端解析。
+- [x] DuckDB DESCRIBE output schema：`TQPOperatorGraph.output_schema` 携带输出列名、类型和 nullable。
+- [x] TQP slot reference / expression view 第一版：`TQPSlot` / `TQPSlotRef` / `TQPBoundExpression` / `TQPExprNode` 把 projection、aggregate、group、join condition 中的列名和 `#0/#1` ordinal 统一为 graph-level slot refs 与基础表达式 AST。
 - [ ] DuckDB expression string/JSON → TypedExpr binder：替换 `physical_expr.py` 的字符串递归入口。
 - [x] Expression DAG optimizer 第一版：constant folding、CSE、DECIMAL add/sub scale hoisting。
 - [ ] Expression DAG optimizer 完整版：predicate normalization、validity propagation、更多 DECIMAL/STRING 规则。

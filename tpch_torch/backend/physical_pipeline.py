@@ -10,6 +10,7 @@ import torch
 
 from tpch_torch.backend.physical_expr import evaluate_expression
 from tpch_torch.backend.physical_expr import expression_sort_key_name, strip_order_direction
+from tpch_torch.backend.physical_metadata import metadata_list as _metadata_list
 from tpch_torch.backend.physical_pipeline_aggregate import LocalAggregateBatchOperator
 from tpch_torch.backend.physical_projection import (
     aggregate_order_alias,
@@ -147,7 +148,7 @@ def execute_batch_pipeline(
     """Execute a scan/filter/project graph via pull-based batch operators."""
 
     operator = build_batch_pipeline(con, graph, table=table, chunk_size=chunk_size, device=device)
-    aliases = _describe_aliases(con, graph.source_sql)
+    aliases = _output_aliases(con, graph)
     rows: list[dict[str, Any]] = []
     while True:
         batch = operator.next_batch()
@@ -172,7 +173,7 @@ def build_batch_pipeline(
         graph=graph,
         device=device,
         chunk_size=chunk_size,
-        select_aliases=select_expressions_by_alias(graph.source_sql),
+        select_aliases=dict(graph.select_aliases) or select_expressions_by_alias(graph.source_sql),
         parents=parents_by_child(graph),
     )
     return _build_operator(context, graph.root_id, table.lower())
@@ -337,6 +338,10 @@ def _describe_aliases(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[str, ..
     return tuple(str(row[0]) for row in con.execute(f"DESCRIBE {sql}").fetchall())
 
 
+def _output_aliases(con: duckdb.DuckDBPyConnection, graph: TQPOperatorGraph) -> tuple[str, ...]:
+    return graph.output_names or _describe_aliases(con, graph.source_sql)
+
+
 def _filter_columns(
     con: duckdb.DuckDBPyConnection,
     table_name: str,
@@ -351,15 +356,6 @@ def _required_scan_columns(context: PipelineContext, table_name: str, node_id: s
     import tpch_torch.backend.physical as physical
 
     return physical._required_scan_columns(context.con, table_name, context.graph, context.parents, node_id)
-
-
-def _metadata_list(node: TQPOperatorNode, key: str) -> tuple[str, ...]:
-    value = node.metadata.get(key)
-    if value is None or value == "":
-        return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
 
 
 def _required_string(node: TQPOperatorNode, key: str) -> str:
