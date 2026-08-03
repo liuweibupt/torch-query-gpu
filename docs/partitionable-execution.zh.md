@@ -20,7 +20,7 @@ CreateQueryPlan → Send non-partitionable chunks → Prepare
   → repeat chunks → host/global merge or fallback
 ```
 
-本仓库当前只实现其中的 correctness-first 子集：单表 scan-heavy aggregate fragment 的 chunk execution 与 host merge。
+本仓库当前实现 correctness-first 子集：单表 scan-heavy aggregate fragment 的 chunk execution、local aggregate 与 tensor final merge。
 
 ## 2. 当前实现位置
 
@@ -33,7 +33,7 @@ SQL
   → execute_partitionable_physical_plan()
   → BatchOperator pipeline
   → Scan/Filter/Project → LocalAggregateBatchOperator
-  → host merge partial aggregate rows
+  → TensorFinalMerge
 ```
 
 关键文件：
@@ -42,7 +42,11 @@ SQL
   - `PartitionConfig(table, chunk_size)`
   - `row_ranges(row_count, chunk_size)`
   - `execute_partitionable_physical_plan(...)`
-  - graph shape 校验与 partial aggregate merge
+  - graph shape 校验与 final merge plan 生成
+- `tpch_torch/backend/physical_partitionable_final.py`
+  - `merge_partitioned_aggregate_tables(...)`
+  - partial aggregate batches concat
+  - tensor final merge for `SUM/COUNT/MIN/MAX/AVG`
 - `tpch_torch/backend/physical_pipeline.py`
   - `BatchOperator.next_batch()`
   - `ScanBatchOperator` / `FilterBatchOperator` / `ProjectBatchOperator`
@@ -66,7 +70,7 @@ ScanBatchOperator.next_batch()
   -> ProjectBatchOperator.next_batch()
   -> LocalAggregateBatchOperator.next_batch()
   -> optional local Project/Sort
-  -> FinalMerge
+  -> TensorFinalMerge
 ```
 
 这样 Q1/Q6 都不是退回 query-specific 脚本，而是从同一个 frontend-lowered physical graph 构造 batch operators；aggregate 作为 pipeline breaker 被拆成 local aggregate 和 final merge。
@@ -83,6 +87,19 @@ ScanBatchOperator
 它不再对每个 chunk 发起 `LIMIT/OFFSET` scan。scan 阶段还会把 DECIMAL 预编码为 scaled `int64`，把 TPC-H 静态字典字符串预编码为 dictionary id，避免 SF100 场景中 Python `Decimal` object 和字符串 object 成为主要开销。
 
 进一步演进后，scan node 上能被 DuckDB base-table `WHERE` 验证通过的 filters 会下推到 Arrow scan source。Q1 中 `l_shipdate <= DATE '1998-09-02'` 下推后，`l_shipdate` 不再作为 filter-only 列传输到 PyTorch；不能安全下推的 predicate 保留为 residual，由 PyTorch filter 执行。
+
+再进一步演进后，final merge 不再把每个 partial aggregate table 先解码成 Python row dict。现在 partial aggregate batch 保持为 `PhysicalTable/TensorRecordBatch`，由通用 tensor final merge 合并：
+
+```text
+partial aggregate batches
+  -> concat PhysicalTable columns
+  -> group key mapping / ungrouped single bucket
+  -> tensor reductions for SUM/COUNT/MIN/MAX
+  -> weighted AVG via count column
+  -> final result table
+```
+
+这同样不是 Q1/Q6 特化逻辑；它按 aggregate function 与 group key schema 泛化到所有当前允许的 partitionable aggregate fragments。
 
 ## 4. 支持范围
 
@@ -166,7 +183,7 @@ result = run_sql_with_frontend(
 
 ## 7. 与性能结果的关系
 
-partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更快，而是降低单次 device resident input 的峰值规模，使大表可以分 chunk 进入 coprocessor。当前实现已经避免每个 chunk 重复 DuckDB OFFSET/LIMIT scan，但每个 batch 仍有 Arrow→tensor materialization、physical expression 调度、local aggregate 和 Python host merge，因此小数据或 CPU 场景未必总比默认整表 fused path 更快。
+partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更快，而是降低单次 device resident input 的峰值规模，使大表可以分 chunk 进入 coprocessor。当前实现已经避免每个 chunk 重复 DuckDB OFFSET/LIMIT scan，并把 final merge 改成 tensor reductions；每个 batch 仍有 Arrow→tensor materialization、physical expression 调度和 local aggregate，因此小数据或 CPU 场景未必总比默认整表 fused path 更快。
 
 预期收益出现的场景是：
 
@@ -185,9 +202,9 @@ partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更
 | Query | Path | Hot median | 相对 baseline |
 | --- | --- | ---: | ---: |
 | Q1 | 默认 fused physical primitive + resident tensor cache，CPU `warmup-runs=1 hot-runs=3` | 136.890 ms | 1.00× |
-| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown，CPU `warmup-runs=1 hot-runs=3` | 1850.326 ms | 0.074× |
-| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown，CUDA `warmup-runs=1 hot-runs=3` | 646.684 ms | - |
+| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown + tensor final merge，CPU `warmup-runs=1 hot-runs=3` | 727.935 ms | 0.188× |
+| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown + tensor final merge，CUDA `warmup-runs=1 hot-runs=3` | 561.710 ms | - |
 
-解释：早期 partitionable Q1 主要耗时来自 OFFSET/LIMIT 重扫、DECIMAL Python object 转换、字符串 object 编码和 `torch.unique(dim=0)` group key 发现。本轮后 scan-only 读取 Q1 所需列从约 0.86 s 降到约 0.45 s；CUDA partitionable Q1 热查询约 0.65 s。CPU 端到端波动较大且仍受 Python projection/aggregate 调度影响；后续热点主要在 per-batch projection、local aggregate 多次表达式求值和 host row-dict final merge。
+解释：早期 partitionable Q1 主要耗时来自 OFFSET/LIMIT 重扫、DECIMAL Python object 转换、字符串 object 编码、`torch.unique(dim=0)` group key 发现和 Python row-dict final merge。本轮后 scan-only 读取 Q1 所需列从约 0.86 s 降到约 0.45 s；final merge 改为 tensor reductions 后，CUDA partitionable Q1 热查询约 0.56 s。后续热点主要在 per-batch projection、local aggregate 多次表达式求值和 scan/compute overlap。
 
 更完整的 scan / chunk 设计见 [`docs/scan-partitioning-design.zh.md`](scan-partitioning-design.zh.md)。

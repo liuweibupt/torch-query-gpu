@@ -323,6 +323,7 @@
 - [x] 新增 physical-only TPC-H coverage probe，用于跟踪自动算子迁移进度；当前 Q1-Q22 全部 supported。
 - [x] 第一批 graph-lowered fusion：Q1 scan/filter/project/group/order fused dense grouped reductions。
 - [x] Dictionary group-by dense-id fast path：多字典 group key 使用 composite dense id，Q1 partitionable local aggregate 不再走 `torch.unique(dim=0)`。
+- [x] Partitionable tensor final merge：partial aggregate batches 保持为 `PhysicalTable/TensorRecordBatch`，final merge 使用 tensor reductions 合并 SUM/COUNT/MIN/MAX/AVG。
 - [ ] 更多 projection/filter/aggregate/map-reduce chains 的 fusion passes。
 - [ ] Device/data-movement scheduler and metrics。
 - [ ] `torch.compile` / Antares / alternative compiler experiments。

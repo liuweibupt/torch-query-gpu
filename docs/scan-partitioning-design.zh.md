@@ -241,7 +241,7 @@ SQL Q1
   -> ProjectBatchOperator
   -> LocalAggregateBatchOperator
        dictionary dense group-id fast path
-  -> host FinalMerge
+  -> TensorFinalMerge
 ```
 
 当前已经解决的 scan 侧瓶颈：
@@ -251,6 +251,7 @@ SQL Q1
 3. 去掉 Q1 静态字符串 Python 编码；
 4. 避免低基数字典 group-by 的 `torch.unique(dim=0)`。
 5. 将 DuckDB scan node 自带的安全 predicates 下推到 scan source，并裁剪只为 filter 服务的列。
+6. 将 partitionable final merge 从 Python row-dict 合并改为通用 tensor reductions。
 
 当前还未达到成熟 Sirius/cuDF 级别的部分：
 
@@ -274,4 +275,4 @@ python -m scripts.benchmark_query \
   --partition-chunk-size 1000000
 ```
 
-CPU hot median 约 **1850.326 ms**；CUDA hot median 约 **646.684 ms**（`warmup-runs=1 hot-runs=3`）。同一环境下 scan-only 读取 Q1 所需列从约 **0.86 s** 降到约 **0.45 s**，说明 scan source 的取数/编码/列裁剪已有明显改善；剩余主要热点转移到 per-batch projection、local aggregate、host final merge 和 H2D/compute overlap。
+CPU hot median 约 **727.935 ms**；CUDA hot median 约 **561.710 ms**（`warmup-runs=1 hot-runs=3`）。同一环境下 scan-only 读取 Q1 所需列从约 **0.86 s** 降到约 **0.45 s**，说明 scan source 的取数/编码/列裁剪已有明显改善；tensor final merge 又减少了 Python row-dict 合并开销。剩余主要热点转移到 per-batch projection、local aggregate 和 H2D/compute overlap。

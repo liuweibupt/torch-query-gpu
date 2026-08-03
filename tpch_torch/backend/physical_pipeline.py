@@ -133,15 +133,30 @@ def execute_batch_pipeline(
 ) -> list[dict[str, Any]]:
     """Execute a scan/filter/project graph via pull-based batch operators."""
 
+    rows: list[dict[str, Any]] = []
+    for batch in iter_batch_pipeline(con, graph, table=table, chunk_size=chunk_size, device=device):
+        rows.extend(_rows_from_table(batch))
+    return rows
+
+
+def iter_batch_pipeline(
+    con: duckdb.DuckDBPyConnection,
+    graph: TQPOperatorGraph,
+    *,
+    table: str,
+    chunk_size: int,
+    device: str,
+) -> Iterator[PhysicalTable]:
+    """Yield output batches from a pull-based physical batch pipeline."""
+
     operator = build_batch_pipeline(con, graph, table=table, chunk_size=chunk_size, device=device)
     aliases = _output_aliases(con, graph)
-    rows: list[dict[str, Any]] = []
     while True:
         batch = operator.next_batch()
         if batch is None:
-            return rows
+            return
         table_batch = _trim_to_output_arity(batch, len(aliases))
-        rows.extend(_rows_from_table(_rename_for_output(table_batch, aliases)))
+        yield _rename_for_output(table_batch, aliases)
 
 
 def build_batch_pipeline(

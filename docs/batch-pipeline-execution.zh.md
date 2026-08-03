@@ -35,7 +35,7 @@ ScanBatchOperator
   -> ProjectBatchOperator
   -> LocalAggregateBatchOperator
   -> optional local Project/Sort
-  -> FinalMerge on host
+  -> TensorFinalMerge
 ```
 
 第三阶段把 scan source 从 `LIMIT/OFFSET` 分块改为 DuckDB Arrow `RecordBatchReader`：
@@ -61,7 +61,7 @@ DuckDB SELECT once
 | Pipeline-friendly operator | scan / filter / project |
 | Pipeline breaker | aggregate / join build / sort / distinct / window |
 | Morsel/chunk scheduling | `ScanChunkConfig.chunk_size` / `PartitionConfig.chunk_size` + Arrow RecordBatch stream |
-| Local + global 两阶段执行 | `PartitionConfig` 已使用 `LocalAggregateBatchOperator -> FinalMerge` |
+| Local + global 两阶段执行 | `PartitionConfig` 已使用 `LocalAggregateBatchOperator -> TensorFinalMerge` |
 
 ## 算子分类
 
@@ -133,8 +133,11 @@ Scan chunks -> local operator state -> final merge operator -> output batches
   - batch pipeline dispatch
 - `tpch_torch/backend/physical_partitionable.py`
   - `PartitionConfig`
-  - partial rows from batch pipeline
-  - final aggregate merge
+  - partial aggregate batches from batch pipeline
+  - partitionable shape analysis
+- `tpch_torch/backend/physical_partitionable_final.py`
+  - tensor final aggregate merge
+  - weighted AVG merge via count column
 - `tpch_torch/backend/triton_hash_join.py`
   - explicit unique-key Triton hash join primitive
   - atomicCAS build + double hashing
@@ -149,7 +152,7 @@ Scan chunks -> local operator state -> final merge operator -> output batches
 ## 下一步演进 TODO
 
 1. 把 `PhysicalTable.projected()` 扩展为可保留 child batch metadata，避免 projection 后 batch_meta 重置。
-2. 把 FinalMerge 也封装成显式 `FinalAggregateOperator`，减少 row-dict host merge。
+2. 将 TensorFinalMerge 包装为显式 `FinalAggregateBatchOperator`，让 pipeline graph 中能看到 local/final barrier。
 3. 实现完整 hash join 的 build/probe batch pipeline：build side 构建全局 tensor hash state，probe side 按 chunk 输出 joined batches。
 4. 将 Triton hash join primitive 从 unique build key 扩展到 SQL multimap：duplicate key chaining / prefix-sum output sizing / NULL policy。
 5. 实现 local top-k + final top-k merge，替代对全局 sort/limit 的显式拒绝。

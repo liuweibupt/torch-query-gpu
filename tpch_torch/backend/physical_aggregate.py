@@ -28,32 +28,49 @@ class AggregateSpec:
     distinct: bool = False
 
 
+@dataclass(frozen=True)
+class GroupKeyMapping:
+    """Dense group ids plus the unique key table for grouped tensor operators."""
+
+    key_values: tuple[PhysicalValue, ...]
+    unique_keys: torch.Tensor
+    inverse: torch.Tensor
+    keys_sorted: bool
+
+
 def execute_grouped_aggregate(
     child: PhysicalTable,
     group_exprs: Sequence[str],
     specs: Sequence[AggregateSpec],
 ) -> PhysicalTable:
-    key_values = [evaluate_expression(child, expression) for expression in group_exprs]
-    key_dtype = _group_key_dtype(key_values)
-    dense_keys = _dense_dictionary_group_keys(key_values, key_dtype)
-    if dense_keys is None:
-        key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
-        stacked = torch.stack(key_tensors, dim=1)
-        unique_keys, inverse, keys_sorted = _unique_group_keys(stacked, key_values)
-    else:
-        unique_keys, inverse, keys_sorted = dense_keys
-    row_count = int(unique_keys.shape[0])
+    mapping = group_key_mapping(child, group_exprs)
+    row_count = int(mapping.unique_keys.shape[0])
     items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
-    for index, (expression, value) in enumerate(zip(group_exprs, key_values)):
+    for index, (expression, value) in enumerate(zip(group_exprs, mapping.key_values)):
         name, aliases = projection_name(child, expression, index)
-        key_tensor = unique_keys[:, index].to(dtype=value.require_tensor().dtype)
+        key_tensor = mapping.unique_keys[:, index].to(dtype=value.require_tensor().dtype)
         items.append(
-            (name, _group_key_value(key_tensor, value, len(group_exprs), keys_sorted), aliases)
+            (name, _group_key_value(key_tensor, value, len(group_exprs), mapping.keys_sorted), aliases)
         )
     for spec in specs:
-        value = _evaluate_group_aggregate(child, inverse, row_count, spec)
+        value = _evaluate_group_aggregate(child, mapping.inverse, row_count, spec)
         items.append((spec.aliases[0], value, spec.aliases))
     return PhysicalTable.projected("aggregate", items, row_count)
+
+
+def group_key_mapping(child: PhysicalTable, group_exprs: Sequence[str]) -> GroupKeyMapping:
+    """Return unique group keys and row-to-group ids for tensor aggregate operators."""
+
+    key_values = tuple(evaluate_expression(child, expression) for expression in group_exprs)
+    key_dtype = _group_key_dtype(key_values)
+    dense_keys = _dense_dictionary_group_keys(key_values, key_dtype)
+    if dense_keys is not None:
+        unique_keys, inverse, keys_sorted = dense_keys
+        return GroupKeyMapping(key_values, unique_keys, inverse, keys_sorted)
+    key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
+    stacked = torch.stack(key_tensors, dim=1)
+    unique_keys, inverse, keys_sorted = _unique_group_keys(stacked, key_values)
+    return GroupKeyMapping(key_values, unique_keys, inverse, keys_sorted)
 
 
 def _group_key_dtype(values: Sequence[PhysicalValue]) -> torch.dtype:

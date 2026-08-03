@@ -21,7 +21,7 @@
 - ✅ TQP op graph 引用统一第一阶段：每个 node 生成 `TQPSlot` output schema，projection/aggregate/group/join condition 额外生成 `TQPBoundExpression.refs` 与 slot-aware `TQPExprNode`，把列名和 `#0/#1` child ordinal 统一成结构化 `SlotRef`/表达式 AST。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
 - ✅ Q6 有 correctness-first 压缩 mask 原型：`--compressed-masks`。
-- ✅ CoddSpeed-style partitionable execution 已并入 batch pipeline：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N` 覆盖单表 aggregate fragments（Q6、Q1），执行形态为 `Scan/Filter/Project -> LocalAggregateBatchOperator -> FinalMerge`。
+- ✅ CoddSpeed-style partitionable execution 已并入 batch pipeline：显式 `PartitionConfig` / `--partition-table lineitem --partition-chunk-size N` 覆盖单表 aggregate fragments（Q6、Q1），执行形态为 `Scan/Filter/Project -> LocalAggregateBatchOperator -> Tensor FinalMerge`。
 - ✅ 显式 scan chunk execution 已演进为 pull-based batch pipeline：`ScanChunkConfig(table, chunk_size)` 会构造 `ScanBatchOperator -> FilterBatchOperator -> ProjectBatchOperator`，以 `next_batch()` 逐个处理 `TensorRecordBatch` chunk；join/aggregate/sort/limit 等需要全局语义的 plan 会显式拒绝，不做静默整表 fallback。
 - ✅ scan/partitionable 取数已改为 DuckDB Arrow `RecordBatchReader` 流：batch pipeline 不再按 chunk 重复 `LIMIT/OFFSET` scan；scan projection 会把 `DECIMAL(p,s)` 下推成 scaled `int64`，把 TPC-H 静态字典字符串下推成 dictionary id；安全 scan predicates 会下推到 source 并裁剪 filter-only 列。
 - ✅ 新增显式 Triton hash join primitive 原型：unique build-side INT64 key，build 阶段使用 atomicCAS + double hashing，probe 阶段采用 4-thread group；当前不自动替换 SQL join，避免 duplicate-key / multimap 语义未完成时误用。
@@ -124,7 +124,7 @@ flowchart TD
     Part --> Stream["ScanBatchOperator<br/>DuckDB Arrow RecordBatchReader"]
     Stream --> Encode["scan-time encoding<br/>DECIMAL→int64 · DATE→int · string→dict id"]
     Encode --> Local["Filter/Project/LocalAggregate<br/>dictionary dense group-id"]
-    Local --> Merge["Host FinalMerge<br/>SUM/COUNT/MIN/MAX/AVG"]
+    Local --> Merge["Tensor FinalMerge<br/>SUM/COUNT/MIN/MAX/AVG"]
     Merge --> Rows2["Q1 result rows"]
 ```
 
@@ -195,7 +195,7 @@ rows = PyTorchGraphExecutor().execute(
 
 - ✅ 支持：一个 scan table 上的 scan/filter/project。
 - ❌ 暂不支持：join、aggregate、sort、limit、CTE、delim/subquery 等跨 chunk 需要全局语义或状态合并的 plan。
-- ✅ aggregate chunk 执行请继续使用 `PartitionConfig`，因为它带 partial aggregate host merge。
+- ✅ aggregate chunk 执行请继续使用 `PartitionConfig`，因为它带 partial aggregate tensor final merge。
 - ✅ 不支持的 plan 会抛 `UnsupportedPlanError`，不会静默退回整表执行。
 
 详细设计见 [`docs/batch-pipeline-execution.zh.md`](docs/batch-pipeline-execution.zh.md)。
@@ -530,30 +530,31 @@ timeout 60 python -m compileall -q tpch_torch scripts
 17. [x] hash-style join 第一版接口：tensor dictionary/probe prototype（不是成熟 GPU hash table）
 18. [x] hash join 第一批测试：DECIMAL scale-aligned probe；完整 key/payload 矩阵待扩展
 19. [x] aggregate pipeline 化第一版：`LocalAggregateBatchOperator -> FinalMerge`，`PartitionConfig` 已并入 batch pipeline，Q1/Q6 覆盖
-20. [x] dictionary group-by dense-id fast path：多字典 group key 使用 composite dense id + `bincount`/lookup，避免 Q1 低基数组合键走 `torch.unique(dim=0)`
-21. [x] 显式 Triton hash join primitive 原型：atomicCAS + double hashing + 4-thread probe group，unique build key INT64
-22. [ ] 完整 SQL hash join multimap：duplicate build key、payload chaining / prefix-sum output sizing、NULL 语义、多 key
+20. [x] partitionable tensor final merge：partial aggregate batches 保持为 `PhysicalTable/TensorRecordBatch`，final merge 用 tensor reductions 合并 SUM/COUNT/MIN/MAX/AVG，替代 Python row-dict partial merge
+21. [x] dictionary group-by dense-id fast path：多字典 group key 使用 composite dense id + `bincount`/lookup，避免 Q1 低基数组合键走 `torch.unique(dim=0)`
+22. [x] 显式 Triton hash join primitive 原型：atomicCAS + double hashing + 4-thread probe group，unique build key INT64
+23. [ ] 完整 SQL hash join multimap：duplicate build key、payload chaining / prefix-sum output sizing、NULL 语义、多 key
 
 ### P3 — 压缩数据执行（远期）
 
-23. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
-24. 压缩数据 alignment、compressed join/agg
-25. 压缩感知 optimizer rules、encoding 选择策略
+24. RLE 列存储、composite encoding（Plain+Index / RLE+Index）
+25. 压缩数据 alignment、compressed join/agg
+26. 压缩感知 optimizer rules、encoding 选择策略
 
 ### P4 — 编译器/融合/优化（远期）
 
-26. 更多 fusion passes（projection/filter/agg 链）
-27. `torch.compile` / Antares / TVM 编译执行
-28. hash join vs sort join 自适应选择
-29. sorted/unique 元数据感知优化
-30. hot path 去 Python loops
-31. batch scheduler：chunk 级 CPU thread / CUDA stream 调度
+27. 更多 fusion passes（projection/filter/agg 链）
+28. `torch.compile` / Antares / TVM 编译执行
+29. hash join vs sort join 自适应选择
+30. sorted/unique 元数据感知优化
+31. hot path 去 Python loops
+32. batch scheduler：chunk 级 CPU thread / CUDA stream 调度
 
 ### P5 — 论文对齐（远期）
 
-32. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
-33. TQP++：ML-compiler lowering、tiered scheduling
-34. CoddSpeed：数据移动建模、accelerator placement
+33. TQEx：irregular SQL 与 tensor 的 gap 建模、multi-device
+34. TQP++：ML-compiler lowering、tiered scheduling
+35. CoddSpeed：数据移动建模、accelerator placement
 
 ---
 
@@ -893,8 +894,9 @@ AST 设计要求：
 | Scan predicate pushdown | 新增 `physical_scan_pushdown.py`，把 DuckDB scan filters 分为 pushed filters 与 residual filters。 | Q1/Q6 这类 base-table predicates 可进入 Arrow scan source；只为 pushed filters 服务的列不再传输到 PyTorch。 |
 | Scan-time 编码下推 | `physical_scan._select_expression()` 对 DECIMAL 生成 scaled `int64`，对 DATE 生成 `YYYYMMDD` int，对 TPC-H 静态字典字符串生成 `CASE -> dictionary id`。 | Q1 scan 不再走 Python `Decimal` object 循环，也不再传输/编码 `l_returnflag/l_linestatus` 字符串 object。 |
 | Dictionary group-by fast path | `physical_aggregate._dense_dictionary_group_keys()` 对多字典 group key 生成 composite dense id。 | Q1 `l_returnflag × l_linestatus` 避免 `torch.unique(dim=0)`，改用 `bincount`/lookup 得到 observed groups 与 inverse ids。 |
+| Tensor final merge | 新增 `physical_partitionable_final.py`，partial aggregate batches 不再先转 Python row dict 合并。 | `SUM/COUNT/MIN/MAX/AVG` final merge 在 tensor 上完成；`AVG` 使用 count column 做 weighted merge。 |
 | 文档 | 新增 [`docs/scan-partitioning-design.zh.md`](docs/scan-partitioning-design.zh.md)。 | 对比 Arrow、DuckDB Arrow reader、Sirius split/coalescer；说明 push/Volcano 取舍和全局依赖算子。 |
 
-新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`；当前全量回归为 `384 passed, 2 skipped`。
+新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`；当前全量回归为 `388 passed, 2 skipped`。
 
-SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `1850.326 ms`，CUDA hot median 约 `646.684 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 的取数/编码/列裁剪已有明显改善，后续主要优化点转到 batch projection/local aggregate fusion、host final merge tensor 化、以及 GPU 上的 scan/compute overlap。
+SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `727.935 ms`，CUDA hot median 约 `561.710 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 与 final merge 均已有通用层面的改善，后续主要优化点转到 batch projection/local aggregate fusion、以及 GPU 上的 scan/compute overlap。
