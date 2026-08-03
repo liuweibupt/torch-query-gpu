@@ -202,6 +202,43 @@ def test_partitionable_q1_pushes_scan_filter_and_prunes_shipdate(monkeypatch):
     assert observed[0]["scan_filters"] == ("l_shipdate<='1998-09-02'::DATE",)
 
 
+def test_partitionable_q6_merges_scan_filters_and_prunes_filter_only_columns(monkeypatch):
+    import tpch_torch.backend.physical as physical
+    from tpch_torch.backend.graph import PyTorchGraphExecutor
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, FIXTURE_ROWS)
+    plan = compile_tqp_plan(con, Q6_SQL, "sirius")
+    observed = []
+    original_stream = physical.fetch_physical_table_stream
+
+    def tracked_stream(*args, **kwargs):
+        observed.append(
+            {
+                "fetched_columns": args[2],
+                "scan_filters": kwargs.get("scan_filters", ()),
+            }
+        )
+        yield from original_stream(*args, **kwargs)
+
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
+
+    rows = PyTorchGraphExecutor().execute(
+        con,
+        plan,
+        device="cpu",
+        partition_config=PartitionConfig(table="lineitem", chunk_size=2),
+    )
+
+    assert rows == [{"revenue": pytest.approx(19.0)}]
+    assert observed[0]["fetched_columns"] == ("l_discount", "l_extendedprice")
+    assert observed[0]["scan_filters"] == (
+        "l_shipdate>='1994-01-01'::DATE AND l_shipdate<'1995-01-01'::DATE",
+        "l_discount>=0.05 AND l_discount<=0.07",
+        "l_quantity<24.0",
+    )
+
+
 def test_partitionable_q6_uses_batch_pipeline_not_per_chunk_physical_executor(monkeypatch):
     from tpch_torch.backend.graph import PyTorchGraphExecutor
     from tpch_torch.backend.physical import PhysicalPlanExecutor

@@ -152,7 +152,7 @@ Q1 的 group key 是两个低基数字典列：`l_returnflag` × `l_linestatus`�
 
 ### 3.4 scan predicate pushdown 与列裁剪
 
-进一步演进后，batch pipeline 在构造 `ScanBatchOperator` 时会把 DuckDB scan node 的 `Filters` 分成两类：
+进一步演进后，batch pipeline 在构造 `ScanBatchOperator` 时会把 DuckDB scan node 的 `Filters` 以及 `FILTER -> SCAN` 链上的 base-table predicate 分成两类：
 
 ```text
 pushable filter：能被 DuckDB 作为 base-table WHERE 验证通过
@@ -191,6 +191,18 @@ Q1 scan filter:
 ```
 
 这属于 **storage/source-level predicate pushdown**：它优化的是 scan source 的数据产出边界，不是 query-specific Python fallback。不能安全下推的 predicate 会保留为 residual，并继续由 PyTorch filter 算子执行。
+
+对于 DuckDB JSON 中没有直接塞进 `SEQ_SCAN.Filters`、而是形成单独 `FILTER` node 的形态，batch builder 会识别直接的 filter chain：
+
+```text
+FILTER(expr_2)
+  -> FILTER(expr_1)
+      -> SEQ_SCAN(table)
+
+=> SEQ_SCAN(scan_filters = scan.Filters + expr_1 + expr_2)
+```
+
+每个表达式都先用 DuckDB base-table `WHERE ... LIMIT 0` 验证；能验证的进入 pushed filters，不能验证的保留为 residual tensor filter。
 
 ## 4. 哪些算子是全局依赖的？
 

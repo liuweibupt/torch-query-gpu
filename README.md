@@ -891,12 +891,12 @@ AST 设计要求：
 | 方向 | 已实现 | 说明 |
 | --- | --- | --- |
 | Arrow stream scan | 新增 `fetch_physical_table_stream()`，`ScanBatchOperator` 改为一次 DuckDB SELECT + Arrow `RecordBatchReader(rows_per_batch=chunk_size)`。 | `ScanChunkConfig` 和 `PartitionConfig` 的 batch pipeline 不再按 chunk 重复 `LIMIT/OFFSET` scan。 |
-| Scan predicate pushdown | 新增 `physical_scan_pushdown.py`，把 DuckDB scan filters 分为 pushed filters 与 residual filters。 | Q1/Q6 这类 base-table predicates 可进入 Arrow scan source；只为 pushed filters 服务的列不再传输到 PyTorch。 |
+| Scan predicate pushdown | 新增 `physical_scan_pushdown.py`，把 DuckDB scan filters 和 `FILTER -> SCAN` 链上的 base-table predicates 分为 pushed filters 与 residual filters。 | Q1/Q6 这类 predicates 可合并进 Arrow scan source 的 `WHERE`；只为 pushed filters 服务的列不再传输到 PyTorch。 |
 | Scan-time 编码下推 | `physical_scan._select_expression()` 对 DECIMAL 生成 scaled `int64`，对 DATE 生成 `YYYYMMDD` int，对 TPC-H 静态字典字符串生成 `CASE -> dictionary id`。 | Q1 scan 不再走 Python `Decimal` object 循环，也不再传输/编码 `l_returnflag/l_linestatus` 字符串 object。 |
 | Dictionary group-by fast path | `physical_aggregate._dense_dictionary_group_keys()` 对多字典 group key 生成 composite dense id。 | Q1 `l_returnflag × l_linestatus` 避免 `torch.unique(dim=0)`，改用 `bincount`/lookup 得到 observed groups 与 inverse ids。 |
 | Tensor final merge | 新增 `physical_partitionable_final.py`，partial aggregate batches 不再先转 Python row dict 合并。 | `SUM/COUNT/MIN/MAX/AVG` final merge 在 tensor 上完成；`AVG` 使用 count column 做 weighted merge。 |
 | 文档 | 新增 [`docs/scan-partitioning-design.zh.md`](docs/scan-partitioning-design.zh.md)。 | 对比 Arrow、DuckDB Arrow reader、Sirius split/coalescer；说明 push/Volcano 取舍和全局依赖算子。 |
 
-新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`；当前全量回归为 `388 passed, 2 skipped`。
+新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`；当前分组全量回归为 `390 passed, 2 skipped`。
 
 SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `727.935 ms`，CUDA hot median 约 `561.710 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 与 final merge 均已有通用层面的改善，后续主要优化点转到 batch projection/local aggregate fusion、以及 GPU 上的 scan/compute overlap。

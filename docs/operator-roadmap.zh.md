@@ -64,6 +64,7 @@
 - [x] Scan stream API：`fetch_physical_table_stream(..., chunk_size=N)` 使用 DuckDB Arrow `RecordBatchReader`，避免 batch pipeline 每 chunk 重复 `LIMIT/OFFSET` scan。
 - [x] Scan-time typed encoding 下推：DECIMAL → scaled `int64`、DATE → `YYYYMMDD` int、TPC-H 静态字符串 → dictionary id。
 - [x] Scan predicate pushdown 第一版：DuckDB scan filters 可验证时进入 Arrow scan source，residual filters 继续由 PyTorch 执行，并裁剪 filter-only columns。
+- [x] `FILTER -> SCAN` 合并规则：batch builder 自动把 base-table filter node 合并到 `scan_filters`，并与 scan node filters 统一生成 DuckDB `WHERE`。
 - [x] Scan hot path 改为 canonical `TensorRecordBatch` + alias map，不再复制 qualified alias 物理列。
 - [ ] Expression/join/agg API 命名继续迁移到 `TensorTable`，最终移除 compatibility alias。
 - [x] 变长数据 storage 第一版：新增 UTF8 `offsets + chars + validity` prototype，CPU filter/gather/project 显式可用。

@@ -50,7 +50,7 @@ DuckDB SELECT once
 
 这样同一个 scan 只执行一次 DuckDB 查询，避免大表上每个 chunk 重复 OFFSET 跳过。scan projection 还会把 `DECIMAL(p,s)` 下推为 scaled `int64`，把 TPC-H 低基数字符串下推为静态 dictionary id，把 DATE 下推为 `YYYYMMDD` int，减少 Python object conversion。
 
-第四阶段加入 scan predicate pushdown：`ScanBatchOperator` 会把 DuckDB scan node 的 `Filters` 规划为 pushed filters 与 residual filters。pushed filters 进入 Arrow scan source 的 `WHERE`，因此只为 pushed filters 服务的列不再需要传到 PyTorch；residual filters 继续由 PyTorch tensor filter 执行，避免不支持表达式被静默跳过。
+第四阶段加入 scan predicate pushdown：`ScanBatchOperator` 会把 DuckDB scan node 的 `Filters` 规划为 pushed filters 与 residual filters。第五阶段继续把 `FILTER -> SCAN` 链上的 base-table predicates 自动合并进同一套规划。pushed filters 进入 Arrow scan source 的 `WHERE`，因此只为 pushed filters 服务的列不再需要传到 PyTorch；residual filters 继续由 PyTorch tensor filter 执行，避免不支持表达式被静默跳过。
 
 ## 对成熟数据库方案的对应
 

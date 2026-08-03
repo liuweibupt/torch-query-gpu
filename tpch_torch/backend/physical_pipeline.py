@@ -49,6 +49,12 @@ class PipelineContext:
     parents: dict[str, tuple[str, ...]]
 
 
+@dataclass(frozen=True)
+class _FilterScanChain:
+    scan_node: TQPOperatorNode
+    filters: tuple[str, ...]
+
+
 @dataclass
 class ScanBatchOperator:
     """Scan one physical table as TensorRecordBatch-backed chunks."""
@@ -185,6 +191,14 @@ def _build_operator(context: PipelineContext, node_id: str, table: str) -> Batch
     if node.kind == OperatorKind.SCAN:
         return _scan_operator(context, node, table)
     if node.kind == OperatorKind.FILTER:
+        filter_scan_chain = _filter_scan_chain(context, node)
+        if filter_scan_chain is not None:
+            return _scan_operator(
+                context,
+                filter_scan_chain.scan_node,
+                table,
+                extra_filters=filter_scan_chain.filters,
+            )
         return FilterBatchOperator(_single_child_operator(context, node, table), _required_string(node, "Expression"))
     if node.kind == OperatorKind.PROJECT:
         return ProjectBatchOperator(context, node, _single_child_operator(context, node, table))
@@ -195,12 +209,18 @@ def _build_operator(context: PipelineContext, node_id: str, table: str) -> Batch
     raise UnsupportedPlanError(f"batch pipeline does not support node: {node.name}")
 
 
-def _scan_operator(context: PipelineContext, node: TQPOperatorNode, requested_table: str) -> ScanBatchOperator:
+def _scan_operator(
+    context: PipelineContext,
+    node: TQPOperatorNode,
+    requested_table: str,
+    *,
+    extra_filters: Sequence[str] = (),
+) -> ScanBatchOperator:
     table_name = _required_string(node, "Table")
     if table_name.lower() != requested_table:
         raise UnsupportedPlanError(f"batch pipeline scan table mismatch: {table_name} != {requested_table}")
     projected_columns = _metadata_list(node, "Projections")
-    filters = _metadata_list(node, "Filters")
+    filters = (*_metadata_list(node, "Filters"), *extra_filters)
     if not projected_columns:
         projected_columns = _required_scan_columns(context, table_name, node.node_id)
     filter_pushdown = plan_scan_filter_pushdown(context.con, table_name, filters)
@@ -220,6 +240,19 @@ def _scan_operator(context: PipelineContext, node: TQPOperatorNode, requested_ta
         tuple(projected_columns),
         filter_pushdown,
     )
+
+
+def _filter_scan_chain(context: PipelineContext, node: TQPOperatorNode) -> _FilterScanChain | None:
+    filters: list[str] = []
+    current = node
+    while current.kind == OperatorKind.FILTER:
+        if len(current.children) != 1:
+            return None
+        filters.append(_required_string(current, "Expression"))
+        current = context.graph.node_by_id(current.children[0])
+    if current.kind != OperatorKind.SCAN:
+        return None
+    return _FilterScanChain(current, tuple(reversed(filters)))
 
 
 def _single_child_operator(context: PipelineContext, node: TQPOperatorNode, table: str) -> BatchOperator:

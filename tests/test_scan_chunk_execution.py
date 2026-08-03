@@ -91,6 +91,50 @@ def test_scan_chunk_pushes_filters_and_prunes_filter_only_columns(monkeypatch):
     assert observed == [{"fetched_columns": ("id",), "scan_filters": ("amount>=30",)}]
 
 
+def test_scan_chunk_pushes_filter_node_into_scan_source(monkeypatch):
+    import tpch_torch.backend.physical as physical
+    from tpch_torch.backend.graph import PyTorchGraphExecutor
+    from tpch_torch.backend.physical_chunked import ScanChunkConfig
+    from tpch_torch.backend.physical_pipeline import FilterBatchOperator
+
+    con = duckdb.connect()
+    _create_amount_table(con)
+    sql = "select id from (select id, amount + 1 as inc from t) s where inc >= 31"
+    plan = compile_tqp_plan(con, sql, "sirius")
+    observed = []
+    original_stream = physical.fetch_physical_table_stream
+
+    def fail_filter_next_batch(self):
+        raise AssertionError("base-table FILTER nodes should be merged into scan_filters")
+
+    def tracked_stream(*args, **kwargs):
+        observed.append(
+            {
+                "fetched_columns": args[2],
+                "scan_filters": kwargs.get("scan_filters", ()),
+            }
+        )
+        yield from original_stream(*args, **kwargs)
+
+    monkeypatch.setattr(FilterBatchOperator, "next_batch", fail_filter_next_batch)
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
+
+    rows = PyTorchGraphExecutor().execute(
+        con,
+        plan,
+        device="cpu",
+        scan_chunk_config=ScanChunkConfig(table="t", chunk_size=2),
+    )
+
+    assert rows == [{"id": 3}, {"id": 4}, {"id": 5}]
+    assert observed == [
+        {
+            "fetched_columns": ("id", "amount"),
+            "scan_filters": ("((amount + 1) >= 31)",),
+        }
+    ]
+
+
 def test_scan_chunk_execution_uses_batch_pipeline_instead_of_per_chunk_physical_executor(monkeypatch):
     from tpch_torch.backend.graph import PyTorchGraphExecutor
     from tpch_torch.backend.physical import PhysicalPlanExecutor

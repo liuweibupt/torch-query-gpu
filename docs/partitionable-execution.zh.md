@@ -86,7 +86,7 @@ ScanBatchOperator
 
 它不再对每个 chunk 发起 `LIMIT/OFFSET` scan。scan 阶段还会把 DECIMAL 预编码为 scaled `int64`，把 TPC-H 静态字典字符串预编码为 dictionary id，避免 SF100 场景中 Python `Decimal` object 和字符串 object 成为主要开销。
 
-进一步演进后，scan node 上能被 DuckDB base-table `WHERE` 验证通过的 filters 会下推到 Arrow scan source。Q1 中 `l_shipdate <= DATE '1998-09-02'` 下推后，`l_shipdate` 不再作为 filter-only 列传输到 PyTorch；不能安全下推的 predicate 保留为 residual，由 PyTorch filter 执行。
+进一步演进后，scan node 上能被 DuckDB base-table `WHERE` 验证通过的 filters 会下推到 Arrow scan source。Q1 中 `l_shipdate <= DATE '1998-09-02'` 下推后，`l_shipdate` 不再作为 filter-only 列传输到 PyTorch；Q6 中 shipdate/discount/quantity 三组 scan filters 会合并成同一个 DuckDB scan `WHERE`，只读取 `l_discount` 与 `l_extendedprice` 两个 payload 列。不能安全下推的 predicate 保留为 residual，由 PyTorch filter 执行。
 
 再进一步演进后，final merge 不再把每个 partial aggregate table 先解码成 Python row dict。现在 partial aggregate batch 保持为 `PhysicalTable/TensorRecordBatch`，由通用 tensor final merge 合并：
 
