@@ -17,6 +17,7 @@ from tpch_torch.operator_graph import TQPOperatorNode
 from tpch_torch.record_batch import ColumnMeta, LogicalDType
 
 _AGGREGATE_FUNCTION_ALIASES = {"sum_no_overflow": "sum"}
+_MAX_DENSE_DICTIONARY_GROUPS = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -34,9 +35,13 @@ def execute_grouped_aggregate(
 ) -> PhysicalTable:
     key_values = [evaluate_expression(child, expression) for expression in group_exprs]
     key_dtype = _group_key_dtype(key_values)
-    key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
-    stacked = torch.stack(key_tensors, dim=1)
-    unique_keys, inverse, keys_sorted = _unique_group_keys(stacked, key_values)
+    dense_keys = _dense_dictionary_group_keys(key_values, key_dtype)
+    if dense_keys is None:
+        key_tensors = [value.require_tensor().to(dtype=key_dtype) for value in key_values]
+        stacked = torch.stack(key_tensors, dim=1)
+        unique_keys, inverse, keys_sorted = _unique_group_keys(stacked, key_values)
+    else:
+        unique_keys, inverse, keys_sorted = dense_keys
     row_count = int(unique_keys.shape[0])
     items: list[tuple[str, PhysicalValue, Sequence[str]]] = []
     for index, (expression, value) in enumerate(zip(group_exprs, key_values)):
@@ -66,6 +71,67 @@ def _unique_group_keys(
         return unique_keys, inverse, True
     unique_keys, inverse = torch.unique(stacked_keys, dim=0, sorted=True, return_inverse=True)
     return unique_keys, inverse, True
+
+
+def _dense_dictionary_group_keys(
+    key_values: Sequence[PhysicalValue],
+    key_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, bool] | None:
+    dictionaries = tuple(value.dictionary for value in key_values)
+    if not dictionaries or any(dictionary is None for dictionary in dictionaries):
+        return None
+    cardinalities = tuple(len(dictionary or ()) for dictionary in dictionaries)
+    max_groups = _dense_group_count(cardinalities)
+    if max_groups == 0 or max_groups > _MAX_DENSE_DICTIONARY_GROUPS:
+        return None
+    group_ids = _composite_dictionary_group_ids(key_values, cardinalities)
+    observed = torch.bincount(group_ids, minlength=max_groups).to(dtype=torch.bool).nonzero().reshape(-1)
+    lookup = torch.full((max_groups,), -1, dtype=torch.int64, device=group_ids.device)
+    lookup[observed] = torch.arange(observed.numel(), dtype=torch.int64, device=group_ids.device)
+    inverse = lookup[group_ids]
+    return _decode_composite_group_ids(observed, cardinalities, key_dtype), inverse, True
+
+
+def _dense_group_count(cardinalities: Sequence[int]) -> int:
+    total = 1
+    for cardinality in cardinalities:
+        total *= cardinality
+    return total
+
+
+def _composite_dictionary_group_ids(
+    key_values: Sequence[PhysicalValue],
+    cardinalities: Sequence[int],
+) -> torch.Tensor:
+    first = key_values[0].require_tensor()
+    group_ids = torch.zeros(first.shape, dtype=torch.int64, device=first.device)
+    for value, cardinality in zip(key_values, cardinalities):
+        tensor = value.require_tensor().to(dtype=torch.int64)
+        _validate_dictionary_group_ids(tensor, cardinality)
+        group_ids = group_ids * cardinality + tensor
+    return group_ids
+
+
+def _validate_dictionary_group_ids(tensor: torch.Tensor, cardinality: int) -> None:
+    if tensor.numel() == 0:
+        return
+    min_value = int(tensor.min().cpu().item())
+    max_value = int(tensor.max().cpu().item())
+    if min_value < 0 or max_value >= cardinality:
+        raise UnsupportedPlanError("dictionary group key contains id outside its vocabulary")
+
+
+def _decode_composite_group_ids(
+    group_ids: torch.Tensor,
+    cardinalities: Sequence[int],
+    key_dtype: torch.dtype,
+) -> torch.Tensor:
+    remaining = group_ids
+    columns = []
+    for cardinality in reversed(cardinalities):
+        columns.append(torch.remainder(remaining, cardinality))
+        remaining = torch.div(remaining, cardinality, rounding_mode="floor")
+    return torch.stack(tuple(reversed(columns)), dim=1).to(dtype=key_dtype)
 
 
 def _keys_known_sorted(key_values: Sequence[PhysicalValue]) -> bool:

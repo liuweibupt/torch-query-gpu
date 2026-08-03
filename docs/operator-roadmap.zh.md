@@ -61,6 +61,8 @@
 - [x] Batch/chunk metadata 第一版：`row_count/chunk_size/chunk_index/source_offset/device/schema_version` 从 scan 入口保留，并随 filter/gather/project 更新。
 - [x] `TensorTable` / `TensorColumn` 替换旧 physical runtime 结构；`PhysicalTable` / `PhysicalValue` 仅保留为兼容别名。
 - [x] Scan chunk API 第一版：`fetch_physical_table_chunks(..., chunk_size=N)` 逐 chunk 返回 typed batch-backed physical table。
+- [x] Scan stream API：`fetch_physical_table_stream(..., chunk_size=N)` 使用 DuckDB Arrow `RecordBatchReader`，避免 batch pipeline 每 chunk 重复 `LIMIT/OFFSET` scan。
+- [x] Scan-time typed encoding 下推：DECIMAL → scaled `int64`、DATE → `YYYYMMDD` int、TPC-H 静态字符串 → dictionary id。
 - [x] Scan hot path 改为 canonical `TensorRecordBatch` + alias map，不再复制 qualified alias 物理列。
 - [ ] Expression/join/agg API 命名继续迁移到 `TensorTable`，最终移除 compatibility alias。
 - [x] 变长数据 storage 第一版：新增 UTF8 `offsets + chars + validity` prototype，CPU filter/gather/project 显式可用。
@@ -319,6 +321,7 @@
 - [x] nested SELECT alias 与 aggregate ORDER BY alias normalization，用于 physical projection lowering。
 - [x] 新增 physical-only TPC-H coverage probe，用于跟踪自动算子迁移进度；当前 Q1-Q22 全部 supported。
 - [x] 第一批 graph-lowered fusion：Q1 scan/filter/project/group/order fused dense grouped reductions。
+- [x] Dictionary group-by dense-id fast path：多字典 group key 使用 composite dense id，Q1 partitionable local aggregate 不再走 `torch.unique(dim=0)`。
 - [ ] 更多 projection/filter/aggregate/map-reduce chains 的 fusion passes。
 - [ ] Device/data-movement scheduler and metrics。
 - [ ] `torch.compile` / Antares / alternative compiler experiments。

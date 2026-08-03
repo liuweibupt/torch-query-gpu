@@ -27,7 +27,6 @@ from tpch_torch.backend.physical_sql import select_expressions_by_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
-from tpch_torch.record_batch import BatchMeta, ColumnStorage, ColumnType, TensorRecordBatch
 
 _ROW_ID = "__rowid__"
 
@@ -72,29 +71,14 @@ class ScanBatchOperator:
     def _iter_scan_chunks(self) -> Iterator[PhysicalTable]:
         import tpch_torch.backend.physical as physical
 
-        total, _ = physical.scan_row_count(self.context.con, self.table_name, None)
-        for chunk_index, start in enumerate(range(0, total, self.context.chunk_size)):
-            end = min(start + self.context.chunk_size, total)
-            if not self.fetched_columns:
-                yield _rowid_only_table(
-                    self.table_name,
-                    start,
-                    end,
-                    self.context.chunk_size,
-                    chunk_index,
-                    self.context.device,
-                )
-                continue
-            yield physical.fetch_physical_table(
-                self.context.con,
-                self.table_name,
-                self.fetched_columns,
-                self.projected_columns,
-                self.context.device,
-                scan_range=(start, end),
-                chunk_size=self.context.chunk_size,
-                chunk_index=chunk_index,
-            )
+        yield from physical.fetch_physical_table_stream(
+            self.context.con,
+            self.table_name,
+            self.fetched_columns,
+            self.projected_columns,
+            self.context.device,
+            chunk_size=self.context.chunk_size,
+        )
 
 
 @dataclass(frozen=True)
@@ -204,29 +188,6 @@ def _scan_operator(context: PipelineContext, node: TQPOperatorNode, requested_ta
         projected_columns = _required_scan_columns(context, table_name, node.node_id)
     fetched_columns = tuple(dict.fromkeys((*projected_columns, *_filter_columns(context.con, table_name, filters))))
     return ScanBatchOperator(context, node, table_name, fetched_columns, tuple(projected_columns), filters)
-
-
-def _rowid_only_table(
-    table_name: str,
-    start: int,
-    end: int,
-    chunk_size: int,
-    chunk_index: int,
-    device: str,
-) -> PhysicalTable:
-    rowids = torch.arange(start, end, dtype=torch.int64, device=device)
-    batch = TensorRecordBatch.from_storages(
-        columns={_ROW_ID: ColumnStorage.fixed(rowids)},
-        types={_ROW_ID: ColumnType.int64(_ROW_ID)},
-        batch_meta=BatchMeta(
-            row_count=int(rowids.numel()),
-            chunk_size=chunk_size,
-            chunk_index=chunk_index,
-            source_offset=start,
-            device=torch.device(device),
-        ),
-    )
-    return PhysicalTable.from_batch(table_name, batch, order=(_ROW_ID,))
 
 
 def _single_child_operator(context: PipelineContext, node: TQPOperatorNode, table: str) -> BatchOperator:

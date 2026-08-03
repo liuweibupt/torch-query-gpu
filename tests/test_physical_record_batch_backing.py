@@ -1,4 +1,5 @@
 import duckdb
+import pytest
 import torch
 
 from tpch_torch.backend.physical_scan import fetch_physical_table
@@ -77,6 +78,72 @@ def test_fetch_physical_table_chunks_emits_tensor_record_batches_with_chunk_indi
     assert [chunk.batch.batch_meta.chunk_index for chunk in chunks] == [0, 1, 2]
     assert [chunk.batch.batch_meta.source_offset for chunk in chunks] == [0, 2, 4]
     assert [chunk.batch.row_count for chunk in chunks] == [2, 2, 1]
+
+
+def test_fetch_physical_table_stream_uses_arrow_batches_without_offset_scans():
+    from tpch_torch.backend.physical_scan import fetch_physical_table_stream
+
+    con = duckdb.connect()
+    con.execute("create table t(id bigint, amount bigint)")
+    con.execute("insert into t values (10, 100), (20, 200), (30, 300), (40, 400), (50, 500)")
+
+    chunks = tuple(fetch_physical_table_stream(con, "t", ("id",), ("id",), "cpu", chunk_size=2))
+
+    assert [chunk.value_named("id").require_tensor().tolist() for chunk in chunks] == [[10, 20], [30, 40], [50]]
+    assert [chunk.batch.batch_meta.chunk_index for chunk in chunks] == [0, 1, 2]
+    assert [chunk.batch.batch_meta.source_offset for chunk in chunks] == [0, 2, 4]
+
+
+def test_lineitem_stream_scan_preencodes_static_dictionary_columns(monkeypatch):
+    import tpch_torch.backend.physical_scan as scan
+    from tpch_torch.backend.physical_scan import fetch_physical_table_stream
+
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_returnflag varchar)")
+    con.execute("insert into lineitem values ('N'), ('A'), ('R')")
+
+    def fail_generic_encoder(*args, **kwargs):
+        raise AssertionError("static dictionary columns should be SQL-preencoded before generic encoding")
+
+    monkeypatch.setattr(scan, "_encode_generic_column", fail_generic_encoder)
+
+    chunks = tuple(
+        fetch_physical_table_stream(
+            con,
+            "lineitem",
+            ("l_returnflag",),
+            ("l_returnflag",),
+            "cpu",
+            chunk_size=2,
+        )
+    )
+
+    assert [chunk.value_named("l_returnflag").require_tensor().tolist() for chunk in chunks] == [[1, 0], [2]]
+    assert chunks[0].value_named("l_returnflag").dictionary == ("A", "N", "R")
+
+
+def test_stream_scan_batch_meta_uses_actual_cuda_device():
+    from tpch_torch.backend.physical_scan import fetch_physical_table_stream
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    con = duckdb.connect()
+    con.execute("create table lineitem(l_returnflag varchar)")
+    con.execute("insert into lineitem values ('N'), ('A')")
+
+    chunk = next(
+        fetch_physical_table_stream(
+            con,
+            "lineitem",
+            ("l_returnflag",),
+            ("l_returnflag",),
+            "cuda",
+            chunk_size=2,
+        )
+    )
+
+    assert chunk.batch.batch_meta.device == chunk.value_named("l_returnflag").require_tensor().device
 
 
 def test_physical_scan_uses_tensor_table_alias_map_without_duplicate_alias_columns():

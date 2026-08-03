@@ -71,6 +71,17 @@ ScanBatchOperator.next_batch()
 
 这样 Q1/Q6 都不是退回 query-specific 脚本，而是从同一个 frontend-lowered physical graph 构造 batch operators；aggregate 作为 pipeline breaker 被拆成 local aggregate 和 final merge。
 
+当前 scan source 已继续升级为 Arrow RecordBatch 流：
+
+```text
+ScanBatchOperator
+  -> DuckDB SELECT once
+  -> fetch_record_batch(rows_per_batch=chunk_size)
+  -> TensorRecordBatch chunk
+```
+
+它不再对每个 chunk 发起 `LIMIT/OFFSET` scan。scan 阶段还会把 DECIMAL 预编码为 scaled `int64`，把 TPC-H 静态字典字符串预编码为 dictionary id，避免 SF100 场景中 Python `Decimal` object 和字符串 object 成为主要开销。
+
 ## 4. 支持范围
 
 当前支持：
@@ -153,7 +164,7 @@ result = run_sql_with_frontend(
 
 ## 7. 与性能结果的关系
 
-partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更快，而是降低单次 device resident input 的峰值规模，使大表可以分 chunk 进入 coprocessor。当前实现每个 chunk 都会重复一次 DuckDB column fetch、tensor conversion、physical interpreter 调度和 Python host merge，因此小数据或 CPU 场景通常会变慢。
+partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更快，而是降低单次 device resident input 的峰值规模，使大表可以分 chunk 进入 coprocessor。当前实现已经避免每个 chunk 重复 DuckDB OFFSET/LIMIT scan，但每个 batch 仍有 Arrow→tensor materialization、physical expression 调度、local aggregate 和 Python host merge，因此小数据或 CPU 场景未必总比默认整表 fused path 更快。
 
 预期收益出现的场景是：
 
@@ -167,13 +178,13 @@ partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更
 
 ## 8. 当前 SF=1 观测结果
 
-测试环境使用仓库现有 `/work/torch-query-gpu/data/tpch_sf1.duckdb`，CPU，`cold-runs=0`、`warmup-runs=1`、`hot-runs=3`、partition chunk size = 1,000,000 rows。命令通过 `python -m scripts.benchmark_query` 从仓库根目录运行。
+测试环境使用仓库现有 `/work/torch-query-gpu/data/tpch_sf1.duckdb`，CPU，partition chunk size = 1,000,000 rows。命令通过 `python -m scripts.benchmark_query` 从仓库根目录运行。
 
 | Query | Path | Hot median | 相对 baseline |
 | --- | --- | ---: | ---: |
-| Q6 | 默认 physical interpreter | 461.311 ms | 1.00× |
-| Q6 | partitionable over `lineitem` | 784.060 ms | 0.59× |
-| Q1 | 默认 fused physical primitive + resident tensor cache | 111.731 ms | 1.00× |
-| Q1 | partitionable over `lineitem` + local aggregate pipeline | 1920.953 ms | 0.058× |
+| Q1 | 默认 fused physical primitive + resident tensor cache，`cold-runs=0 warmup-runs=0 hot-runs=1` | 944.330 ms | 1.00× |
+| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id，`cold-runs=0 warmup-runs=0 hot-runs=1` | 1235.975 ms | 0.76× |
 
-解释：当前版本为了严格遵守 partitionable execution 的内存边界，每个 chunk 都重新从 DuckDB 拉取列、转换 tensor、执行 local fragment，并在 host Python 合并 partial aggregates。Q1 默认路径有 resident tensor cache 和整表 fused `bincount`；partitionable Q1 无法复用整表 resident tensor cache，因此在 SF=1 CPU 上显著更慢。partitionable path 当前主要证明 CoddSpeed-style host/chunk/coprocessor 执行边界和 mature DB-style local/final aggregate pipeline 是通的；它的价值在整表无法放入 GPU 显存、或未来实现 non-partitionable table residency、chunk prefetch/overlap、多 runtime 并发后才会体现。
+解释：早期 partitionable Q1 主要耗时来自 OFFSET/LIMIT 重扫、DECIMAL Python object 转换、字符串 object 编码和 `torch.unique(dim=0)` group key 发现。本轮后 scan-only 读取 Q1 所需列约 0.61 s，partitionable Q1 端到端约 1.24 s；scan 已不再是最大热点，后续热点主要在 per-batch projection、local aggregate 多次表达式求值和 host row-dict final merge。
+
+更完整的 scan / chunk 设计见 [`docs/scan-partitioning-design.zh.md`](scan-partitioning-design.zh.md)。

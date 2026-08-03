@@ -140,6 +140,47 @@ def test_physical_grouped_aggregate_uses_unique_consecutive_for_sorted_keys(monk
     assert result.value_named("count_order").require_tensor().tolist() == [2, 1, 2, 1]
 
 
+def test_physical_grouped_aggregate_uses_dense_dictionary_group_ids(monkeypatch):
+    from tpch_torch.backend.physical_aggregate import AggregateSpec, execute_grouped_aggregate
+    from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+
+    def fail_unique(*_args, **_kwargs):
+        raise AssertionError("dictionary grouped aggregate should avoid generic unique")
+
+    def fail_unique_consecutive(*_args, **_kwargs):
+        raise AssertionError("dictionary grouped aggregate should avoid unique_consecutive")
+
+    monkeypatch.setattr(torch, "unique", fail_unique)
+    monkeypatch.setattr(torch, "unique_consecutive", fail_unique_consecutive)
+
+    child = PhysicalTable(
+        "lineitem_chunk",
+        {
+            "l_returnflag": PhysicalValue(
+                torch.tensor([1, 0, 1, 2], dtype=torch.int64),
+                dictionary=("A", "N", "R"),
+            ),
+            "l_linestatus": PhysicalValue(
+                torch.tensor([1, 0, 1, 0], dtype=torch.int64),
+                dictionary=("F", "O"),
+            ),
+            "v": PhysicalValue(torch.tensor([5.0, 7.0, 11.0, 13.0])),
+        },
+        ("l_returnflag", "l_linestatus", "v"),
+        4,
+    )
+
+    result = execute_grouped_aggregate(
+        child,
+        ("l_returnflag", "l_linestatus"),
+        (AggregateSpec("sum", "v", ("sum_v",)),),
+    )
+
+    assert result.value_named("l_returnflag").require_tensor().tolist() == [0, 1, 2]
+    assert result.value_named("l_linestatus").require_tensor().tolist() == [0, 1, 0]
+    assert result.value_named("sum_v").require_tensor().tolist() == [7.0, 16.0, 13.0]
+
+
 def test_physical_expression_folds_same_column_literal_or(monkeypatch):
     from tpch_torch.backend.physical_expr import evaluate_expression
     from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue

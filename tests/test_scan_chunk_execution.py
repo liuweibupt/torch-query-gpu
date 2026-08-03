@@ -28,15 +28,19 @@ def test_chunked_scan_filter_project_matches_default_and_preserves_chunk_metadat
     plan = compile_tqp_plan(con, sql, "sirius")
     default = run_sql_with_frontend(con, sql, device="cpu", frontend="sirius")
     calls = []
-    original = physical.fetch_physical_table
+    original_stream = physical.fetch_physical_table_stream
 
-    def tracked_fetch(*args, **kwargs):
-        table = original(*args, **kwargs)
-        meta = table.batch.batch_meta
-        calls.append((kwargs.get("scan_range"), meta.chunk_size, meta.chunk_index, meta.source_offset))
-        return table
+    def fail_offset_fetch(*args, **kwargs):
+        raise AssertionError("chunk execution should use Arrow stream scan, not OFFSET/LIMIT fetch")
 
-    monkeypatch.setattr(physical, "fetch_physical_table", tracked_fetch)
+    def tracked_stream(*args, **kwargs):
+        for table in original_stream(*args, **kwargs):
+            meta = table.batch.batch_meta
+            calls.append((meta.chunk_size, meta.chunk_index, meta.source_offset))
+            yield table
+
+    monkeypatch.setattr(physical, "fetch_physical_table", fail_offset_fetch)
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
 
     rows = PyTorchGraphExecutor().execute(
         con,
@@ -51,7 +55,7 @@ def test_chunked_scan_filter_project_matches_default_and_preserves_chunk_metadat
         {"id": 4, "inc": 41},
         {"id": 5, "inc": 51},
     ]
-    assert calls == [((0, 2), 2, 0, 0), ((2, 4), 2, 1, 2), ((4, 5), 2, 2, 4)]
+    assert calls == [(2, 0, 0), (2, 1, 2), (2, 2, 4)]
 
 
 def test_scan_chunk_execution_uses_batch_pipeline_instead_of_per_chunk_physical_executor(monkeypatch):
@@ -147,15 +151,19 @@ def test_partitionable_execution_preserves_configured_scan_chunk_metadata(monkey
     _create_amount_table(con)
     plan = compile_tqp_plan(con, "select sum(amount) as total from t", "sirius")
     calls = []
-    original = physical.fetch_physical_table
+    original_stream = physical.fetch_physical_table_stream
 
-    def tracked_fetch(*args, **kwargs):
-        table = original(*args, **kwargs)
-        meta = table.batch.batch_meta
-        calls.append((kwargs.get("scan_range"), meta.chunk_size, meta.chunk_index, meta.source_offset))
-        return table
+    def fail_offset_fetch(*args, **kwargs):
+        raise AssertionError("partitionable execution should use Arrow stream scan, not OFFSET/LIMIT fetch")
 
-    monkeypatch.setattr(physical, "fetch_physical_table", tracked_fetch)
+    def tracked_stream(*args, **kwargs):
+        for table in original_stream(*args, **kwargs):
+            meta = table.batch.batch_meta
+            calls.append((meta.chunk_size, meta.chunk_index, meta.source_offset))
+            yield table
+
+    monkeypatch.setattr(physical, "fetch_physical_table", fail_offset_fetch)
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
 
     rows = PyTorchGraphExecutor().execute(
         con,
@@ -165,4 +173,4 @@ def test_partitionable_execution_preserves_configured_scan_chunk_metadata(monkey
     )
 
     assert rows == [{"total": 150}]
-    assert calls == [((0, 2), 2, 0, 0), ((2, 4), 2, 1, 2), ((4, 5), 2, 2, 4)]
+    assert calls == [(2, 0, 0), (2, 1, 2), (2, 2, 4)]

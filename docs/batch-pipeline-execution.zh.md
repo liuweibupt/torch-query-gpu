@@ -38,6 +38,18 @@ ScanBatchOperator
   -> FinalMerge on host
 ```
 
+第三阶段把 scan source 从 `LIMIT/OFFSET` 分块改为 DuckDB Arrow `RecordBatchReader`：
+
+```text
+DuckDB SELECT once
+  -> fetch_record_batch(rows_per_batch=chunk_size)
+  -> Arrow RecordBatch
+  -> TensorRecordBatch-backed PhysicalTable
+  -> downstream BatchOperator
+```
+
+这样同一个 scan 只执行一次 DuckDB 查询，避免大表上每个 chunk 重复 OFFSET 跳过。scan projection 还会把 `DECIMAL(p,s)` 下推为 scaled `int64`，把 TPC-H 低基数字符串下推为静态 dictionary id，把 DATE 下推为 `YYYYMMDD` int，减少 Python object conversion。
+
 ## 对成熟数据库方案的对应
 
 | 成熟数据库概念 | 当前项目对应 |
@@ -46,7 +58,7 @@ ScanBatchOperator
 | Vectorized operator | `BatchOperator.next_batch()` |
 | Pipeline-friendly operator | scan / filter / project |
 | Pipeline breaker | aggregate / join build / sort / distinct / window |
-| Morsel/chunk scheduling | `ScanChunkConfig.chunk_size` + scan row ranges |
+| Morsel/chunk scheduling | `ScanChunkConfig.chunk_size` / `PartitionConfig.chunk_size` + Arrow RecordBatch stream |
 | Local + global 两阶段执行 | `PartitionConfig` 已使用 `LocalAggregateBatchOperator -> FinalMerge` |
 
 ## 算子分类
@@ -104,6 +116,10 @@ Scan chunks -> local operator state -> final merge operator -> output batches
   - `ProjectBatchOperator`
   - `SortBatchOperator`
   - `execute_batch_pipeline()`
+- `tpch_torch/backend/physical_scan.py`
+  - `fetch_physical_table_stream()`
+  - DuckDB Arrow RecordBatch streaming scan
+  - scan-time DECIMAL / DATE / static dictionary encoding
 - `tpch_torch/backend/physical_pipeline_aggregate.py`
   - `LocalAggregateBatchOperator`
 - `tpch_torch/backend/physical_chunked.py`
@@ -122,6 +138,7 @@ Scan chunks -> local operator state -> final merge operator -> output batches
   - 验证 scan/filter/project correctness
   - 验证 scan chunk metadata
   - 验证不再 per chunk 调用 `PhysicalPlanExecutor.execute()`
+  - 验证 batch pipeline 使用 Arrow stream scan，而不是 OFFSET/LIMIT fetch
   - 验证 join/aggregate 显式拒绝
 
 ## 下一步演进 TODO

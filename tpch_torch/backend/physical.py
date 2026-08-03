@@ -35,7 +35,11 @@ from tpch_torch.backend.physical_projection import (
 from tpch_torch.backend.physical_projection_binding import parent_bound_projection_expression
 from tpch_torch.backend.physical_required import parents_by_child, required_columns_from_parents
 from tpch_torch.backend.physical_sql import select_expressions_by_alias
-from tpch_torch.backend.physical_scan import fetch_physical_table, scan_row_count
+from tpch_torch.backend.physical_scan import (
+    fetch_physical_table,
+    fetch_physical_table_stream,
+    scan_row_count,
+)
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
