@@ -23,6 +23,7 @@ from tpch_torch.backend.physical_projection import (
 )
 from tpch_torch.backend.physical_projection_binding import parent_bound_projection_expression
 from tpch_torch.backend.physical_required import parents_by_child, required_columns_from_parents
+from tpch_torch.backend.physical_scan_pushdown import ScanFilterPushdown, plan_scan_filter_pushdown
 from tpch_torch.backend.physical_sql import select_expressions_by_alias
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
 from tpch_torch.errors import UnsupportedPlanError
@@ -57,14 +58,14 @@ class ScanBatchOperator:
     table_name: str
     fetched_columns: tuple[str, ...]
     projected_columns: tuple[str, ...]
-    filters: tuple[str, ...]
+    filter_pushdown: ScanFilterPushdown
     _chunks: Iterator[PhysicalTable] | None = None
 
     def next_batch(self) -> PhysicalTable | None:
         if self._chunks is None:
             self._chunks = self._iter_scan_chunks()
         for table in self._chunks:
-            filtered = _apply_scan_filters(table, self.filters)
+            filtered = _apply_scan_filters(table, self.filter_pushdown.residual_filters)
             return filtered
         return None
 
@@ -78,6 +79,7 @@ class ScanBatchOperator:
             self.projected_columns,
             self.context.device,
             chunk_size=self.context.chunk_size,
+            scan_filters=self.filter_pushdown.pushed_filters,
         )
 
 
@@ -186,8 +188,23 @@ def _scan_operator(context: PipelineContext, node: TQPOperatorNode, requested_ta
     filters = _metadata_list(node, "Filters")
     if not projected_columns:
         projected_columns = _required_scan_columns(context, table_name, node.node_id)
-    fetched_columns = tuple(dict.fromkeys((*projected_columns, *_filter_columns(context.con, table_name, filters))))
-    return ScanBatchOperator(context, node, table_name, fetched_columns, tuple(projected_columns), filters)
+    filter_pushdown = plan_scan_filter_pushdown(context.con, table_name, filters)
+    fetched_columns = tuple(
+        dict.fromkeys(
+            (
+                *projected_columns,
+                *_filter_columns(context.con, table_name, filter_pushdown.residual_filters),
+            )
+        )
+    )
+    return ScanBatchOperator(
+        context,
+        node,
+        table_name,
+        fetched_columns,
+        tuple(projected_columns),
+        filter_pushdown,
+    )
 
 
 def _single_child_operator(context: PipelineContext, node: TQPOperatorNode, table: str) -> BatchOperator:

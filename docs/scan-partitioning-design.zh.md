@@ -150,6 +150,48 @@ Q1 的 group key 是两个低基数字典列：`l_returnflag` × `l_linestatus`�
 
 它是通用的 dictionary group-by 优化，不绑定 Q1 SQL 字符串。
 
+### 3.4 scan predicate pushdown 与列裁剪
+
+进一步演进后，batch pipeline 在构造 `ScanBatchOperator` 时会把 DuckDB scan node 的 `Filters` 分成两类：
+
+```text
+pushable filter：能被 DuckDB 作为 base-table WHERE 验证通过
+residual filter：仍由 PyTorch tensor filter 执行
+```
+
+实现位置：
+
+- `tpch_torch/backend/physical_scan_pushdown.py`
+  - `plan_scan_filter_pushdown()`
+  - `where_clause()`
+- `tpch_torch/backend/physical_pipeline.py`
+  - `_scan_operator()` 先规划 pushdown，再只为 residual filters 补取 filter columns
+- `tpch_torch/backend/physical_scan.py`
+  - `fetch_physical_table_stream(..., scan_filters=...)`
+
+关键效果：
+
+```text
+Q1 projected columns:
+  l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax
+
+Q1 scan filter:
+  l_shipdate <= DATE '1998-09-02'
+
+旧路径：
+  fetch projected columns + l_shipdate
+  PyTorch filter l_shipdate
+
+新路径：
+  DuckDB Arrow reader:
+    SELECT projected columns
+    FROM lineitem
+    WHERE l_shipdate <= DATE '1998-09-02'
+  不再传输 l_shipdate
+```
+
+这属于 **storage/source-level predicate pushdown**：它优化的是 scan source 的数据产出边界，不是 query-specific Python fallback。不能安全下推的 predicate 会保留为 residual，并继续由 PyTorch filter 算子执行。
+
 ## 4. 哪些算子是全局依赖的？
 
 | 算子类别 | 是否能直接 chunk 后 concat | 正确做法 |
@@ -193,6 +235,7 @@ SQL Q1
   -> PartitionConfig(lineitem, chunk_size)
   -> ScanBatchOperator(fetch_physical_table_stream)
        DuckDB Arrow RecordBatchReader
+       scan predicate pushdown + filter-only column pruning
        DECIMAL/DATE/static-string scan-time encoding
   -> FilterBatchOperator
   -> ProjectBatchOperator
@@ -207,6 +250,7 @@ SQL Q1
 2. 去掉 DECIMAL Python object 循环；
 3. 去掉 Q1 静态字符串 Python 编码；
 4. 避免低基数字典 group-by 的 `torch.unique(dim=0)`。
+5. 将 DuckDB scan node 自带的安全 predicates 下推到 scan source，并裁剪只为 filter 服务的列。
 
 当前还未达到成熟 Sirius/cuDF 级别的部分：
 
@@ -216,9 +260,9 @@ SQL Q1
 - chunk size 还没有自适应显存预算；
 - hash join / sort / distinct 尚未实现完整 pipeline breaker state。
 
-## 6. 本轮 SF=1 CPU 观测
+## 6. SF=1 观测
 
-测试库：`data/tpch_sf1.duckdb`，设备：CPU，命令：
+测试库：`data/tpch_sf1.duckdb`。CPU 命令：
 
 ```bash
 python -m scripts.benchmark_query \
@@ -230,4 +274,4 @@ python -m scripts.benchmark_query \
   --partition-chunk-size 1000000
 ```
 
-观测结果：partitionable Q1 单次约 **1235.975 ms**。同一环境下 scan-only 读取 Q1 所需列约 **0.61 s**，说明本轮后 scan 已不再是最大热点；剩余主要热点转移到 per-batch projection/aggregate/host merge。
+CPU hot median 约 **1850.326 ms**；CUDA hot median 约 **646.684 ms**（`warmup-runs=1 hot-runs=3`）。同一环境下 scan-only 读取 Q1 所需列从约 **0.86 s** 降到约 **0.45 s**，说明 scan source 的取数/编码/列裁剪已有明显改善；剩余主要热点转移到 per-batch projection、local aggregate、host final merge 和 H2D/compute overlap。

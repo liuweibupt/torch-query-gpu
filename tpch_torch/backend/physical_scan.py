@@ -11,6 +11,8 @@ import torch
 
 from tpch_torch.backend.generic import _encode_generic_column
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue
+from tpch_torch.backend.physical_scan_pushdown import where_clause
+from tpch_torch.backend.physical_scan_sql import scan_select_list
 from tpch_torch.backend.static_dictionaries import static_string_dictionary
 from tpch_torch.backend.type_mapping import (
     column_meta_from_duckdb_type,
@@ -50,16 +52,15 @@ def fetch_physical_table(
     scan_range: tuple[int, int] | None = None,
     chunk_size: int | None = None,
     chunk_index: int | None = None,
+    scan_filters: tuple[str, ...] = (),
 ) -> PhysicalTable:
     """Fetch a possibly ranged table slice into physical tensor columns."""
 
     column_types = _table_column_type_map(con, table_name)
-    select_list = ", ".join(
-        _select_expression(table_name, column, column_types.get(column, ""))
-        for column in fetched_columns
-    )
+    select_list = scan_select_list(table_name, fetched_columns, column_types)
     offset, limit = _scan_offset_limit(scan_range)
-    columnar = con.execute(f"select {select_list} from {table_name}{limit}").fetchnumpy()
+    where_sql = where_clause(scan_filters)
+    columnar = con.execute(f"select {select_list} from {table_name}{where_sql}{limit}").fetchnumpy()
     return _physical_table_from_columnar(
         columnar,
         column_types,
@@ -81,6 +82,7 @@ def fetch_physical_table_stream(
     device: str,
     *,
     chunk_size: int,
+    scan_filters: tuple[str, ...] = (),
 ) -> Iterator[PhysicalTable]:
     """Yield table chunks from one DuckDB Arrow RecordBatch stream.
 
@@ -91,7 +93,7 @@ def fetch_physical_table_stream(
 
     if chunk_size <= 0:
         raise ValueError("scan chunk_size must be positive")
-    if not fetched_columns:
+    if not fetched_columns and not scan_filters:
         total, _ = scan_row_count(con, table_name, None)
         for chunk_index, start in enumerate(range(0, total, chunk_size)):
             yield _rowid_only_physical_table(
@@ -103,12 +105,13 @@ def fetch_physical_table_stream(
                 device,
             )
         return
+    if not fetched_columns:
+        yield from _filtered_rowid_stream(con, table_name, device, chunk_size, scan_filters)
+        return
     column_types = _table_column_type_map(con, table_name)
-    select_list = ", ".join(
-        _select_expression(table_name, column, column_types.get(column, ""))
-        for column in fetched_columns
-    )
-    reader = con.execute(f"select {select_list} from {table_name}").fetch_record_batch(
+    select_list = scan_select_list(table_name, fetched_columns, column_types)
+    where_sql = where_clause(scan_filters)
+    reader = con.execute(f"select {select_list} from {table_name}{where_sql}").fetch_record_batch(
         rows_per_batch=chunk_size
     )
     source_offset = 0
@@ -193,6 +196,33 @@ def _physical_table_from_columnar(
     )
 
 
+def _filtered_rowid_stream(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    device: str,
+    chunk_size: int,
+    scan_filters: tuple[str, ...],
+) -> Iterator[PhysicalTable]:
+    reader = con.execute(
+        f"select {_DUCKDB_ROW_ID} from {table_name}{where_clause(scan_filters)}"
+    ).fetch_record_batch(rows_per_batch=chunk_size)
+    emitted_offset = 0
+    for chunk_index, batch in enumerate(_record_batches(reader)):
+        rowids = torch.as_tensor(
+            batch.column(0).to_numpy(zero_copy_only=False),
+            dtype=torch.int64,
+            device=device,
+        )
+        yield _rowid_table_from_tensor(
+            table_name,
+            rowids,
+            chunk_size,
+            chunk_index,
+            emitted_offset,
+        )
+        emitted_offset += int(rowids.numel())
+
+
 def _rowid_only_physical_table(
     table_name: str,
     start: int,
@@ -201,19 +231,32 @@ def _rowid_only_physical_table(
     chunk_index: int,
     device: str,
 ) -> PhysicalTable:
-    rowids = PhysicalValue(torch.arange(start, end, dtype=torch.int64, device=device))
+    rowids = torch.arange(start, end, dtype=torch.int64, device=device)
+    return _rowid_table_from_tensor(table_name, rowids, chunk_size, chunk_index, start)
+
+
+def _rowid_table_from_tensor(
+    table_name: str,
+    rowid_tensor: torch.Tensor,
+    chunk_size: int,
+    chunk_index: int,
+    source_offset: int,
+) -> PhysicalTable:
+    rowids = PhysicalValue(rowid_tensor)
     values = {_ROW_ID: rowids, _DUCKDB_ROW_ID: rowids}
     batch = _scan_batch(
         values,
         {_ROW_ID: ColumnType.int64(_ROW_ID), _DUCKDB_ROW_ID: ColumnType.int64(_DUCKDB_ROW_ID)},
         (_ROW_ID,),
-        end - start,
-        device,
-        source_offset=start,
+        int(rowid_tensor.numel()),
+        str(rowid_tensor.device),
+        source_offset=source_offset,
         chunk_size=chunk_size,
         chunk_index=chunk_index,
     )
-    return PhysicalTable(table_name, {_ROW_ID: rowids}, (_ROW_ID,), end - start, batch)
+    return PhysicalTable(table_name, {_ROW_ID: rowids}, (_ROW_ID,), int(rowid_tensor.numel()), batch)
+
+
 
 
 def _record_batches(reader: Any) -> Iterator[Any]:
@@ -374,30 +417,6 @@ def _add_rowid_aliases(
     )
     values[_DUCKDB_ROW_ID] = rowids
     values[f"{table_name}.{_DUCKDB_ROW_ID}"] = rowids
-
-
-def _select_expression(table_name: str, column: str, duckdb_type: str) -> str:
-    if column in DATE_COLUMNS_EXTENDED:
-        return f"strftime({column}, '%Y%m%d')::integer as {column}"
-    decimal_meta = column_meta_from_duckdb_type(duckdb_type)
-    if decimal_meta.logical_dtype == LogicalDType.DECIMAL:
-        return f"(({column}) * {10 ** int(decimal_meta.scale or 0)})::bigint as {column}"
-    dictionary = static_string_dictionary(table_name, column)
-    if dictionary is not None:
-        return f"{_static_dictionary_case(column, dictionary)} as {column}"
-    return column
-
-
-def _static_dictionary_case(column: str, dictionary: tuple[str, ...]) -> str:
-    arms = " ".join(
-        f"when {_sql_string_literal(value)} then {index}"
-        for index, value in enumerate(dictionary)
-    )
-    return f"(case {column} {arms} else -1 end)::bigint"
-
-
-def _sql_string_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _with_scan_metadata(table_name: str, column: str, value: PhysicalValue) -> PhysicalValue:

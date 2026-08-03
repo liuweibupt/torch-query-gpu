@@ -50,6 +50,8 @@ DuckDB SELECT once
 
 这样同一个 scan 只执行一次 DuckDB 查询，避免大表上每个 chunk 重复 OFFSET 跳过。scan projection 还会把 `DECIMAL(p,s)` 下推为 scaled `int64`，把 TPC-H 低基数字符串下推为静态 dictionary id，把 DATE 下推为 `YYYYMMDD` int，减少 Python object conversion。
 
+第四阶段加入 scan predicate pushdown：`ScanBatchOperator` 会把 DuckDB scan node 的 `Filters` 规划为 pushed filters 与 residual filters。pushed filters 进入 Arrow scan source 的 `WHERE`，因此只为 pushed filters 服务的列不再需要传到 PyTorch；residual filters 继续由 PyTorch tensor filter 执行，避免不支持表达式被静默跳过。
+
 ## 对成熟数据库方案的对应
 
 | 成熟数据库概念 | 当前项目对应 |
@@ -120,6 +122,9 @@ Scan chunks -> local operator state -> final merge operator -> output batches
   - `fetch_physical_table_stream()`
   - DuckDB Arrow RecordBatch streaming scan
   - scan-time DECIMAL / DATE / static dictionary encoding
+- `tpch_torch/backend/physical_scan_pushdown.py`
+  - scan predicate pushdown planner
+  - pushed/residual filter split
 - `tpch_torch/backend/physical_pipeline_aggregate.py`
   - `LocalAggregateBatchOperator`
 - `tpch_torch/backend/physical_chunked.py`

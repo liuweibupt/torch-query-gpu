@@ -82,6 +82,8 @@ ScanBatchOperator
 
 它不再对每个 chunk 发起 `LIMIT/OFFSET` scan。scan 阶段还会把 DECIMAL 预编码为 scaled `int64`，把 TPC-H 静态字典字符串预编码为 dictionary id，避免 SF100 场景中 Python `Decimal` object 和字符串 object 成为主要开销。
 
+进一步演进后，scan node 上能被 DuckDB base-table `WHERE` 验证通过的 filters 会下推到 Arrow scan source。Q1 中 `l_shipdate <= DATE '1998-09-02'` 下推后，`l_shipdate` 不再作为 filter-only 列传输到 PyTorch；不能安全下推的 predicate 保留为 residual，由 PyTorch filter 执行。
+
 ## 4. 支持范围
 
 当前支持：
@@ -182,9 +184,10 @@ partitionable execution 的首要收益不是让 SF=1 CPU eager PyTorch demo 更
 
 | Query | Path | Hot median | 相对 baseline |
 | --- | --- | ---: | ---: |
-| Q1 | 默认 fused physical primitive + resident tensor cache，`cold-runs=0 warmup-runs=0 hot-runs=1` | 944.330 ms | 1.00× |
-| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id，`cold-runs=0 warmup-runs=0 hot-runs=1` | 1235.975 ms | 0.76× |
+| Q1 | 默认 fused physical primitive + resident tensor cache，CPU `warmup-runs=1 hot-runs=3` | 136.890 ms | 1.00× |
+| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown，CPU `warmup-runs=1 hot-runs=3` | 1850.326 ms | 0.074× |
+| Q1 | partitionable over `lineitem` + Arrow stream scan + dictionary dense group-id + scan filter pushdown，CUDA `warmup-runs=1 hot-runs=3` | 646.684 ms | - |
 
-解释：早期 partitionable Q1 主要耗时来自 OFFSET/LIMIT 重扫、DECIMAL Python object 转换、字符串 object 编码和 `torch.unique(dim=0)` group key 发现。本轮后 scan-only 读取 Q1 所需列约 0.61 s，partitionable Q1 端到端约 1.24 s；scan 已不再是最大热点，后续热点主要在 per-batch projection、local aggregate 多次表达式求值和 host row-dict final merge。
+解释：早期 partitionable Q1 主要耗时来自 OFFSET/LIMIT 重扫、DECIMAL Python object 转换、字符串 object 编码和 `torch.unique(dim=0)` group key 发现。本轮后 scan-only 读取 Q1 所需列从约 0.86 s 降到约 0.45 s；CUDA partitionable Q1 热查询约 0.65 s。CPU 端到端波动较大且仍受 Python projection/aggregate 调度影响；后续热点主要在 per-batch projection、local aggregate 多次表达式求值和 host row-dict final merge。
 
 更完整的 scan / chunk 设计见 [`docs/scan-partitioning-design.zh.md`](scan-partitioning-design.zh.md)。

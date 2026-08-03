@@ -55,7 +55,40 @@ def test_chunked_scan_filter_project_matches_default_and_preserves_chunk_metadat
         {"id": 4, "inc": 41},
         {"id": 5, "inc": 51},
     ]
-    assert calls == [(2, 0, 0), (2, 1, 2), (2, 2, 4)]
+    assert calls == [(2, 0, 0), (2, 1, 2)]
+
+
+def test_scan_chunk_pushes_filters_and_prunes_filter_only_columns(monkeypatch):
+    import tpch_torch.backend.physical as physical
+    from tpch_torch.backend.graph import PyTorchGraphExecutor
+    from tpch_torch.backend.physical_chunked import ScanChunkConfig
+
+    con = duckdb.connect()
+    _create_amount_table(con)
+    plan = compile_tqp_plan(con, "select id from t where amount >= 30", "sirius")
+    observed = []
+    original_stream = physical.fetch_physical_table_stream
+
+    def tracked_stream(*args, **kwargs):
+        observed.append(
+            {
+                "fetched_columns": args[2],
+                "scan_filters": kwargs.get("scan_filters", ()),
+            }
+        )
+        yield from original_stream(*args, **kwargs)
+
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
+
+    rows = PyTorchGraphExecutor().execute(
+        con,
+        plan,
+        device="cpu",
+        scan_chunk_config=ScanChunkConfig(table="t", chunk_size=2),
+    )
+
+    assert rows == [{"id": 3}, {"id": 4}, {"id": 5}]
+    assert observed == [{"fetched_columns": ("id",), "scan_filters": ("amount>=30",)}]
 
 
 def test_scan_chunk_execution_uses_batch_pipeline_instead_of_per_chunk_physical_executor(monkeypatch):

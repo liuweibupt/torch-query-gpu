@@ -169,6 +169,39 @@ def test_partitionable_q1_uses_batch_pipeline_not_per_chunk_physical_executor(mo
     assert [row["count_order"] for row in rows] == [1, 2]
 
 
+def test_partitionable_q1_pushes_scan_filter_and_prunes_shipdate(monkeypatch):
+    import tpch_torch.backend.physical as physical
+    from tpch_torch.backend.graph import PyTorchGraphExecutor
+
+    con = duckdb.connect()
+    create_lineitem_fixture(con, Q1_FIXTURE_ROWS)
+    plan = compile_tqp_plan(con, TPC_H_Q1_SQL, "sirius")
+    observed = []
+    original_stream = physical.fetch_physical_table_stream
+
+    def tracked_stream(*args, **kwargs):
+        observed.append(
+            {
+                "fetched_columns": args[2],
+                "scan_filters": kwargs.get("scan_filters", ()),
+            }
+        )
+        yield from original_stream(*args, **kwargs)
+
+    monkeypatch.setattr(physical, "fetch_physical_table_stream", tracked_stream)
+
+    rows = PyTorchGraphExecutor().execute(
+        con,
+        plan,
+        device="cpu",
+        partition_config=PartitionConfig(table="lineitem", chunk_size=2),
+    )
+
+    assert [row["count_order"] for row in rows] == [1, 2]
+    assert "l_shipdate" not in observed[0]["fetched_columns"]
+    assert observed[0]["scan_filters"] == ("l_shipdate<='1998-09-02'::DATE",)
+
+
 def test_partitionable_q6_uses_batch_pipeline_not_per_chunk_physical_executor(monkeypatch):
     from tpch_torch.backend.graph import PyTorchGraphExecutor
     from tpch_torch.backend.physical import PhysicalPlanExecutor
