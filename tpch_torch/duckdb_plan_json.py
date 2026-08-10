@@ -265,6 +265,10 @@ def _operator_kind(name: str) -> OperatorKind:
         return OperatorKind.LIMIT
     if normalized == "CTE":
         return OperatorKind.CTE
+    if normalized == "UNION":
+        return OperatorKind.SET
+    if normalized == "WINDOW":
+        return OperatorKind.WINDOW
     if normalized in {"DUMMY_SCAN"}:
         return OperatorKind.SCAN
     return OperatorKind.UNKNOWN

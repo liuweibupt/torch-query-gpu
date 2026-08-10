@@ -65,6 +65,10 @@ def bind_node_slots(
         return _bind_aggregate_node(node_id, metadata_dict, child_flat, output_schema, is_root)
     if kind == OperatorKind.JOIN:
         return _bind_join_node(node_id, metadata_dict, child_slots)
+    if kind == OperatorKind.SET:
+        return _bind_set_node(node_id, metadata_dict, child_slots, output_schema, is_root)
+    if kind == OperatorKind.WINDOW:
+        return _bind_window_node(node_id, metadata_dict, child_flat)
     return metadata_dict, _pass_through_slots(node_id, child_flat, output_schema, is_root)
 
 
@@ -131,6 +135,34 @@ def _bind_join_node(
     return metadata, output_slots
 
 
+def _bind_set_node(
+    node_id: str,
+    metadata: dict[str, Any],
+    child_slots: Sequence[Sequence[TQPSlot]],
+    output_schema: Sequence[TQPOutputColumn],
+    is_root: bool,
+) -> tuple[dict[str, Any], tuple[TQPSlot, ...]]:
+    first_child = tuple(child_slots[0]) if child_slots else ()
+    output_slots = _pass_through_slots(node_id, first_child, output_schema, is_root)
+    metadata["output_slots"] = output_slots
+    return metadata, output_slots
+
+
+def _bind_window_node(
+    node_id: str,
+    metadata: dict[str, Any],
+    child_slots: Sequence[TQPSlot],
+) -> tuple[dict[str, Any], tuple[TQPSlot, ...]]:
+    projections = _metadata_tuple(metadata, "projections") or _metadata_tuple(metadata, "Projections")
+    output_slots = _window_output_slots(node_id, child_slots, projections)
+    metadata["slot_window_projections"] = tuple(
+        _bound_expression(raw, raw, output_slots, output_slots[len(child_slots) + index])
+        for index, raw in enumerate(projections)
+    )
+    metadata["output_slots"] = output_slots
+    return metadata, output_slots
+
+
 def _projection_output_slots(
     node_id: str,
     expressions: Sequence[str],
@@ -188,6 +220,17 @@ def _joined_output_slots(node_id: str, child_slots: Sequence[Sequence[TQPSlot]])
     output = []
     for slot in tuple(slot for slots in child_slots for slot in slots):
         output.append(_rebound_slot(node_id, len(output), slot, slot.name, slot.type_name))
+    return tuple(output)
+
+
+def _window_output_slots(
+    node_id: str,
+    child_slots: Sequence[TQPSlot],
+    projections: Sequence[str],
+) -> tuple[TQPSlot, ...]:
+    output = [_rebound_slot(node_id, index, slot, slot.name, slot.type_name) for index, slot in enumerate(child_slots)]
+    for projection in projections:
+        output.append(TQPSlot(_slot_id(node_id, len(output)), node_id, len(output), projection, None, (projection,)))
     return tuple(output)
 
 

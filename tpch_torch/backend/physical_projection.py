@@ -459,7 +459,7 @@ def _top_level(expression: str, target: int) -> bool:
 
 
 def _normalize_expression(expression: str) -> str:
-    unqualified = _unqualify_column_references(expression)
+    unqualified = re.sub(r"\bdense_rank\s*\(", "rank_dense(", re.sub(r"\s+NULLS\s+(?:FIRST|LAST)", "", _unqualify_column_references(expression), flags=re.I), flags=re.I)
     compact = re.sub(r"\s+", "", _strip_wrapping_parentheses(unqualified))
     return _normalize_numeric_literals(compact).lower()
 

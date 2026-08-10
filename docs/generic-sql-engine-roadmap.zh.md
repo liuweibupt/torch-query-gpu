@@ -1,0 +1,168 @@
+# 通用 SQL 引擎化路线：对齐 Sirius 的工程方案
+
+本文回答一个关键边界问题：当前项目不能只满足 TPC-H 固定集合，而要逐步成为“任意 SQL 输入、能覆盖则由 TQP/PyTorch 执行、不能覆盖则显式报告缺失算子”的通用数据库执行引擎。
+
+## 1. 结论
+
+成熟方案不是自己重写完整 SQL parser，而是把系统拆成两层：
+
+```text
+SQL frontend / optimizer：复用 DuckDB 这类成熟数据库
+Execution backend：实现自己的 GPU/Tensor physical operators
+```
+
+Sirius 的公开文档说明它作为 DuckDB extension 接入：通过 optimizer hook 捕获优化后的计划，生成 GPU plan；成功时用 Sirius physical execution 替换 DuckDB physical plan，不成功时 Sirius 会回到 DuckDB CPU 执行。Sirius 的 GPU 栈基于 CUDA-X / cuDF / RMM，支持 filter、projection、join、group-by、order-by、aggregation、top-n、limit、CTE 等，并继续补 window 等高级算子。
+
+本仓库采用同样的前端复用原则，但有一个不同的正确性策略：
+
+```text
+Sirius：生产系统体验优先，unsupported 可 graceful CPU fallback。
+本仓库：研究原型正确性优先，unsupported 必须 UnsupportedPlanError，不允许静默 DuckDB-result fallback。
+```
+
+因此“任意 SQL”的实现目标应该表述为：
+
+```text
+任意 DuckDB 可 parse/plan 的 SQL 都能进入 TQP plan admission；
+只要 physical plan 中每个节点都有 TQP/PyTorch operator，就由 PyTorch 执行；
+缺失节点精确报出 operator / expression / type gap。
+```
+
+## 2. 对 Sirius / 成熟数据库的抽象拆解
+
+### 2.1 Sirius-like 前端原则
+
+Sirius 不是靠 query-id 模板实现 TPC-H，而是：
+
+1. DuckDB 负责 SQL parse / bind / optimize。
+2. optimizer hook 捕获 optimized logical/physical plan。
+3. plan generator 把数据库 plan lowering 成 GPU execution plan。
+4. scan、join、aggregate、sort、limit、CTE 等都作为后端算子实现。
+5. 用 memory tier / partition / spilling 解决超过显存的数据集。
+
+本仓库对应关系：
+
+| Sirius / 成熟 DB 组件 | 本仓库现状 | 差距 |
+| --- | --- | --- |
+| DuckDB parser/binder/optimizer | `compile_sirius_plan()` 使用 DuckDB `json_serialize_sql`、`DESCRIBE`、`EXPLAIN JSON` | Python API 拿不到完整 bound expression C++ 对象 |
+| Plan IR | `TQPOperatorGraph` + `TQPSlot` / `TQPBoundExpression` | slot AST 尚未完全替换字符串 expression executor |
+| GPU physical operators | `backend/physical*.py` + PyTorch tensor ops | window/set/outer join/recursive 等还需扩展 |
+| Vectorized pipeline | scan/partitionable batch pipeline 已有 `next_batch()` | join/sort/window 仍主要 materialized whole-table |
+| Memory manager | resident tensor cache + chunk config | 还没有 RMM 级 allocator / spill manager |
+| Unsupported behavior | 显式 `UnsupportedPlanError` | 这是设计选择，不做静默 fallback |
+
+### 2.2 通用化的核心不是“任意 SQL parser”
+
+真正需要补的是 **physical operator coverage** 和 **expression/type coverage**：
+
+```text
+DuckDB physical JSON node
+  -> TQPOperatorNode(kind, metadata, slots)
+  -> PhysicalPlanExecutor dispatch
+  -> PyTorch/TensorRecordBatch operator
+```
+
+因此每当新的 SQL 失败，不应该给该 SQL 写特化脚本，而应该把失败归类到：
+
+- 缺少 physical node：例如 `UNION`、`WINDOW`、`UNNEST`。
+- 缺少 join type：例如 full outer、asof、复杂 non-equi join。
+- 缺少 expression：例如复杂 scalar function、regexp、interval arithmetic。
+- 缺少 type：例如 nested/list/struct、timestamp with timezone。
+- 缺少 execution model：例如 recursive CTE、ordered window frame、global set semantics。
+
+## 3. 本轮已经落地的第一批通用 SQL 扩展
+
+### 3.1 SET operation：`UNION`
+
+新增：
+
+```text
+DuckDB UNION node
+  -> OperatorKind.SET
+  -> physical_union.execute_union_node()
+```
+
+实现语义：
+
+- `UNION ALL`：按输出位置 concat 每个 child 的 tensor column。
+- `UNION DISTINCT`：DuckDB 会规划成 `UNION` 后接 `HASH_GROUP_BY` 去重；本仓库复用已有 grouped aggregate/group-key unique path。
+- 类型策略：DuckDB 必须已经完成类型 coercion；如果两个 child tensor dtype / dictionary / decimal metadata 不一致，显式报错，不做隐式错误转换。
+
+### 3.2 WINDOW subset
+
+新增：
+
+```text
+DuckDB WINDOW node
+  -> OperatorKind.WINDOW
+  -> physical_window.execute_window_node()
+```
+
+当前支持的 correctness-first subset：
+
+| Window 形态 | 支持情况 |
+| --- | --- |
+| `row_number() over (partition by ... order by ...)` | 支持 |
+| `rank() over (partition by ... order by ...)` | 支持 |
+| `dense_rank() over (partition by ... order by ...)` | 支持，DuckDB physical 名称 `RANK_DENSE` |
+| `sum/count/avg/min/max(x) over ()` | 支持 |
+| `sum/count/avg/min/max(x) over (partition by ...)` | 支持 |
+| aggregate window with `ORDER BY` frame | 暂不支持，显式报错 |
+| window `NULLS FIRST/LAST` 带真实 NULL key | 暂不支持，显式报错 |
+
+这不是 TPC-H 特化；它覆盖所有 lowering 到上述 DuckDB `WINDOW` physical projection 的 SQL。
+
+## 4. 后续 Roadmap：从 TPC-H coverage 到通用 DBMS coverage
+
+### P0：SQL admission 和失败定位
+
+- [x] 默认 SQL 输入经过 DuckDB parser/DESCRIBE/EXPLAIN JSON。
+- [x] plan lowering 生成 typed `TQPOperatorGraph`。
+- [x] `TQPSlot` 统一列名和 `#N` ordinal。
+- [ ] 增加 `tpch-torch-explain-coverage`：输出缺失 physical node、表达式、类型、是否可 chunk/pipeline。
+- [ ] 每个 `UnsupportedPlanError` 附带 node id、operator name、metadata snippet。
+
+### P1：补齐通用 relational physical nodes
+
+- [x] `UNION` / `UNION DISTINCT` 基础路径。
+- [x] `WINDOW` 第一批 ranking + partition aggregate。
+- [ ] `FULL OUTER JOIN`。
+- [ ] `CROSS_PRODUCT` / `POSITIONAL_JOIN` / 更完整 non-equi join。
+- [ ] `UNNEST` / `LIST` / `STRUCT` 基础展开。
+- [ ] `INTERSECT` / `EXCEPT`：若 DuckDB lowering 成 ANTI/SEMI + aggregate，则复用；否则新增 set node。
+- [ ] recursive CTE：需要 fixpoint execution，不应塞进普通 materialized CTE。
+
+### P2：表达式与类型覆盖
+
+- [x] arithmetic / comparison / CASE / CAST / EXTRACT / LIKE / IN。
+- [x] DECIMAL scaled int64 metadata propagation。
+- [ ] timestamp / interval arithmetic。
+- [ ] regexp / string functions / substring variants。
+- [ ] NULL three-valued logic 全表达式覆盖。
+- [ ] nested/list/struct 类型：需要 Arrow-like offsets/children storage。
+
+### P3：执行模型与调度
+
+- [x] scan/partitionable aggregate batch pipeline。
+- [ ] join-aware chunk pipeline：build/probe 分离、partitioned hash join、spill。
+- [ ] sort/window external merge：局部 run + global merge。
+- [ ] operator scheduler：pipeline breakers 标记、memory budget、device placement。
+- [ ] cache/pin API：对齐 Sirius `pin_table` 思路，支持 hot run resident columns。
+
+## 5. 当前边界表述
+
+更新后的准确表述应是：
+
+```text
+本项目不是“所有 SQL 永远成功”的完整 DBMS；
+但它已经不是 TPC-H query-id 模板系统。
+它是一个 DuckDB-planned、coverage-driven 的 TQP/PyTorch physical engine。
+任意 SQL 都可尝试 admission；执行成功取决于 physical node/operator coverage。
+新增 SQL coverage 必须通过通用 operator 实现，不允许 query-specific Python 脚本或 DuckDB result fallback。
+```
+
+## 参考
+
+- Sirius GitHub: <https://github.com/sirius-db/sirius>
+- Sirius `gpu_execution` 文档：<https://github.com/sirius-db/sirius/blob/main/docs/gpu_execution.md>
+- DuckDB JSON plan / Substrait 相关前端使用见本仓库 `tpch_torch/duckdb_plan_json.py` 与 `tpch_torch/frontend/sirius.py`。

@@ -193,10 +193,10 @@ Sirius-like 前端能接收 DuckDB 可解析和计划的 SQL；PyTorch 后端当
 TPC-H Q1-Q22：TQPOperatorGraph + PyTorch graph nodes
 Q1-Q22：DuckDB physical-plan interpreter v1
 generic equi-join 与 join+aggregate：DuckDB physical-plan interpreter v1
-generic SQL：single-table SELECT / WHERE / projection / aggregate / GROUP BY / ORDER BY / LIMIT
+generic SQL：SELECT / WHERE / projection / aggregate / GROUP BY / ORDER BY / LIMIT / UNION / 第一批 WINDOW
 ```
 
-Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。TPC-H 所需的 delimiter/mark/nested-loop/subquery/CTE 形状已经覆盖到 correctness-first 级别；更一般的 generic subqueries、windows、set operations、HAVING 仍显式失败。
+Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。TPC-H 所需的 delimiter/mark/nested-loop/subquery/CTE 形状已经覆盖到 correctness-first 级别；通用 `UNION` 和 `row_number/rank/dense_rank/partition aggregate` window 已有第一批支持。更一般的 generic subqueries、完整 window frame、更多 set operations 仍显式失败。
 
 ## 7. TPC-H 支持矩阵
 

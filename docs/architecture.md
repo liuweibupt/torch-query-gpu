@@ -200,13 +200,15 @@ PyTorch backend currently executes:
 TPC-H Q1-Q22 via TQPOperatorGraph + PyTorch graph nodes
 Q1-Q22 via DuckDB physical-plan interpreter v1
 generic equi-join and join+aggregate via DuckDB physical-plan interpreter v1
-single-table generic SELECT/WHERE/projection/aggregate/GROUP BY/ORDER BY/LIMIT
+generic SELECT/WHERE/projection/aggregate/GROUP BY/ORDER BY/LIMIT/UNION/first-window subset
 ```
 
 Generic joins are now partially supported through the DuckDB physical-plan
 interpreter. TPC-H-required delimiter/mark/nested-loop/subquery/CTE shapes are
-covered at correctness-first level. More general generic subqueries, windows,
-set operations, and HAVING still fail explicitly.
+covered at correctness-first level. Generic UNION and a first
+row_number/rank/dense_rank/partition-aggregate window subset are supported.
+More general generic subqueries, full window frames, additional set operations,
+and HAVING shapes still fail explicitly.
 
 ## TPC-H support matrix
 

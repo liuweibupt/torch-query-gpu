@@ -41,6 +41,8 @@ from tpch_torch.backend.physical_scan import (
     scan_row_count,
 )
 from tpch_torch.backend.physical_types import PhysicalTable, PhysicalValue, table_device
+from tpch_torch.backend.physical_union import execute_union_node
+from tpch_torch.backend.physical_window import execute_window_node
 from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.operator_graph import OperatorKind, TQPOperatorGraph, TQPOperatorNode
 
@@ -106,6 +108,10 @@ class PhysicalPlanExecutor:
             return self._execute_delim_scan(node)
         if node.kind == OperatorKind.CTE:
             return self._execute_cte(node)
+        if node.kind == OperatorKind.SET:
+            return self._execute_set(node)
+        if node.kind == OperatorKind.WINDOW:
+            return self._execute_window(node)
         if normalized == "EMPTY_RESULT":
             return PhysicalTable("empty", {}, (), 0)
         raise UnsupportedPlanError(f"unsupported DuckDB physical node: {node.name}")
@@ -232,6 +238,15 @@ class PhysicalPlanExecutor:
             self._cte_tables[cte_index] = self._execute_node(node.children[0])
             return self._execute_node(node.children[1])
         raise UnsupportedPlanError(f"unsupported DuckDB CTE node: {node.name}")
+
+    def _execute_set(self, node: TQPOperatorNode) -> PhysicalTable:
+        if node.name.strip().upper() != "UNION":
+            raise UnsupportedPlanError(f"unsupported set-operation node: {node.name}")
+        return execute_union_node(tuple(self._execute_node(child) for child in node.children))
+
+    def _execute_window(self, node: TQPOperatorNode) -> PhysicalTable:
+        child = self._single_child(node)
+        return execute_window_node(child, _metadata_list(node, "Projections"))
 
     def _execute_aggregate(self, node: TQPOperatorNode) -> PhysicalTable:
         child = self._single_child(node)

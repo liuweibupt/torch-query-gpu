@@ -71,6 +71,8 @@ def render_expression(expression: Mapping[str, Any]) -> str:
         return _render_cast(expression)
     if expression_class == "CASE":
         return _render_case(expression)
+    if expression_class == "WINDOW":
+        return _render_window(expression)
     if expression_class == "BETWEEN":
         return _render_between(expression)
     if expression_class == "OPERATOR":
@@ -141,6 +143,51 @@ def _render_function(expression: Mapping[str, Any]) -> str:
         return "count(*)"
     distinct = "DISTINCT " if expression.get("distinct") else ""
     return f"{name}({distinct}{', '.join(children)})"
+
+
+def _render_window(expression: Mapping[str, Any]) -> str:
+    name = _render_window_function_name(str(expression.get("function_name") or ""))
+    children = tuple(render_expression(child) for child in expression.get("children") or ())
+    distinct = "DISTINCT " if expression.get("distinct") else ""
+    arguments = f"{distinct}{', '.join(children)}"
+    spec = _render_window_spec(expression)
+    return f"{name}({arguments}) OVER ({spec})"
+
+
+def _render_window_function_name(name: str) -> str:
+    lowered = name.lower()
+    if lowered == "dense_rank":
+        return "RANK_DENSE"
+    if lowered in {"row_number", "rank", "dense_rank"}:
+        return lowered.upper()
+    return lowered
+
+
+def _render_window_spec(expression: Mapping[str, Any]) -> str:
+    parts = []
+    partitions = tuple(render_expression(child) for child in expression.get("partitions") or ())
+    orders = tuple(_render_order(order) for order in expression.get("orders") or ())
+    if partitions:
+        parts.append(f"PARTITION BY {', '.join(partitions)}")
+    if orders:
+        parts.append(f"ORDER BY {', '.join(orders)}")
+    return " ".join(parts)
+
+
+def _render_order(order: Mapping[str, Any]) -> str:
+    expression = render_expression(order.get("expression") or {})
+    direction = "DESC" if str(order.get("type") or "").upper() == "DESCENDING" else "ASC"
+    null_order = _render_null_order(str(order.get("null_order") or ""))
+    return f"{expression} {direction} {null_order}"
+
+
+def _render_null_order(null_order: str) -> str:
+    upper = null_order.upper()
+    if upper == "NULLS_FIRST":
+        return "NULLS FIRST"
+    if upper == "NULLS_LAST":
+        return "NULLS LAST"
+    return "NULLS LAST"
 
 
 def _render_binary(expression: Mapping[str, Any], operator: str) -> str:

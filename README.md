@@ -17,6 +17,7 @@
 - ✅ Q1-Q22 默认路径已迁入 DuckDB physical-plan interpreter：SQL → DuckDB JSON physical plan → `TQPOperatorGraph` → `execute_physical_plan()` → PyTorch tensor operators。
 - ✅ Q2-Q22 已从早期 graph recipes 继续推进到 DuckDB physical-plan interpreter；旧 `queries/qXX` 模板和 `compiled_tpch` root 均不再作为执行 fallback。
 - ✅ DuckDB physical-plan interpreter v1 已接入：Generic equi-join / join+group aggregate / final aggregate expression / basic HAVING / searched CASE / TOP_N 可从 SQL 直接 lowering 到 PyTorch；TPC-H Q1-Q22 已迁到该通用 interpreter，不再走 query-id recipe。
+- ✅ 通用 SQL 覆盖继续扩展：新增 DuckDB `UNION` set node 与第一批 `WINDOW` node（`row_number` / `rank` / `dense_rank` / partition aggregate window），均走 physical interpreter，不走 DuckDB result fallback。
 - ✅ Sirius-grade frontend 第一阶段：`AS`/SELECT alias 由 DuckDB `json_serialize_sql` parser AST 提取，输出 names/types 由 DuckDB `DESCRIBE` 推导，并写入 `TQPOperatorGraph.output_schema`；backend 正常路径不再末端解析 SQL alias。
 - ✅ TQP op graph 引用统一第一阶段：每个 node 生成 `TQPSlot` output schema，projection/aggregate/group/join condition 额外生成 `TQPBoundExpression.refs` 与 slot-aware `TQPExprNode`，把列名和 `#0/#1` child ordinal 统一成结构化 `SlotRef`/表达式 AST。
 - ✅ 新增 physical-only TPC-H coverage probe：直接调用 `execute_physical_plan()` 衡量哪些 TPC-H 查询已脱离 graph recipe。
@@ -288,6 +289,8 @@ DuckDB physical SEQ_SCAN / FILTER / PROJECTION
 DuckDB physical HASH_JOIN inner / multi-column equi-join（correctness-first）
 DuckDB physical HASH_GROUP_BY / PERFECT_HASH_GROUP_BY / UNGROUPED_AGGREGATE
 DuckDB physical ORDER_BY / TOP_N / LIMIT（无重复 key 的单 key TOP_N 使用 torch.topk）
+DuckDB physical UNION（UNION ALL concat；UNION DISTINCT 复用后续 HASH_GROUP_BY 去重）
+DuckDB physical WINDOW 第一批：row_number/rank/dense_rank；sum/count/avg/min/max over () / partition by
 final aggregate expression alias，例如 100 * sum(x) / sum(y)；支持 aggregate alias/order 归一化
 ```
 
@@ -462,7 +465,8 @@ Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
 - [x] Q6 默认路径已迁到 DuckDB physical-plan interpreter；`--compressed-masks` 保留显式 compressed mask primitive 实验。
 - [x] Generic equi-join / join+aggregate / final aggregate expression 已通过 DuckDB physical-plan interpreter v1 跑通。
 - [x] Physical-plan 算子热路径优化：tensor join index、sorted/unique metadata、PK/FK sorted-unique build fast path、SEMI/ANTI membership probe、sorted group-by fast path、static dictionary encoding、membership mask、alias 去重 gather/filter。
-- [ ] Generic subquery lowering、window、set operations；更复杂 `HAVING` / `CASE` SQL shapes 继续扩展。
+- [x] Generic set/window 第一批：`UNION` / `UNION DISTINCT`，`row_number` / `rank` / `dense_rank`，以及无 ordered frame 的 partition aggregate window。
+- [ ] Generic subquery lowering 继续扩展、完整 window frame、更多 set operations；更复杂 `HAVING` / `CASE` SQL shapes 继续扩展。
 - [x] 压缩数据第一批 aggregate primitive：RLE `COUNT` / `SUM` / `MIN` / `MAX` / `AVG` 基于 run lengths 执行，不展开 rows。
 - [ ] 完整 compressed storage metadata、encoded column execution、compressed aggregation/join。
 - [x] 第一版显式 `TQPOperatorGraph` 与 DuckDB JSON lowering。
@@ -481,6 +485,7 @@ Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
 | [`docs/sirius-grade-frontend.zh.md`](docs/sirius-grade-frontend.zh.md) | Sirius-grade frontend 演进说明：DuckDB parser AST、DESCRIBE schema、normalized physical metadata 与当前边界。 |
 | [`docs/slot-expression-binding.zh.md`](docs/slot-expression-binding.zh.md) | 说明 TQP op graph 如何把列名与 `#0/#1` child ordinal 统一为 `TQPSlotRef`，以及 frontend/lowering 阶段的表达式 AST 解析。 |
 | [`docs/gpu-sql-ecosystem-analysis.zh.md`](docs/gpu-sql-ecosystem-analysis.zh.md) | 对比 RAPIDS/cuDF/RMM、Sirius-like 前端、TQP/TQP++/CoddSpeed 与本项目 PyTorch 路线，分析软件栈、显存管理和复用 CUDA 算子的工程取舍。 |
+| [`docs/generic-sql-engine-roadmap.zh.md`](docs/generic-sql-engine-roadmap.zh.md) | 面向通用 SQL 引擎化的 Sirius-like 方案、operator coverage 路线，以及本轮 `UNION` / `WINDOW` 落地说明。 |
 | [`docs/gpu-db-engine-assessment.zh.html`](docs/gpu-db-engine-assessment.zh.html) | 可浏览 HTML：评估 GPU 数据库引擎为什么难写，以及当前简化 TQP/PyTorch 版本距离成熟引擎还需要补齐的能力。 |
 | [`docs/ai-tensor-db-on-domestic-gpu.zh.md`](docs/ai-tensor-db-on-domestic-gpu.zh.md) | 面向分享的完整视图：以当前 demo、TQP 和 CoddSpeed 为参考，说明如何在国产卡上复用 AI tensor / PyTorch 生态实现关系代数与数据库执行。 |
 | [`docs/tqp-coddspeed-pytorch-runtime-notes.zh.md`](docs/tqp-coddspeed-pytorch-runtime-notes.zh.md) | 补充说明：TQP/TQP++/CoddSpeed 复用 PyTorch/TCR 的能力边界，以及 PyTorch CPU/GPU kernel 并行、streams、DataLoader 与 graph/compiler fusion 的层次。 |
@@ -897,6 +902,6 @@ AST 设计要求：
 | Tensor final merge | 新增 `physical_partitionable_final.py`，partial aggregate batches 不再先转 Python row dict 合并。 | `SUM/COUNT/MIN/MAX/AVG` final merge 在 tensor 上完成；`AVG` 使用 count column 做 weighted merge。 |
 | 文档 | 新增 [`docs/scan-partitioning-design.zh.md`](docs/scan-partitioning-design.zh.md)。 | 对比 Arrow、DuckDB Arrow reader、Sirius split/coalescer；说明 push/Volcano 取舍和全局依赖算子。 |
 
-新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`；当前分组全量回归为 `390 passed, 2 skipped`。
+新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`、`tests/test_generic_sql_set_window.py`；当前分组全量回归为 `394 passed, 2 skipped`。
 
 SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `727.935 ms`，CUDA hot median 约 `561.710 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 与 final merge 均已有通用层面的改善，后续主要优化点转到 batch projection/local aggregate fusion、以及 GPU 上的 scan/compute overlap。

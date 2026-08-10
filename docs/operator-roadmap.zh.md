@@ -22,7 +22,7 @@
 - 默认链路：原始 SQL → DuckDB/Sirius-like planner admission + DuckDB parser AST alias + DESCRIBE output schema → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
 - TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1-Q22 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；历史 graph recipes 不再是默认执行路径。
-- Generic SQL：单表 projection/filter/aggregate/order/limit 子集；DuckDB physical interpreter 已支持 basic HAVING、multi-branch/simple CASE 和无重复 key 的单 key TOP_N tensor top-k。
+- Generic SQL：DuckDB physical interpreter 已支持 scan/filter/project/join/group/order/limit、basic HAVING、multi-branch/simple CASE、无重复 key 的单 key TOP_N tensor top-k，以及第一批 set/window physical nodes。
 - 压缩执行：已有 Plain/RLE/Index mask 原型，Q6 可通过 `--compressed-masks` 显式开启。
 
 ## 3. TQP verified 算子清单
@@ -88,6 +88,8 @@
 - [x] 第一版多精度 physical expression：覆盖 INT64/FP32/FP64 以及 DECIMAL
       arithmetic/comparison/CASE/scalar-subquery。
 - [x] Generic stable multi-key `ORDER BY`，支持 `ASC` / `DESC`。
+- [x] Generic `UNION` set node：`UNION ALL` 按列 concat；`UNION DISTINCT` 复用 DuckDB 后续 `HASH_GROUP_BY` 去重。
+- [x] Generic `WINDOW` 第一批：`row_number` / `rank` / `dense_rank`，以及 `sum/count/avg/min/max over () / partition by`。
 - [ ] Generic sort-based equi-join：sort、histograms、prefix sums、`bucketize`、quotient/remainder 输出索引生成。
 - [x] Typed-batch inner join indices 第一版：`inner_join_indices_batch()` 接收 `TensorRecordBatch` key columns。
 - [ ] Generic hash equi-join：hash buckets、scatter、probe、collision iteration、duplicate accumulation。

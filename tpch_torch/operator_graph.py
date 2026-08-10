@@ -22,6 +22,8 @@ class OperatorKind(StrEnum):
     LIMIT = "limit"
     CTE = "cte"
     DELIM = "delim"
+    SET = "set"
+    WINDOW = "window"
     COMPILED_TPCH = "compiled_tpch"
     UNKNOWN = "unknown"
 
