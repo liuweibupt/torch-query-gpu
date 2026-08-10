@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.duckdb_bridge import connect_database
+from tpch_torch.execution_mode import validate_execution_mode
 from tpch_torch.runner import load_sql, timed_run_sql
 
 
@@ -33,6 +34,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--partition-table", help="Enable partitionable execution over this table")
     parser.add_argument("--partition-chunk-size", type=int, help="Rows per partitionable chunk")
+    parser.add_argument(
+        "--execution-mode",
+        choices=("strict", "universal"),
+        default="strict",
+        help=(
+            "strict uses only implemented TQP operators; universal explicitly "
+            "materializes unsupported SQL through TensorRecordBatch"
+        ),
+    )
     return parser
 
 
@@ -48,6 +58,7 @@ def main() -> None:
             frontend=args.frontend,
             use_compressed_masks=args.compressed_masks,
             partition_config=_partition_config(args),
+            execution_mode=validate_execution_mode(args.execution_mode),
         )
     finally:
         con.close()

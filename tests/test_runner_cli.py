@@ -179,11 +179,12 @@ def test_run_query_main_prints_generic_query_label(monkeypatch, tmp_path, capsys
     def connect_database(path):
         return FakeConnection()
 
-    def timed_run_sql(con, sql, *, device, frontend, use_compressed_masks, partition_config):
+    def timed_run_sql(con, sql, *, device, frontend, use_compressed_masks, partition_config, execution_mode):
         assert sql == "select count(*) as n from t"
         assert frontend == "sirius"
         assert use_compressed_masks is False
         assert partition_config is None
+        assert execution_mode == "strict"
         return QueryResult(query_id=None, rows=[{"n": 2}]), 1.25
 
     monkeypatch.setattr(run_query, "connect_database", connect_database)

@@ -198,6 +198,8 @@ generic SQL：SELECT / WHERE / projection / aggregate / GROUP BY / ORDER BY / LI
 
 Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。TPC-H 所需的 delimiter/mark/nested-loop/subquery/CTE 形状已经覆盖到 correctness-first 级别；通用 `UNION` 和 `row_number/rank/dense_rank/partition aggregate` window 已有第一批支持。更一般的 generic subqueries、完整 window frame、更多 set operations 仍显式失败。
 
+如果用户显式选择 `--execution-mode universal`，执行器会先尝试上述 strict TQP/PyTorch physical path；如果缺少算子，则使用 DuckDB 执行完整 SQL，并把 Arrow result chunks 编码为 `TensorRecordBatch` / `TensorTable` 后输出。这保证功能上可执行 DuckDB 支持的嵌套 SQL，但该兼容路径不代表缺失算子已经由 PyTorch 实现。
+
 ## 7. TPC-H 支持矩阵
 
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |

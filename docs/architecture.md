@@ -210,6 +210,13 @@ row_number/rank/dense_rank/partition-aggregate window subset are supported.
 More general generic subqueries, full window frames, additional set operations,
 and HAVING shapes still fail explicitly.
 
+When users explicitly select `--execution-mode universal`, the runner first
+tries the strict TQP/PyTorch physical path.  If an operator is missing, DuckDB
+executes the full SQL and the Arrow result chunks are encoded as
+`TensorRecordBatch` / `TensorTable` before row output.  This gives functional
+coverage for nested SQL that DuckDB supports, but it does not count missing
+operators as implemented PyTorch coverage.
+
 ## TPC-H support matrix
 
 | Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | Backend shape |

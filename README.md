@@ -29,7 +29,8 @@
 - ✅ 论文驱动优化新增：physical SEMI/ANTI membership probe、sorted group-by `unique_consecutive` fast path、RLE `COUNT/SUM/MIN/MAX/AVG` primitive。
 - ✅ Q1 hot benchmark 使用 per-connection resident tensor cache，warmup 后复用已转换 lineitem tensors；Q1 fused aggregation 使用 masked `torch.bincount`，避免 selected-row payload gather。
 - ✅ 提供冷/热端到端 benchmark：`tpch-torch-benchmark`。
-- ⚠️ 当前不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes；basic HAVING 已支持，复杂 generic subquery/CTE/window/set operation 仍显式失败。
+- ✅ 新增显式 universal compatibility mode：`--execution-mode universal` 会先尝试 strict TQP/PyTorch physical interpreter；若缺少算子，则明确转入 DuckDB result → Arrow batch → `TensorRecordBatch` → `TensorTable` materialization 路径，功能上可执行 DuckDB 可执行的嵌套 SQL，不依赖 query-id 模板。
+- ⚠️ 当前 strict TQP 仍不是完整 SQL 数据库：frontend 能接收 DuckDB 可 parse/plan 的 SQL；PyTorch 后端已能解释一批 DuckDB physical plan nodes。需要“任何 SQL 都先跑出结果”时请显式使用 `--execution-mode universal`；该模式是兼容执行，不代表所有算子都已由 PyTorch 实现。
 
 ## 一图看懂架构
 
@@ -252,7 +253,7 @@ tpch-torch-validate \
   --frontend sirius
 ```
 
-Validation 会运行同一条 PyTorch 链路，并把结果与 DuckDB 对同一条原始 SQL 的执行结果比较。DuckDB 只用于 baseline，不是 fallback 输出。
+Validation 在默认 `--execution-mode strict` 下会运行同一条 PyTorch 链路，并把结果与 DuckDB 对同一条原始 SQL 的执行结果比较；此时 DuckDB 只用于 baseline，不是 fallback 输出。显式 `--execution-mode universal` 是例外：它是兼容执行模式，允许缺失算子时把 DuckDB result chunks 转成 `TensorRecordBatch`。
 
 ### 直接运行 SQL 文本或 SQL 文件
 
@@ -268,6 +269,26 @@ tpch-torch-run \
   --sql-file queries/my_query.sql \
   --device cuda
 ```
+
+如果需要先获得“功能上通用”的行为，可以显式开启 universal compatibility mode：
+
+```bash
+tpch-torch-validate \
+  --db data/tpch_sf1.duckdb \
+  --sql-file queries/new_nested.sql \
+  --device cpu \
+  --execution-mode universal
+```
+
+该模式的语义是：
+
+```text
+先尝试 strict TQP/PyTorch physical interpreter
+  -> 成功：结果来自 PyTorch/TQP operators
+  -> 缺少算子：显式使用 DuckDB 执行该 SQL，并把 Arrow result chunks 编码成 TensorRecordBatch/TensorTable
+```
+
+因此它不是 query-id 模板，也能处理 DuckDB 支持的嵌套 SQL；但 strict PyTorch operator coverage 仍以 Roadmap 为准。
 
 当前 generic SQL 支持分两层：
 
@@ -444,6 +465,7 @@ Q14 受 frontend/fetch/materialization 噪声影响未显示稳定收益。
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
 | --- | --- | --- | --- | --- |
 | Q1-Q22 | yes | partial; DuckDB exporter still blocks several complex queries | yes | DuckDB physical-plan interpreter v1 by default |
+| 任意 DuckDB 可执行 SQL（显式 `--execution-mode universal`） | yes | n/a | compatibility yes | DuckDB result → Arrow → TensorRecordBatch/TensorTable |
 | Q6 `--compressed-masks` | yes | yes | yes | explicit compressed-mask primitive experiment |
 
 说明：strict Substrait 的 blocked 是 DuckDB 原生 exporter 覆盖限制，不代表 PyTorch backend 没有这些查询的 executor。默认 Sirius-like 路径下 Q1-Q22 都先 lowering 到 `TQPOperatorGraph` 再进入 PyTorch backend。
@@ -902,6 +924,6 @@ AST 设计要求：
 | Tensor final merge | 新增 `physical_partitionable_final.py`，partial aggregate batches 不再先转 Python row dict 合并。 | `SUM/COUNT/MIN/MAX/AVG` final merge 在 tensor 上完成；`AVG` 使用 count column 做 weighted merge。 |
 | 文档 | 新增 [`docs/scan-partitioning-design.zh.md`](docs/scan-partitioning-design.zh.md)。 | 对比 Arrow、DuckDB Arrow reader、Sirius split/coalescer；说明 push/Volcano 取舍和全局依赖算子。 |
 
-新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`、`tests/test_generic_sql_set_window.py`；当前分组全量回归为 `394 passed, 2 skipped`。
+新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`、`tests/test_generic_sql_set_window.py`、`tests/test_universal_execution_mode.py`；当前分组全量回归为 `399 passed, 2 skipped`。
 
 SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `727.935 ms`，CUDA hot median 约 `561.710 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 与 final merge 均已有通用层面的改善，后续主要优化点转到 batch projection/local aggregate fusion、以及 GPU 上的 scan/compute overlap。

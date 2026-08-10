@@ -28,6 +28,15 @@ Sirius：生产系统体验优先，unsupported 可 graceful CPU fallback。
 缺失节点精确报出 operator / expression / type gap。
 ```
 
+为了满足“功能上先通用”的需求，本仓库新增一个**显式** universal compatibility mode：
+
+```text
+--execution-mode strict      ：只允许 strict TQP/PyTorch physical operators，缺算子即失败。
+--execution-mode universal   ：先试 strict；缺算子时用 DuckDB 执行 SQL，再把 Arrow result chunks 转成 TensorRecordBatch/TensorTable。
+```
+
+这个模式不是 query-id 模板，也不是静默 fallback；它是用户显式选择的兼容执行模式，用于保证任意 DuckDB 可执行 SQL 能先通过统一 columnar ABI 出结果。strict operator coverage 仍按 Roadmap 持续补齐。
+
 ## 2. 对 Sirius / 成熟数据库的抽象拆解
 
 ### 2.1 Sirius-like 前端原则
@@ -49,7 +58,7 @@ Sirius 不是靠 query-id 模板实现 TPC-H，而是：
 | GPU physical operators | `backend/physical*.py` + PyTorch tensor ops | window/set/outer join/recursive 等还需扩展 |
 | Vectorized pipeline | scan/partitionable batch pipeline 已有 `next_batch()` | join/sort/window 仍主要 materialized whole-table |
 | Memory manager | resident tensor cache + chunk config | 还没有 RMM 级 allocator / spill manager |
-| Unsupported behavior | 显式 `UnsupportedPlanError` | 这是设计选择，不做静默 fallback |
+| Unsupported behavior | strict 下显式 `UnsupportedPlanError`；universal 下显式 DuckDB result → TensorRecordBatch materialization | universal 是功能兼容模式，不代表对应算子已由 PyTorch 实现 |
 
 ### 2.2 通用化的核心不是“任意 SQL parser”
 
@@ -112,6 +121,35 @@ DuckDB WINDOW node
 
 这不是 TPC-H 特化；它覆盖所有 lowering 到上述 DuckDB `WINDOW` physical projection 的 SQL。
 
+### 3.3 Universal compatibility mode + TensorRecordBatch
+
+新增：
+
+```text
+tpch_torch/backend/universal.py
+```
+
+执行链路：
+
+```text
+arbitrary SQL
+  -> DuckDB execute
+  -> Arrow RecordBatchReader(rows_per_batch=N)
+  -> TensorRecordBatch.from_storages()
+  -> TensorTable.from_batch()
+  -> result rows
+```
+
+该路径覆盖 DuckDB 能执行的嵌套 SQL，包括 strict physical interpreter 尚未实现的 window frame、复杂 projection 或其他高级 plan。它仍然经过 `TensorRecordBatch`：
+
+- INT / HUGEINT / unsigned integer：`ColumnStorage.fixed(torch.int64)`。
+- FP32 / FP64：`ColumnStorage.fixed(torch.float32/float64)`。
+- DECIMAL：`ColumnStorage.decimal64(scaled int64)`，保留 precision/scale。
+- DATE：`YYYYMMDD int32`，`ColumnType.date`。
+- VARCHAR / unknown scalar：dictionary ids，保留 validity mask。
+
+限制：nested/list/struct 结果列目前会被视为字符串兼容列；这保证功能路径可跑，但不是最终 nested columnar execution。
+
 ## 4. 后续 Roadmap：从 TPC-H coverage 到通用 DBMS coverage
 
 ### P0：SQL admission 和失败定位
@@ -119,6 +157,7 @@ DuckDB WINDOW node
 - [x] 默认 SQL 输入经过 DuckDB parser/DESCRIBE/EXPLAIN JSON。
 - [x] plan lowering 生成 typed `TQPOperatorGraph`。
 - [x] `TQPSlot` 统一列名和 `#N` ordinal。
+- [x] 显式 `--execution-mode universal`：任意 DuckDB 可执行 SQL 可通过 Arrow → TensorRecordBatch materialization 跑通。
 - [ ] 增加 `tpch-torch-explain-coverage`：输出缺失 physical node、表达式、类型、是否可 chunk/pipeline。
 - [ ] 每个 `UnsupportedPlanError` 附带 node id、operator name、metadata snippet。
 
@@ -158,7 +197,8 @@ DuckDB WINDOW node
 但它已经不是 TPC-H query-id 模板系统。
 它是一个 DuckDB-planned、coverage-driven 的 TQP/PyTorch physical engine。
 任意 SQL 都可尝试 admission；执行成功取决于 physical node/operator coverage。
-新增 SQL coverage 必须通过通用 operator 实现，不允许 query-specific Python 脚本或 DuckDB result fallback。
+strict 模式新增 SQL coverage 必须通过通用 operator 实现，不允许 query-specific Python 脚本或 DuckDB result fallback。
+universal 模式用于功能兼容：任意 DuckDB 可执行 SQL 可以先落到 TensorRecordBatch ABI，但该路径中的缺失算子由 DuckDB 执行，不计入 strict PyTorch operator coverage。
 ```
 
 ## 参考

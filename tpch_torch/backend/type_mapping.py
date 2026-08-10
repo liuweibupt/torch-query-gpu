@@ -24,7 +24,18 @@ def column_meta_from_duckdb_type(duckdb_type: str, *, nullable: bool = False) ->
             scale=int(decimal_match.group(2)),
             nullable=nullable,
         )
-    if normalized in {"BIGINT", "INTEGER", "INT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER"}:
+    if normalized in {
+        "BIGINT",
+        "HUGEINT",
+        "INTEGER",
+        "INT",
+        "SMALLINT",
+        "TINYINT",
+        "UBIGINT",
+        "UINTEGER",
+        "USMALLINT",
+        "UTINYINT",
+    }:
         return ColumnMeta.int64(nullable=nullable)
     if normalized in {"FLOAT", "REAL"}:
         return ColumnMeta.fp32(nullable=nullable)
@@ -53,7 +64,18 @@ def column_type_from_duckdb_type(
         precision = int(decimal_match.group(1))
         scale = int(decimal_match.group(2))
         return ColumnType.decimal(name, precision=precision, scale=scale, nullable=nullable)
-    if normalized in {"BIGINT", "INTEGER", "INT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER"}:
+    if normalized in {
+        "BIGINT",
+        "HUGEINT",
+        "INTEGER",
+        "INT",
+        "SMALLINT",
+        "TINYINT",
+        "UBIGINT",
+        "UINTEGER",
+        "USMALLINT",
+        "UTINYINT",
+    }:
         return ColumnType.int64(name, nullable=nullable)
     if normalized in {"FLOAT", "REAL"}:
         return ColumnType.fp32(name, nullable=nullable)

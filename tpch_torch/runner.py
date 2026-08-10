@@ -11,8 +11,12 @@ import torch
 from tpch_torch.backend import PyTorchBackend
 from tpch_torch.backend.physical_chunked import ScanChunkConfig
 from tpch_torch.backend.physical_partitionable import PartitionConfig
+from tpch_torch.backend.universal import execute_universal_sql
+from tpch_torch.execution_mode import ExecutionMode, validate_execution_mode
+from tpch_torch.errors import UnsupportedPlanError
 from tpch_torch.frontend import compile_sirius_plan, compile_substrait_plan
 from tpch_torch.ir import FrontendName, TQPPlan
+from tpch_torch.planner import DuckDBPlannerError
 from tpch_torch.relational import QueryResult, SQLValidationResult, compare_rows, run_duckdb_sql
 from tpch_torch.sql import get_tpch_query
 
@@ -42,6 +46,7 @@ def run_sql(
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
     scan_chunk_config: ScanChunkConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
 ) -> QueryResult:
     return run_sql_with_frontend(
         con,
@@ -51,6 +56,7 @@ def run_sql(
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
         scan_chunk_config=scan_chunk_config,
+        execution_mode=execution_mode,
     )
 
 
@@ -62,9 +68,21 @@ def run_sql_with_frontend(
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
     scan_chunk_config: ScanChunkConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
 ) -> QueryResult:
     _validate_device(device)
-    plan = compile_tqp_plan(con, sql, frontend)
+    mode = validate_execution_mode(execution_mode)
+    try:
+        plan = compile_tqp_plan(con, sql, frontend)
+    except DuckDBPlannerError as exc:
+        if mode != "universal":
+            raise
+        if use_compressed_masks or partition_config is not None or scan_chunk_config is not None:
+            raise UnsupportedPlanError(
+                "universal compatibility materialization cannot be combined "
+                "with compressed, partition, or scan chunk modes"
+            ) from exc
+        return QueryResult(query_id=None, rows=execute_universal_sql(con, sql, device=device))
     rows = PyTorchBackend().execute(
         con,
         plan,
@@ -72,6 +90,7 @@ def run_sql_with_frontend(
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
         scan_chunk_config=scan_chunk_config,
+        execution_mode=mode,
     )
     return QueryResult(query_id=plan.query_id, rows=rows)
 
@@ -83,6 +102,7 @@ def validate_sql(
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
     scan_chunk_config: ScanChunkConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
 ) -> SQLValidationResult:
     return validate_sql_with_frontend(
         con,
@@ -92,6 +112,7 @@ def validate_sql(
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
         scan_chunk_config=scan_chunk_config,
+        execution_mode=execution_mode,
     )
 
 
@@ -103,6 +124,7 @@ def validate_sql_with_frontend(
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
     scan_chunk_config: ScanChunkConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
 ) -> SQLValidationResult:
     result = run_sql_with_frontend(
         con,
@@ -112,6 +134,7 @@ def validate_sql_with_frontend(
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
         scan_chunk_config=scan_chunk_config,
+        execution_mode=execution_mode,
     )
     duckdb_rows = run_duckdb_sql(con, sql)
     max_abs_error = compare_rows(duckdb_rows, result.rows)
@@ -132,6 +155,7 @@ def timed_run_sql(
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
     scan_chunk_config: ScanChunkConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
 ) -> tuple[QueryResult, float]:
     if device == "cuda":
         start = torch.cuda.Event(enable_timing=True)
@@ -145,6 +169,7 @@ def timed_run_sql(
             use_compressed_masks=use_compressed_masks,
             partition_config=partition_config,
             scan_chunk_config=scan_chunk_config,
+            execution_mode=execution_mode,
         )
         end.record()
         torch.cuda.synchronize()
@@ -158,6 +183,7 @@ def timed_run_sql(
         use_compressed_masks=use_compressed_masks,
         partition_config=partition_config,
         scan_chunk_config=scan_chunk_config,
+        execution_mode=execution_mode,
     )
     return result, (perf_counter() - start_time) * 1000.0
 

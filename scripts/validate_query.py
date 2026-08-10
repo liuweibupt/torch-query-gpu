@@ -9,6 +9,7 @@ from typing import Callable
 
 from tpch_torch.backend.physical_partitionable import PartitionConfig
 from tpch_torch.duckdb_bridge import connect_database
+from tpch_torch.execution_mode import ExecutionMode, validate_execution_mode
 from tpch_torch.ir import FrontendName
 from tpch_torch.relational import SQLValidationResult
 from tpch_torch.runner import load_sql, validate_sql_with_frontend
@@ -19,7 +20,7 @@ FIRST_TPCH_QUERY_ID = 1
 LAST_TPCH_QUERY_ID = 22
 ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
-QueryValidator = Callable[[object, str, str, FrontendName, bool, PartitionConfig | None], SQLValidationResult]
+QueryValidator = Callable[..., SQLValidationResult]
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--partition-table", help="Enable partitionable execution over this table")
     parser.add_argument("--partition-chunk-size", type=int, help="Rows per partitionable chunk")
+    parser.add_argument(
+        "--execution-mode",
+        choices=("strict", "universal"),
+        default="strict",
+        help=(
+            "strict uses only implemented TQP operators; universal explicitly "
+            "materializes unsupported SQL through TensorRecordBatch"
+        ),
+    )
     parser.add_argument("--tolerance", type=float, default=DEFAULT_SQL_TOLERANCE)
     return parser
 
@@ -77,6 +87,7 @@ def validate_queries(
     frontend: FrontendName = "sirius",
     use_compressed_masks: bool = False,
     partition_config: PartitionConfig | None = None,
+    execution_mode: ExecutionMode = "strict",
     load_query: QueryLoader = get_tpch_query,
     validator: QueryValidator = validate_sql_with_frontend,
 ) -> list[BatchValidationRecord]:
@@ -91,6 +102,7 @@ def validate_queries(
                 frontend=frontend,
                 use_compressed_masks=use_compressed_masks,
                 partition_config=partition_config,
+                execution_mode=execution_mode,
                 load_query=load_query,
                 validator=validator,
             )
@@ -114,9 +126,18 @@ def _validate_one_query(
     validator: QueryValidator,
     use_compressed_masks: bool,
     partition_config: PartitionConfig | None,
+    execution_mode: ExecutionMode,
 ) -> BatchValidationRecord:
     sql = load_query(con, query_id)
-    result = validator(con, sql, device, frontend, use_compressed_masks, partition_config)
+    result = validator(
+        con,
+        sql,
+        device=device,
+        frontend=frontend,
+        use_compressed_masks=use_compressed_masks,
+        partition_config=partition_config,
+        execution_mode=execution_mode,
+    )
     if result.max_abs_error > tolerance:
         raise AssertionError(
             f"Q{result.query_id} validation failed: "
@@ -145,6 +166,7 @@ def main() -> None:
                 frontend=args.frontend,
                 use_compressed_masks=args.compressed_masks,
                 partition_config=_partition_config(args),
+                execution_mode=validate_execution_mode(args.execution_mode),
             )
             _print_batch_records(records)
             _raise_on_batch_failures(records)
@@ -157,6 +179,7 @@ def main() -> None:
             frontend=args.frontend,
             use_compressed_masks=args.compressed_masks,
             partition_config=_partition_config(args),
+            execution_mode=validate_execution_mode(args.execution_mode),
         )
     finally:
         con.close()
