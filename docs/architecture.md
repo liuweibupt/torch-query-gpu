@@ -217,6 +217,12 @@ executes the full SQL and the Arrow result chunks are encoded as
 coverage for nested SQL that DuckDB supports, but it does not count missing
 operators as implemented PyTorch coverage.
 
+`tpch-torch-explain` / `tpch_torch.sql_admission` now provides framework-level
+SQL admission without executing the query: any DuckDB parseable/plannable SQL is
+lowered to `TQPOperatorGraph`, then a static strict-coverage report lists
+missing TQP/PyTorch operator gaps.  This separates "the SQL entered the common
+framework" from "the strict backend can execute every operator".
+
 ## TPC-H support matrix
 
 | Query set | Default Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | Backend shape |

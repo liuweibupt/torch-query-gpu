@@ -39,6 +39,14 @@ Sirius：生产系统体验优先，unsupported 可 graceful CPU fallback。
 
 实现约束：`universal` 必须是 `strict` 的功能超集。已经由 strict TQP/PyTorch physical operators 覆盖的查询，包括 TPC-H Q1-Q22，会先走 strict；只有 strict 报出缺失算子时才进入 DuckDB result → TensorRecordBatch materialization。批量验证 CLI 会按 query 流式打印进度，避免长时间无输出被误判为失败。
 
+本轮新增 framework-level admission：
+
+```text
+tpch-torch-explain --db ... --sql-file ...
+```
+
+该命令不执行 SQL，只做 DuckDB parse/bind/optimize、`EXPLAIN JSON` lowering、`TQPOperatorGraph` slot binding，以及 static strict coverage report。它用于回答“这个 SQL 是否已经进入统一框架”和“strict 后端还缺哪个算子/表达式”，避免只能在执行阶段才发现 gap。
+
 ## 2. 对 Sirius / 成熟数据库的抽象拆解
 
 ### 2.1 Sirius-like 前端原则
@@ -56,7 +64,7 @@ Sirius 不是靠 query-id 模板实现 TPC-H，而是：
 | Sirius / 成熟 DB 组件 | 本仓库现状 | 差距 |
 | --- | --- | --- |
 | DuckDB parser/binder/optimizer | `compile_sirius_plan()` 使用 DuckDB `json_serialize_sql`、`DESCRIBE`、`EXPLAIN JSON` | Python API 拿不到完整 bound expression C++ 对象 |
-| Plan IR | `TQPOperatorGraph` + `TQPSlot` / `TQPBoundExpression` | slot AST 尚未完全替换字符串 expression executor |
+| Plan IR | `TQPOperatorGraph` + `TQPSlot` / `TQPBoundExpression` + `sql_admission.py` static coverage | slot AST 尚未完全替换字符串 expression executor |
 | GPU physical operators | `backend/physical*.py` + PyTorch tensor ops | window/set/outer join/recursive 等还需扩展 |
 | Vectorized pipeline | scan/partitionable batch pipeline 已有 `next_batch()` | join/sort/window 仍主要 materialized whole-table |
 | Memory manager | resident tensor cache + chunk config | 还没有 RMM 级 allocator / spill manager |
@@ -152,6 +160,32 @@ arbitrary SQL
 
 限制：nested/list/struct 结果列目前会被视为字符串兼容列；这保证功能路径可跑，但不是最终 nested columnar execution。
 
+### 3.4 Framework admission / explain coverage
+
+新增：
+
+```text
+tpch_torch/sql_admission.py
+scripts/explain_query.py
+```
+
+执行链路：
+
+```text
+arbitrary SQL
+  -> compile_sirius_plan()
+  -> TQPOperatorGraph
+  -> analyze_strict_coverage(graph)
+```
+
+coverage report 包含：
+
+- `strict_admissible`：静态看是否所有 node 都有 strict TQP/PyTorch 执行入口。
+- `node_count`：lowering 后的 physical graph 节点数。
+- `gaps`：`node_id / node_name / node_kind / reason`，例如完整 window frame 会报告 `aggregate WINDOW with ORDER BY frame is not supported yet`。
+
+这个报告不是 runtime correctness proof：表达式、NULL、dtype、数据分布仍可能在执行时暴露更细 gap。但它把“SQL 解析/计划是否进入框架”和“后端缺算子”分开，符合成熟数据库的 admission → planning → execution 分层。
+
 ## 4. 后续 Roadmap：从 TPC-H coverage 到通用 DBMS coverage
 
 ### P0：SQL admission 和失败定位
@@ -160,6 +194,7 @@ arbitrary SQL
 - [x] plan lowering 生成 typed `TQPOperatorGraph`。
 - [x] `TQPSlot` 统一列名和 `#N` ordinal。
 - [x] 显式 `--execution-mode universal`：任意 DuckDB 可执行 SQL 可通过 Arrow → TensorRecordBatch materialization 跑通。
+- [x] `tpch-torch-explain`：任意 DuckDB 可 parse/plan SQL 可 lowering 到 `TQPOperatorGraph`，并输出 strict static coverage gaps。
 - [ ] 增加 `tpch-torch-explain-coverage`：输出缺失 physical node、表达式、类型、是否可 chunk/pipeline。
 - [ ] 每个 `UnsupportedPlanError` 附带 node id、operator name、metadata snippet。
 

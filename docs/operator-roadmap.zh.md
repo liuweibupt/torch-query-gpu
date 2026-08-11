@@ -22,7 +22,7 @@
 - 默认链路：原始 SQL → DuckDB/Sirius-like planner admission + DuckDB parser AST alias + DESCRIBE output schema → `TQPPlan` → PyTorch CPU/CUDA 算子。
 - 实验链路：原始 SQL → DuckDB native Substrait JSON → `TQPPlan` → PyTorch；无伪造 JSON，无自动 fallback。
 - TPC-H：默认 Sirius-like 路径下 Q1-Q22 均先 lowering 到 `TQPOperatorGraph`；Q1-Q22 默认已由 DuckDB physical-plan interpreter 执行；Q6 `--compressed-masks` 保留为显式 primitive 实验；历史 graph recipes 不再是默认执行路径。
-- Generic SQL：DuckDB physical interpreter 已支持 scan/filter/project/join/group/order/limit、basic HAVING、multi-branch/simple CASE、无重复 key 的单 key TOP_N tensor top-k，以及第一批 set/window physical nodes；显式 `--execution-mode universal` 可把缺失算子的 DuckDB result chunks 编码为 `TensorRecordBatch`，作为功能兼容路径。
+- Generic SQL：DuckDB physical interpreter 已支持 scan/filter/project/join/group/order/limit、basic HAVING、multi-branch/simple CASE、无重复 key 的单 key TOP_N tensor top-k，以及第一批 set/window physical nodes；`tpch-torch-explain` 可对任意 DuckDB 可 parse/plan SQL 生成 `TQPOperatorGraph` 与 strict coverage report；显式 `--execution-mode universal` 可把缺失算子的 DuckDB result chunks 编码为 `TensorRecordBatch`，作为功能兼容路径。
 - 压缩执行：已有 Plain/RLE/Index mask 原型，Q6 可通过 `--compressed-masks` 显式开启。
 
 ## 3. TQP verified 算子清单
@@ -80,6 +80,7 @@
 - [x] DuckDB scan table schema：scan node metadata / `TQPSlot.type_name` 携带 base column type，包含 `DECIMAL(p,s)`。
 - [x] TQP slot reference / expression view 第一版：`TQPSlot` / `TQPSlotRef` / `TQPBoundExpression` / `TQPExprNode` 把 projection、aggregate、group、join condition 中的列名和 `#0/#1` ordinal 统一为 graph-level slot refs 与基础表达式 AST。
 - [x] Universal compatibility record batches：任意 DuckDB 可执行 SQL 的 Arrow result 可流式转成 `TensorRecordBatch` / `TensorTable`，支持 INT/HUGEINT/FP/DECIMAL/DATE/VARCHAR dictionary scalar result columns。
+- [x] Framework admission coverage：`tpch_torch/sql_admission.py` + `tpch-torch-explain` 将任意 DuckDB 可 parse/plan SQL lowering 到 graph，并静态输出 strict gaps。
 - [ ] DuckDB expression string/JSON → TypedExpr binder：替换 `physical_expr.py` 的字符串递归入口。
 - [x] Expression DAG optimizer 第一版：constant folding、CSE、DECIMAL add/sub scale hoisting。
 - [ ] Expression DAG optimizer 完整版：predicate normalization、validity propagation、更多 DECIMAL/STRING 规则。

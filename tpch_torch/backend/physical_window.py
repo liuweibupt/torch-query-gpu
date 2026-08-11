@@ -37,6 +37,21 @@ def execute_window_node(child: PhysicalTable, projections: Sequence[str]) -> Phy
     return PhysicalTable.projected("window", items, child.row_count)
 
 
+def validate_window_projection_support(projections: Sequence[str]) -> tuple[str, ...]:
+    """Return static strict-execution gaps for DuckDB WINDOW projections."""
+
+    gaps = []
+    for projection in projections:
+        try:
+            call = _parse_window_call(projection)
+        except UnsupportedPlanError as exc:
+            gaps.append(str(exc))
+            continue
+        if call.function in _AGGREGATE_FUNCTIONS and call.order_by:
+            gaps.append("aggregate WINDOW with ORDER BY frame is not supported yet")
+    return tuple(gaps)
+
+
 def _parse_window_call(projection: str) -> WindowCall:
     match = re.fullmatch(r'"?([A-Za-z_][\w]*)"?\s*\((.*)\)\s+OVER\s*\((.*)\)', projection.strip(), re.I | re.S)
     if match is None:

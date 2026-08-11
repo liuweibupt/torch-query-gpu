@@ -1,6 +1,7 @@
 from pathlib import Path
 import pytest
 
+from scripts.explain_query import build_parser as explain_parser
 from scripts.run_query import build_parser as run_parser
 from scripts.validate_query import build_parser as validate_parser
 from scripts.validate_query import parse_query_ids as parse_validate_query_ids
@@ -28,6 +29,15 @@ def test_validate_parser_accepts_sql_file(tmp_path):
     args = validate_parser().parse_args(["--db", str(tmp_path / "tpch.duckdb"), "--sql-file", str(sql_path)])
 
     assert args.sql_file == sql_path
+
+
+def test_explain_parser_accepts_inline_sql_and_json(tmp_path):
+    args = explain_parser().parse_args(
+        ["--db", str(tmp_path / "tpch.duckdb"), "--sql", "select 1", "--json"]
+    )
+
+    assert args.sql == "select 1"
+    assert args.json is True
 
 
 def test_validate_parser_accepts_batch_queries_with_frontend(tmp_path):

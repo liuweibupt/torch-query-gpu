@@ -11,3 +11,4 @@ def test_public_entrypoints_exclude_removed_q1_json_commands():
     assert scripts["tpch-torch-run"] == "scripts.run_query:main"
     assert scripts["tpch-torch-validate"] == "scripts.validate_query:main"
     assert scripts["tpch-torch-benchmark"] == "scripts.benchmark_query:main"
+    assert scripts["tpch-torch-explain"] == "scripts.explain_query:main"

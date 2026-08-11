@@ -200,6 +200,8 @@ Generic joins 已通过 DuckDB physical-plan interpreter 部分支持。TPC-H �
 
 如果用户显式选择 `--execution-mode universal`，执行器会先尝试上述 strict TQP/PyTorch physical path；如果缺少算子，则使用 DuckDB 执行完整 SQL，并把 Arrow result chunks 编码为 `TensorRecordBatch` / `TensorTable` 后输出。这保证功能上可执行 DuckDB 支持的嵌套 SQL，但该兼容路径不代表缺失算子已经由 PyTorch 实现。
 
+新增 `tpch-torch-explain` / `tpch_torch.sql_admission` 作为框架级 SQL admission：不执行 SQL，只把任意 DuckDB 可 parse/plan 的 SQL lowering 到 `TQPOperatorGraph`，并静态报告 strict TQP/PyTorch coverage gaps。这把“SQL 能否进入统一框架”和“后端算子是否已覆盖”两个问题拆开。
+
 ## 7. TPC-H 支持矩阵
 
 | Query set | 默认 Sirius-like frontend | Strict DuckDB Substrait frontend | PyTorch backend | 当前后端形态 |
