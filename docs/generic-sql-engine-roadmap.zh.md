@@ -37,6 +37,8 @@ Sirius：生产系统体验优先，unsupported 可 graceful CPU fallback。
 
 这个模式不是 query-id 模板，也不是静默 fallback；它是用户显式选择的兼容执行模式，用于保证任意 DuckDB 可执行 SQL 能先通过统一 columnar ABI 出结果。strict operator coverage 仍按 Roadmap 持续补齐。
 
+实现约束：`universal` 必须是 `strict` 的功能超集。已经由 strict TQP/PyTorch physical operators 覆盖的查询，包括 TPC-H Q1-Q22，会先走 strict；只有 strict 报出缺失算子时才进入 DuckDB result → TensorRecordBatch materialization。批量验证 CLI 会按 query 流式打印进度，避免长时间无输出被误判为失败。
+
 ## 2. 对 Sirius / 成熟数据库的抽象拆解
 
 ### 2.1 Sirius-like 前端原则

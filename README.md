@@ -255,6 +255,8 @@ tpch-torch-validate \
 
 Validation 在默认 `--execution-mode strict` 下会运行同一条 PyTorch 链路，并把结果与 DuckDB 对同一条原始 SQL 的执行结果比较；此时 DuckDB 只用于 baseline，不是 fallback 输出。显式 `--execution-mode universal` 是例外：它是兼容执行模式，允许缺失算子时把 DuckDB result chunks 转成 `TensorRecordBatch`。
 
+批量验证 `--queries all` 会按 query 流式输出每个完成项，避免长查询或 universal 兼容路径下看起来“卡住”。当前 SF=1 上 `--execution-mode universal --queries all` 已验证 Q1-Q22 均通过；其中 strict 已覆盖的 TPC-H query 会先走 strict TQP/PyTorch physical path。
+
 ### 直接运行 SQL 文本或 SQL 文件
 
 ```bash
@@ -924,6 +926,6 @@ AST 设计要求：
 | Tensor final merge | 新增 `physical_partitionable_final.py`，partial aggregate batches 不再先转 Python row dict 合并。 | `SUM/COUNT/MIN/MAX/AVG` final merge 在 tensor 上完成；`AVG` 使用 count column 做 weighted merge。 |
 | 文档 | 新增 [`docs/scan-partitioning-design.zh.md`](docs/scan-partitioning-design.zh.md)。 | 对比 Arrow、DuckDB Arrow reader、Sirius split/coalescer；说明 push/Volcano 取舍和全局依赖算子。 |
 
-新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`、`tests/test_generic_sql_set_window.py`、`tests/test_universal_execution_mode.py`；当前分组全量回归为 `399 passed, 2 skipped`。
+新增/更新测试覆盖：`tests/test_physical_record_batch_backing.py`、`tests/test_scan_chunk_execution.py`、`tests/test_physical_plan.py`、`tests/test_partitionable_execution.py`、`tests/test_partitionable_final_merge.py`、`tests/test_generic_sql_set_window.py`、`tests/test_universal_execution_mode.py`；当前分组全量回归为 `400 passed, 2 skipped`。
 
 SF=1 观测：partitionable Q1（`chunk_size=1_000_000`）CPU hot median 约 `727.935 ms`，CUDA hot median 约 `561.710 ms`；scan-only 读取 Q1 所需列从约 `0.86 s` 降到约 `0.45 s`。这说明 scan source 与 final merge 均已有通用层面的改善，后续主要优化点转到 batch projection/local aggregate fusion、以及 GPU 上的 scan/compute overlap。

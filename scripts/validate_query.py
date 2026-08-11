@@ -21,6 +21,7 @@ LAST_TPCH_QUERY_ID = 22
 ALL_TPCH_QUERY_IDS = tuple(range(FIRST_TPCH_QUERY_ID, LAST_TPCH_QUERY_ID + 1))
 QueryLoader = Callable[[object, int], str]
 QueryValidator = Callable[..., SQLValidationResult]
+BatchProgress = Callable[["BatchValidationRecord"], None]
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ def validate_queries(
     execution_mode: ExecutionMode = "strict",
     load_query: QueryLoader = get_tpch_query,
     validator: QueryValidator = validate_sql_with_frontend,
+    on_record: BatchProgress | None = None,
 ) -> list[BatchValidationRecord]:
     records: list[BatchValidationRecord] = []
     for query_id in query_ids:
@@ -109,9 +111,12 @@ def validate_queries(
         except Exception as exc:
             if not keep_going:
                 raise
-            records.append(BatchValidationRecord(query_id=query_id, ok=False, message=str(exc)))
+            record = BatchValidationRecord(query_id=query_id, ok=False, message=str(exc))
+            records.append(record)
+            _emit_progress(record, on_record)
             continue
         records.append(record)
+        _emit_progress(record, on_record)
     return records
 
 
@@ -138,13 +143,14 @@ def _validate_one_query(
         partition_config=partition_config,
         execution_mode=execution_mode,
     )
+    result_query_id = result.query_id if result.query_id is not None else query_id
     if result.max_abs_error > tolerance:
         raise AssertionError(
-            f"Q{result.query_id} validation failed: "
+            f"Q{result_query_id} validation failed: "
             f"max_abs_error={result.max_abs_error} tolerance={tolerance}"
         )
     return BatchValidationRecord(
-        query_id=result.query_id,
+        query_id=result_query_id,
         ok=True,
         message="validated",
         row_count=result.row_count,
@@ -157,6 +163,7 @@ def main() -> None:
     con = connect_database(args.db)
     try:
         if args.queries is not None:
+            printed_query_ids: set[int] = set()
             records = validate_queries(
                 con,
                 parse_query_ids(args.queries),
@@ -167,8 +174,11 @@ def main() -> None:
                 use_compressed_masks=args.compressed_masks,
                 partition_config=_partition_config(args),
                 execution_mode=validate_execution_mode(args.execution_mode),
+                on_record=_progress_printer(printed_query_ids),
             )
-            _print_batch_records(records)
+            _print_batch_records(
+                [record for record in records if record.query_id not in printed_query_ids]
+            )
             _raise_on_batch_failures(records)
             return
         sql = load_sql(con, query=args.query, sql=args.sql, sql_file=args.sql_file)
@@ -204,13 +214,31 @@ def _partition_config(args: argparse.Namespace) -> PartitionConfig | None:
 
 def _print_batch_records(records: list[BatchValidationRecord]) -> None:
     for record in records:
-        if record.ok:
-            print(
-                f"validated query={record.query_id} rows={record.row_count} "
-                f"max_abs_error={record.max_abs_error:.6g}"
-            )
-            continue
-        print(f"failed query={record.query_id} {record.message}")
+        _print_batch_record(record)
+
+
+def _print_batch_record(record: BatchValidationRecord) -> None:
+    if record.ok:
+        print(
+            f"validated query={record.query_id} rows={record.row_count} "
+            f"max_abs_error={record.max_abs_error:.6g}",
+            flush=True,
+        )
+        return
+    print(f"failed query={record.query_id} {record.message}", flush=True)
+
+
+def _progress_printer(printed_query_ids: set[int]) -> BatchProgress:
+    def print_record(record: BatchValidationRecord) -> None:
+        printed_query_ids.add(record.query_id)
+        _print_batch_record(record)
+
+    return print_record
+
+
+def _emit_progress(record: BatchValidationRecord, on_record: BatchProgress | None) -> None:
+    if on_record is not None:
+        on_record(record)
 
 
 def _raise_on_batch_failures(records: list[BatchValidationRecord]) -> None:

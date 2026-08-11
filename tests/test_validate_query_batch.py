@@ -8,10 +8,10 @@ class FakeConnection:
     pass
 
 
-def _result(query_id: int) -> SQLValidationResult:
+def _result(query_id: int | None) -> SQLValidationResult:
     return SQLValidationResult(
         query_id=query_id,
-        row_count=query_id,
+        row_count=query_id or 0,
         max_abs_error=0.0,
         duckdb_rows=[],
         pytorch_rows=[],
@@ -75,6 +75,32 @@ def test_validate_queries_keep_going_records_failures():
     assert "backend unsupported" in results[1].message
 
 
+def test_validate_queries_streams_records_and_preserves_requested_query_id():
+    streamed = []
+
+    def load_query(con, query_id):
+        return f"select -- q{query_id}"
+
+    def validator(con, sql, *, device, frontend, use_compressed_masks, partition_config, execution_mode):
+        assert execution_mode == "universal"
+        return _result(None)
+
+    results = validate_queries(
+        FakeConnection(),
+        (7,),
+        device="cpu",
+        tolerance=1e-2,
+        keep_going=False,
+        execution_mode="universal",
+        load_query=load_query,
+        validator=validator,
+        on_record=streamed.append,
+    )
+
+    assert [record.query_id for record in results] == [7]
+    assert streamed == results
+
+
 def test_validate_queries_without_keep_going_raises_first_failure():
     def load_query(con, query_id):
         return f"select -- q{query_id}"
@@ -123,6 +149,7 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
         use_compressed_masks,
         partition_config,
         execution_mode,
+        on_record,
     ):
         calls.append(
             (
@@ -137,7 +164,7 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
                 execution_mode,
             )
         )
-        return [
+        records = [
             validate_query.BatchValidationRecord(
                 query_id=1,
                 ok=True,
@@ -153,6 +180,9 @@ def test_main_runs_batch_validation_branch(monkeypatch, tmp_path, capsys):
                 max_abs_error=0.001,
             ),
         ]
+        for record in records:
+            on_record(record)
+        return records
 
     monkeypatch.setattr(validate_query, "connect_database", connect_database)
     monkeypatch.setattr(validate_query, "validate_queries", validate_batch)
